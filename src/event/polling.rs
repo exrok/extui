@@ -101,10 +101,9 @@ pub fn resize_waker() -> std::io::Result<&'static Waker> {
 // This module contains the public-facing Waker struct, but its internal
 // implementation is chosen at compile time based on the target OS.
 mod waker {
-    use super::*;
-    // --- Linux-Optimized Implementation using eventfd ---
     #[cfg(target_os = "linux")]
     pub use self::linux_impl::*;
+    use super::*;
     #[cfg(target_os = "linux")]
     mod linux_impl {
         use super::*;
@@ -190,7 +189,6 @@ mod waker {
         }
     }
 
-    // --- POSIX (macOS, BSD, etc.) Implementation using pipe ---
     #[cfg(not(target_os = "linux"))]
     pub use self::portable_impl::*;
     #[cfg(not(target_os = "linux"))]
@@ -227,17 +225,23 @@ mod waker {
                 Ok(Waker { read_fd, write_fd })
             }
 
-            pub fn wake(&self) {
+            /// Wakes up any thread waiting on this waker.
+            ///
+            /// # Errors
+            ///
+            /// Returns an error if the write operation fails.
+            pub fn wake(&self) -> io::Result<()> {
                 let buf = [1u8];
                 loop {
                     // unsafe: calling C function from libc
                     if unsafe { libc::write(self.write_fd, buf.as_ptr() as *const _, 1) } == -1 {
-                        if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+                        let err = io::Error::last_os_error();
+                        if err.kind() == io::ErrorKind::Interrupted {
                             continue;
                         }
-                        return;
+                        return Err(err);
                     } else {
-                        return;
+                        return Ok(());
                     }
                 }
             }
