@@ -1,6 +1,6 @@
 # extui: Exrok's Minimal Unix TUI Crate
 
-extui provides powerful primitives and low-level access for terminal interfaces tighly
+extui provides powerful primitives and low-level access for terminal interfaces tightly
 integrated together in a single crate.
 
 [![Crates.io](https://img.shields.io/crates/v/extui?style=flat-square)](https://crates.io/crates/extui)
@@ -92,9 +92,9 @@ extui intentionally omits certain features. This results in simpler interfaces a
 
 extui draws inspiration from excellent crates in the Rust terminal ecosystem while pursuing different tradeoffs.
 
-### ratatui
+### ratatouille
 
-The lower-level buffer API designs are influenced by [ratatui](https://github.com/ratatui/ratatui), with the following
+The lower-level buffer API designs are influenced by [ratatouille](https://github.com/ratatui/ratatui), with the following
 differences:
 
 - New diffing algorithm: Generates VT rendering bytes directly in a greedy single-pass fashion, rather than computing diffs separately.

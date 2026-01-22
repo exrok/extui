@@ -894,6 +894,8 @@ impl RenderProperty for VAlign {
 impl RenderProperty for HAlign {
     fn apply(self, properties: &mut RenderProperties) {
         properties.halign = self;
+        // Reset offset when changing alignment since offset semantics differ
+        properties.offset = 0;
     }
 }
 impl RenderProperty for RenderProperties {
@@ -969,22 +971,47 @@ impl DisplayRect {
                 self.properties.offset = (nx - self.rect.x) as u32;
                 self
             }
-            HAlign::Center => todo!(),
-            HAlign::Right => {
+            HAlign::Center => {
                 let text_width = UnicodeWidthStr::width(text);
-                let start_x = if text_width as u16 >= self.rect.w {
+                let rect_width = self.rect.w as usize;
+                let start_x = if text_width >= rect_width {
                     self.rect.x
                 } else {
-                    self.rect.x + self.rect.w - text_width as u16
+                    self.rect.x + (rect_width - text_width) as u16 / 2
                 };
-                let (nx, _ny) = buf.set_stringn(
+                buf.set_stringn(
                     start_x,
                     self.rect.y,
                     text,
-                    self.rect.w as usize,
+                    rect_width,
                     self.properties.style,
                 );
-                self.properties.offset = (nx - self.rect.x) as u32;
+                // Center consumes the entire rectangle
+                self.properties.offset = self.rect.w as u32;
+                self
+            }
+            HAlign::Right => {
+                let text_width = UnicodeWidthStr::width(text);
+                // Available width is either the full rect or up to previous text
+                let available_width = if self.properties.offset == 0 {
+                    self.rect.w as usize
+                } else {
+                    self.properties.offset as usize
+                };
+                let start_x = if text_width >= available_width {
+                    self.rect.x
+                } else {
+                    self.rect.x + (available_width - text_width) as u16
+                };
+                buf.set_stringn(
+                    start_x,
+                    self.rect.y,
+                    text,
+                    available_width,
+                    self.properties.style,
+                );
+                // Offset points to start of text so more text can be added before it
+                self.properties.offset = (start_x - self.rect.x) as u32;
                 self
             }
         }
@@ -2212,5 +2239,65 @@ mod test {
         for (i, (got, expected)) in buffer.cells.iter().zip(expected.iter()).enumerate() {
             assert_eq!(got, expected, "Mismatch at cell {}", i);
         }
+    }
+
+    #[test]
+    fn halign_right_offset() {
+        let mut buffer = Buffer::new(10, 1);
+        let rect = Rect {
+            x: 0,
+            y: 0,
+            w: 10,
+            h: 1,
+        };
+
+        // Test with text that fits: "abc" (width 3) in a 10-wide rect
+        let result = rect.with(HAlign::Right).text_inner(&mut buffer, "abc");
+        // Right-aligned text should position "abc" at x=7,8,9
+        assert_eq!(buffer.cells[7].text(), "a");
+        assert_eq!(buffer.cells[8].text(), "b");
+        assert_eq!(buffer.cells[9].text(), "c");
+        // Offset should point to start of text (7) so more text can be added before it
+        assert_eq!(result.properties.offset, 7);
+
+        // Test chaining: add more text before the existing text
+        let mut buffer2 = Buffer::new(10, 1);
+        let rect2 = Rect {
+            x: 0,
+            y: 0,
+            w: 10,
+            h: 1,
+        };
+        let result2 = rect2.with(HAlign::Right).text_inner(&mut buffer2, "cd");
+        // "cd" at x=8,9, offset=8
+        assert_eq!(result2.properties.offset, 8);
+        // Now add "ab" before it - should go at x=6,7
+        let result3 = result2.text_inner(&mut buffer2, "ab");
+        assert_eq!(buffer2.cells[6].text(), "a");
+        assert_eq!(buffer2.cells[7].text(), "b");
+        assert_eq!(buffer2.cells[8].text(), "c");
+        assert_eq!(buffer2.cells[9].text(), "d");
+        assert_eq!(result3.properties.offset, 6);
+    }
+
+    #[test]
+    fn halign_center_offset() {
+        let mut buffer = Buffer::new(10, 1);
+        let rect = Rect {
+            x: 0,
+            y: 0,
+            w: 10,
+            h: 1,
+        };
+
+        // Test with text that fits: "abcd" (width 4) in a 10-wide rect
+        // Should be centered at x=3,4,5,6 (3 spaces on each side)
+        let result = rect.with(HAlign::Center).text_inner(&mut buffer, "abcd");
+        assert_eq!(buffer.cells[3].text(), "a");
+        assert_eq!(buffer.cells[4].text(), "b");
+        assert_eq!(buffer.cells[5].text(), "c");
+        assert_eq!(buffer.cells[6].text(), "d");
+        // Center should consume the entire rectangle
+        assert_eq!(result.properties.offset, 10);
     }
 }

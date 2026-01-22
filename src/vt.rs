@@ -19,14 +19,36 @@
 //! # Cursor Movement
 //!
 //! - [`MoveCursor`] - Move to absolute position
-//! - [`MoveCursorRight`] - Move right by N columns
+//! - [`MoveCursorUp`] / [`MoveCursorDown`] - Move vertically by N rows
+//! - [`MoveCursorLeft`] / [`MoveCursorRight`] - Move horizontally by N columns
+//! - [`MoveCursorNextLine`] / [`MoveCursorPrevLine`] - Move to start of line N rows away
+//! - [`MoveCursorToColumn`] - Move to specific column on current line
 //! - [`MOVE_CURSOR_TO_ORIGIN`] - Move to top-left corner
+//!
+//! # Cursor State
+//!
+//! - [`SAVE_CURSOR`] / [`RESTORE_CURSOR`] - Save/restore cursor position (DEC)
+//! - [`SAVE_CURSOR_ANSI`] / [`RESTORE_CURSOR_ANSI`] - Save/restore cursor position (ANSI)
+//! - [`HIDE_CURSOR`] / [`SHOW_CURSOR`] - Cursor visibility
 //!
 //! # Screen Control
 //!
 //! - [`ENABLE_ALT_SCREEN`] / [`DISABLE_ALT_SCREEN`] - Alternate screen buffer
-//! - [`HIDE_CURSOR`] / [`SHOW_CURSOR`] - Cursor visibility
-//! - [`CLEAR_BELOW`], [`CLEAR_ABOVE`], [`CLEAR_LINE_TO_RIGHT`] - Erase operations
+//! - [`CLEAR_SCREEN`] - Clear entire screen
+//! - [`CLEAR_SCREEN_AND_SCROLLBACK`] - Clear screen and scrollback buffer
+//! - [`CLEAR_BELOW`] / [`CLEAR_ABOVE`] - Clear from cursor to screen edge
+//! - [`ENABLE_LINE_WRAP`] / [`DISABLE_LINE_WRAP`] - Line wrapping at screen edge
+//!
+//! # Line Operations
+//!
+//! - [`CLEAR_LINE`] - Clear entire current line
+//! - [`CLEAR_LINE_TO_RIGHT`] / [`CLEAR_LINE_TO_LEFT`] - Clear from cursor to line edge
+//! - [`InsertLines`] / [`DeleteLines`] - Insert or delete lines
+//!
+//! # Character Operations
+//!
+//! - [`InsertChars`] / [`DeleteChars`] - Insert or delete characters
+//! - [`EraseChars`] - Erase characters without shifting
 //!
 //! # Scrolling
 //!
@@ -38,6 +60,10 @@
 //! - [`Modifier`] - Text attributes (bold, italic, underline, etc.)
 //! - [`style`] - Generate SGR escape sequences
 //! - [`CLEAR_STYLE`] - Reset all attributes
+//!
+//! # Miscellaneous
+//!
+//! - [`BELL`] - Ring the terminal bell
 
 use crate::{Style, StyleDelta, event::KeyboardEnhancementFlags};
 
@@ -50,6 +76,26 @@ use crate::{Style, StyleDelta, event::KeyboardEnhancementFlags};
 // 3. Set the Vec length to include exactly the bytes written
 //
 // Correctness is verified by miri tests (cargo +nightly miri test --lib tui).
+
+/// Writes a CSI sequence with a single numeric parameter: `ESC[n<suffix>`.
+///
+/// Used for cursor movement, scrolling, line/character operations.
+fn write_csi_n(buffer: &mut Vec<u8>, n: u16, suffix: u8) {
+    buffer.reserve(2 + 5 + 1);
+    let len = buffer.len();
+    let optr = buffer.as_mut_ptr();
+    // SAFETY: Reserved 8 bytes (ESC[ + n + suffix). Max u16 is 5 digits.
+    unsafe {
+        let mut ptr = optr.add(len);
+        *(ptr as *mut [u8; 2]) = [0x1b, b'['];
+        ptr = ptr.add(2);
+        let offset = itoap::write_to_ptr(ptr, n);
+        ptr = ptr.add(offset);
+        *ptr = suffix;
+        let new_len = ptr.offset_from(optr) as usize + 1;
+        buffer.set_len(new_len);
+    }
+}
 
 /// Writes VT escape sequences to a byte buffer.
 ///
@@ -200,7 +246,7 @@ impl BufferWrite for MoveCursor {
     }
 }
 
-/// Scroll the terminal buffer down by `n` lines.
+/// Scrolls the terminal buffer down by `n` lines.
 ///
 /// Inserts `n` blank lines at the top of the scroll region, moving existing
 /// content down. Uses the VT sequence `ESC[nT`.
@@ -209,24 +255,11 @@ pub struct ScrollBufferDown(pub u16);
 
 impl BufferWrite for ScrollBufferDown {
     fn write_to_buffer(&self, buffer: &mut Vec<u8>) {
-        buffer.reserve(2 + 5 + 1);
-        let len = buffer.len();
-        let optr = buffer.as_mut_ptr();
-        // SAFETY: Reserved 8 bytes (ESC[ + n + T).
-        unsafe {
-            let mut ptr = optr.add(len);
-            *(ptr as *mut [u8; 2]) = [0x1b, b'['];
-            ptr = ptr.add(2);
-            let offset = itoap::write_to_ptr(ptr, self.0);
-            ptr = ptr.add(offset);
-            *ptr = b'T';
-            let new_len = ptr.offset_from(optr) as usize + 1;
-            buffer.set_len(new_len);
-        }
+        write_csi_n(buffer, self.0, b'T');
     }
 }
 
-/// Scroll the terminal buffer up by `n` lines.
+/// Scrolls the terminal buffer up by `n` lines.
 ///
 /// Removes `n` lines from the top of the scroll region and adds `n` blank
 /// lines at the bottom. Uses the VT sequence `ESC[nS`.
@@ -235,24 +268,11 @@ pub struct ScrollBufferUp(pub u16);
 
 impl BufferWrite for ScrollBufferUp {
     fn write_to_buffer(&self, buffer: &mut Vec<u8>) {
-        buffer.reserve(2 + 5 + 1);
-        let len = buffer.len();
-        let optr = buffer.as_mut_ptr();
-        // SAFETY: Reserved 8 bytes (ESC[ + n + S).
-        unsafe {
-            let mut ptr = optr.add(len);
-            *(ptr as *mut [u8; 2]) = [0x1b, b'['];
-            ptr = ptr.add(2);
-            let offset = itoap::write_to_ptr(ptr, self.0);
-            ptr = ptr.add(offset);
-            *ptr = b'S';
-            let new_len = ptr.offset_from(optr) as usize + 1;
-            buffer.set_len(new_len);
-        }
+        write_csi_n(buffer, self.0, b'S');
     }
 }
 
-/// Move the cursor right by `n` columns.
+/// Moves the cursor right by `n` columns.
 ///
 /// Uses the VT sequence `ESC[nC`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -260,36 +280,181 @@ pub struct MoveCursorRight(pub u16);
 
 impl BufferWrite for MoveCursorRight {
     fn write_to_buffer(&self, buffer: &mut Vec<u8>) {
-        buffer.reserve(2 + 5 + 1);
-        let len = buffer.len();
-        let optr = buffer.as_mut_ptr();
-        // SAFETY: Reserved 8 bytes (ESC[ + n + C).
-        unsafe {
-            let mut ptr = optr.add(len);
-            *(ptr as *mut [u8; 2]) = [0x1b, b'['];
-            ptr = ptr.add(2);
-            let offset = itoap::write_to_ptr(ptr, self.0);
-            ptr = ptr.add(offset);
-            *ptr = b'C';
-            let new_len = ptr.offset_from(optr) as usize + 1;
-            buffer.set_len(new_len);
-        }
+        write_csi_n(buffer, self.0, b'C');
     }
 }
 
-/// Move the cursor to the top-left corner. VT sequence `ESC[H`.
+/// Moves the cursor left by `n` columns.
+///
+/// Uses the VT sequence `ESC[nD`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MoveCursorLeft(pub u16);
+
+impl BufferWrite for MoveCursorLeft {
+    fn write_to_buffer(&self, buffer: &mut Vec<u8>) {
+        write_csi_n(buffer, self.0, b'D');
+    }
+}
+
+/// Moves the cursor up by `n` rows.
+///
+/// Uses the VT sequence `ESC[nA`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MoveCursorUp(pub u16);
+
+impl BufferWrite for MoveCursorUp {
+    fn write_to_buffer(&self, buffer: &mut Vec<u8>) {
+        write_csi_n(buffer, self.0, b'A');
+    }
+}
+
+/// Moves the cursor down by `n` rows.
+///
+/// Uses the VT sequence `ESC[nB`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MoveCursorDown(pub u16);
+
+impl BufferWrite for MoveCursorDown {
+    fn write_to_buffer(&self, buffer: &mut Vec<u8>) {
+        write_csi_n(buffer, self.0, b'B');
+    }
+}
+
+/// Moves the cursor to the beginning of a line `n` rows down.
+///
+/// Uses the VT sequence `ESC[nE`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MoveCursorNextLine(pub u16);
+
+impl BufferWrite for MoveCursorNextLine {
+    fn write_to_buffer(&self, buffer: &mut Vec<u8>) {
+        write_csi_n(buffer, self.0, b'E');
+    }
+}
+
+/// Moves the cursor to the beginning of a line `n` rows up.
+///
+/// Uses the VT sequence `ESC[nF`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MoveCursorPrevLine(pub u16);
+
+impl BufferWrite for MoveCursorPrevLine {
+    fn write_to_buffer(&self, buffer: &mut Vec<u8>) {
+        write_csi_n(buffer, self.0, b'F');
+    }
+}
+
+/// Moves the cursor to a specific column on the current line.
+///
+/// The column is 0-indexed. Uses the VT sequence `ESC[nG`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MoveCursorToColumn(pub u16);
+
+impl BufferWrite for MoveCursorToColumn {
+    fn write_to_buffer(&self, buffer: &mut Vec<u8>) {
+        write_csi_n(buffer, self.0.saturating_add(1), b'G');
+    }
+}
+
+/// Moves the cursor to the top-left corner. VT sequence `ESC[H`.
 pub const MOVE_CURSOR_TO_ORIGIN: &[u8] = b"\x1b[H";
 
-/// Reset all text attributes to default. VT sequence `ESC[0m`.
+/// Resets all text attributes to default. VT sequence `ESC[0m`.
 pub const CLEAR_STYLE: &[u8] = b"\x1b[0m";
-/// Erase the current line. VT sequence `ESC[0m`.
-pub const ERASE_LINE: &[u8] = b"\x1b[0m";
-/// Clear from cursor to end of screen. VT sequence `ESC[J`.
+
+/// Clears the entire screen. VT sequence `ESC[2J`.
+pub const CLEAR_SCREEN: &[u8] = b"\x1b[2J";
+/// Clears the entire screen and scrollback buffer. VT sequence `ESC[3J`.
+pub const CLEAR_SCREEN_AND_SCROLLBACK: &[u8] = b"\x1b[3J";
+/// Clears from cursor to end of screen. VT sequence `ESC[J`.
 pub const CLEAR_BELOW: &[u8] = b"\x1b[J";
-/// Clear from cursor to beginning of screen. VT sequence `ESC[1J`.
+/// Clears from cursor to beginning of screen. VT sequence `ESC[1J`.
 pub const CLEAR_ABOVE: &[u8] = b"\x1b[1J";
-/// Clear from cursor to end of line. VT sequence `ESC[K`.
+
+/// Clears the entire current line. VT sequence `ESC[2K`.
+pub const CLEAR_LINE: &[u8] = b"\x1b[2K";
+/// Clears from cursor to end of line. VT sequence `ESC[K`.
 pub const CLEAR_LINE_TO_RIGHT: &[u8] = b"\x1b[K";
+/// Clears from cursor to beginning of line. VT sequence `ESC[1K`.
+pub const CLEAR_LINE_TO_LEFT: &[u8] = b"\x1b[1K";
+
+/// Saves the current cursor position (DEC private). VT sequence `ESC7`.
+pub const SAVE_CURSOR: &[u8] = b"\x1b7";
+/// Restores the previously saved cursor position (DEC private). VT sequence `ESC8`.
+pub const RESTORE_CURSOR: &[u8] = b"\x1b8";
+
+/// Saves the current cursor position (ANSI). VT sequence `ESC[s`.
+pub const SAVE_CURSOR_ANSI: &[u8] = b"\x1b[s";
+/// Restores the previously saved cursor position (ANSI). VT sequence `ESC[u`.
+pub const RESTORE_CURSOR_ANSI: &[u8] = b"\x1b[u";
+
+/// Enables line wrapping at screen edge. VT sequence `ESC[?7h`.
+pub const ENABLE_LINE_WRAP: &[u8] = b"\x1b[?7h";
+/// Disables line wrapping at screen edge. VT sequence `ESC[?7l`.
+pub const DISABLE_LINE_WRAP: &[u8] = b"\x1b[?7l";
+
+/// Rings the terminal bell. VT sequence `BEL` (0x07).
+pub const BELL: &[u8] = b"\x07";
+
+/// Inserts `n` blank lines at the cursor position.
+///
+/// Lines below are shifted down. Uses the VT sequence `ESC[nL`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InsertLines(pub u16);
+
+impl BufferWrite for InsertLines {
+    fn write_to_buffer(&self, buffer: &mut Vec<u8>) {
+        write_csi_n(buffer, self.0, b'L');
+    }
+}
+
+/// Deletes `n` lines starting at the cursor position.
+///
+/// Lines below are shifted up. Uses the VT sequence `ESC[nM`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DeleteLines(pub u16);
+
+impl BufferWrite for DeleteLines {
+    fn write_to_buffer(&self, buffer: &mut Vec<u8>) {
+        write_csi_n(buffer, self.0, b'M');
+    }
+}
+
+/// Inserts `n` blank characters at the cursor position.
+///
+/// Characters to the right are shifted right. Uses the VT sequence `ESC[n@`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InsertChars(pub u16);
+
+impl BufferWrite for InsertChars {
+    fn write_to_buffer(&self, buffer: &mut Vec<u8>) {
+        write_csi_n(buffer, self.0, b'@');
+    }
+}
+
+/// Deletes `n` characters at the cursor position.
+///
+/// Characters to the right are shifted left. Uses the VT sequence `ESC[nP`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DeleteChars(pub u16);
+
+impl BufferWrite for DeleteChars {
+    fn write_to_buffer(&self, buffer: &mut Vec<u8>) {
+        write_csi_n(buffer, self.0, b'P');
+    }
+}
+
+/// Erases `n` characters at the cursor position, replacing them with blanks.
+///
+/// Does not shift characters. Uses the VT sequence `ESC[nX`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EraseChars(pub u16);
+
+impl BufferWrite for EraseChars {
+    fn write_to_buffer(&self, buffer: &mut Vec<u8>) {
+        write_csi_n(buffer, self.0, b'X');
+    }
+}
 
 /// Text styling modifiers such as bold, italic, and underline.
 ///
@@ -479,8 +644,6 @@ impl BufferWrite for StyleDelta {
             return;
         }
         let removed = (self.target.0 | self.current) ^ self.target.0;
-        // todo should use added to avoid resetting modifiers
-        // let added = (self.target.0 | self.current) ^ self.current;
         let clearing = removed & (Style::HAS_BG | Style::HAS_FG | Modifier::ALL.0 as u32) != 0;
         if clearing {
             style(buffer, self.target, true);
@@ -524,7 +687,11 @@ mod tests {
             // ScrollBufferUp
             (&ScrollBufferUp(5), b"\x1b[5S", "ScrollBufferUp(5)"),
             (&ScrollBufferUp(100), b"\x1b[100S", "ScrollBufferUp(100)"),
-            (&ScrollBufferUp(65535), b"\x1b[65535S", "ScrollBufferUp(65535)"),
+            (
+                &ScrollBufferUp(65535),
+                b"\x1b[65535S",
+                "ScrollBufferUp(65535)",
+            ),
             // ScrollBufferDown
             (&ScrollBufferDown(3), b"\x1b[3T", "ScrollBufferDown(3)"),
             (&ScrollBufferDown(1), b"\x1b[1T", "ScrollBufferDown(1)"),
@@ -535,6 +702,47 @@ mod tests {
             // MoveCursorRight
             (&MoveCursorRight(1), b"\x1b[1C", "MoveCursorRight(1)"),
             (&MoveCursorRight(50), b"\x1b[50C", "MoveCursorRight(50)"),
+            // MoveCursorLeft
+            (&MoveCursorLeft(1), b"\x1b[1D", "MoveCursorLeft(1)"),
+            (&MoveCursorLeft(25), b"\x1b[25D", "MoveCursorLeft(25)"),
+            // MoveCursorUp
+            (&MoveCursorUp(1), b"\x1b[1A", "MoveCursorUp(1)"),
+            (&MoveCursorUp(10), b"\x1b[10A", "MoveCursorUp(10)"),
+            // MoveCursorDown
+            (&MoveCursorDown(1), b"\x1b[1B", "MoveCursorDown(1)"),
+            (&MoveCursorDown(10), b"\x1b[10B", "MoveCursorDown(10)"),
+            // MoveCursorNextLine
+            (&MoveCursorNextLine(1), b"\x1b[1E", "MoveCursorNextLine(1)"),
+            (&MoveCursorNextLine(5), b"\x1b[5E", "MoveCursorNextLine(5)"),
+            // MoveCursorPrevLine
+            (&MoveCursorPrevLine(1), b"\x1b[1F", "MoveCursorPrevLine(1)"),
+            (&MoveCursorPrevLine(5), b"\x1b[5F", "MoveCursorPrevLine(5)"),
+            // MoveCursorToColumn
+            (
+                &MoveCursorToColumn(0),
+                b"\x1b[1G",
+                "MoveCursorToColumn(0)",
+            ),
+            (
+                &MoveCursorToColumn(79),
+                b"\x1b[80G",
+                "MoveCursorToColumn(79)",
+            ),
+            // InsertLines
+            (&InsertLines(1), b"\x1b[1L", "InsertLines(1)"),
+            (&InsertLines(10), b"\x1b[10L", "InsertLines(10)"),
+            // DeleteLines
+            (&DeleteLines(1), b"\x1b[1M", "DeleteLines(1)"),
+            (&DeleteLines(10), b"\x1b[10M", "DeleteLines(10)"),
+            // InsertChars
+            (&InsertChars(1), b"\x1b[1@", "InsertChars(1)"),
+            (&InsertChars(5), b"\x1b[5@", "InsertChars(5)"),
+            // DeleteChars
+            (&DeleteChars(1), b"\x1b[1P", "DeleteChars(1)"),
+            (&DeleteChars(5), b"\x1b[5P", "DeleteChars(5)"),
+            // EraseChars
+            (&EraseChars(1), b"\x1b[1X", "EraseChars(1)"),
+            (&EraseChars(10), b"\x1b[10X", "EraseChars(10)"),
             // ScrollRegion
             (&ScrollRegion(1, 24), b"\x1b[1;24r", "ScrollRegion(1, 24)"),
             (&ScrollRegion::RESET, b"\x1b[r", "ScrollRegion::RESET"),
@@ -545,14 +753,24 @@ mod tests {
                 "Style with fg color 196",
             ),
             // Style with modifiers
-            (&Style::DEFAULT.with_modifier(Modifier::BOLD), b"\x1b[1m".as_slice(), "Style with BOLD"),
             (
-                &Style::DEFAULT.with_modifier(Modifier::BOLD).with_modifier(Modifier::ITALIC),
+                &Style::DEFAULT.with_modifier(Modifier::BOLD),
+                b"\x1b[1m".as_slice(),
+                "Style with BOLD",
+            ),
+            (
+                &Style::DEFAULT
+                    .with_modifier(Modifier::BOLD)
+                    .with_modifier(Modifier::ITALIC),
                 b"\x1b[1;3m".as_slice(),
                 "Style with BOLD and ITALIC",
             ),
             // Style default (no output)
-            (&Style::DEFAULT, b"".as_slice(), "Style::DEFAULT (no output)"),
+            (
+                &Style::DEFAULT,
+                b"".as_slice(),
+                "Style::DEFAULT (no output)",
+            ),
         ]);
     }
 }
