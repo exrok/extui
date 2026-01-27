@@ -67,6 +67,7 @@
 //! # Ok::<(), std::io::Error>(())
 //! ```
 
+mod display_rect;
 use std::{
     io::{IsTerminal, Write},
     mem::ManuallyDrop,
@@ -77,6 +78,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use crate::{
+    display_rect::RenderProperty,
     event::KeyboardEnhancementFlags,
     vt::{BufferWrite, Modifier, MoveCursor, MoveCursorRight, ScrollBufferDown, ScrollBufferUp},
 };
@@ -85,6 +87,7 @@ pub mod event;
 mod sys;
 pub mod vt;
 pub mod widget;
+pub use display_rect::{Ellipsis, HAlign, RenderProperties, VAlign};
 
 /// Writes multiple VT escape sequences to a byte buffer.
 ///
@@ -329,13 +332,15 @@ impl BoxStyle {
             ..y + h - ((!(set & RelSet::BOTTOM).is_empty()) as u16)
         {
             if set.contains(Rel::CenterLeft)
-                && let Some(row) = buf.current.row_remaining_mut(x, y) {
-                    row[0] = self.vertical;
-                }
+                && let Some(row) = buf.current.row_remaining_mut(x, y)
+            {
+                row[0] = self.vertical;
+            }
             if set.contains(Rel::CenterRight)
-                && let Some(row) = buf.current.row_remaining_mut(x + w - 1, y) {
-                    row[0] = self.vertical;
-                }
+                && let Some(row) = buf.current.row_remaining_mut(x + w - 1, y)
+            {
+                row[0] = self.vertical;
+            }
         }
         // Subjects sides that have any to provide the inner vec
         if !(set & RelSet::TOP).is_empty() {
@@ -836,74 +841,6 @@ pub trait SplitRule: std::ops::Neg<Output = Self> {
     fn split_once(self, value: u16) -> (u16, u16);
 }
 
-/// Vertical alignment within a region.
-#[derive(Clone, Copy, PartialEq, Eq, Default)]
-pub enum VAlign {
-    /// Aligns content to the top.
-    #[default]
-    Top,
-    /// Centers content vertically.
-    Center,
-    /// Aligns content to the bottom.
-    Bottom,
-}
-
-/// Horizontal alignment within a region.
-#[derive(Clone, Copy, PartialEq, Eq, Default)]
-pub enum HAlign {
-    /// Aligns content to the left.
-    #[default]
-    Left,
-    /// Centers content horizontally.
-    Center,
-    /// Aligns content to the right.
-    Right,
-}
-
-/// Properties controlling how content is rendered within a region.
-#[derive(Default, Clone, Copy)]
-pub struct RenderProperties {
-    /// Text style to apply.
-    pub style: Style,
-    /// Vertical alignment.
-    pub valign: VAlign,
-    /// Horizontal alignment.
-    pub halign: HAlign,
-    /// Character offset for continued rendering.
-    pub offset: u32,
-}
-
-/// A property that can be applied to [`RenderProperties`].
-///
-/// Implemented for [`Style`], [`VAlign`], [`HAlign`], and [`RenderProperties`].
-pub trait RenderProperty {
-    /// Applies this property to the given render properties.
-    fn apply(self, properties: &mut RenderProperties);
-}
-
-impl RenderProperty for Style {
-    fn apply(self, properties: &mut RenderProperties) {
-        properties.style = self;
-    }
-}
-impl RenderProperty for VAlign {
-    fn apply(self, properties: &mut RenderProperties) {
-        properties.valign = self;
-    }
-}
-impl RenderProperty for HAlign {
-    fn apply(self, properties: &mut RenderProperties) {
-        properties.halign = self;
-        // Reset offset when changing alignment since offset semantics differ
-        properties.offset = 0;
-    }
-}
-impl RenderProperty for RenderProperties {
-    fn apply(self, properties: &mut RenderProperties) {
-        *properties = self;
-    }
-}
-
 /// A rectangle with associated rendering properties.
 ///
 /// Created from a [`Rect`] via [`display`](Rect::display) or [`with`](Rect::with).
@@ -911,111 +848,6 @@ impl RenderProperty for RenderProperties {
 pub struct DisplayRect {
     rect: Rect,
     properties: RenderProperties,
-}
-
-impl DisplayRect {
-    /// Adds a render property to this display rectangle.
-    pub fn with(self, property: impl RenderProperty) -> DisplayRect {
-        let mut properties = self.properties;
-        property.apply(&mut properties);
-        DisplayRect {
-            rect: self.rect,
-            properties,
-        }
-    }
-
-    /// Fills the rectangle with the current style.
-    pub fn fill<'a>(self, buf: &mut DoubleBuffer) -> DisplayRect {
-        if self.rect.is_empty() {
-            return self;
-        }
-        buf.current.set_style(self.rect, self.properties.style);
-        self
-    }
-    /// Advances the horizontal offset by the given amount.
-    pub fn skip(mut self, amount: u32) -> DisplayRect {
-        self.properties.offset = self.properties.offset.wrapping_add(amount);
-        self
-    }
-    /// Renders formatted content using [`Display`](std::fmt::Display).
-    pub fn fmt<'a>(self, buf: &mut DoubleBuffer, content: impl std::fmt::Display) -> DisplayRect {
-        if self.rect.is_empty() {
-            return self;
-        }
-        let start_buf = buf.buf.len();
-        write!(buf.buf, "{content}").unwrap();
-        let text = unsafe { std::str::from_utf8_unchecked(&buf.buf[start_buf..]) };
-        let rect = self.text_inner(&mut buf.current, text);
-        unsafe {
-            buf.buf.set_len(start_buf);
-        }
-        rect
-    }
-    /// Renders the given text string.
-    pub fn text(self, buf: &mut DoubleBuffer, text: &str) -> DisplayRect {
-        self.text_inner(&mut buf.current, text)
-    }
-    fn text_inner(mut self, buf: &mut Buffer, text: &str) -> DisplayRect {
-        if self.rect.is_empty() {
-            return self;
-        }
-        match self.properties.halign {
-            HAlign::Left => {
-                let (nx, _ny) = buf.set_stringn(
-                    self.rect.x + self.properties.offset as u16,
-                    self.rect.y,
-                    text,
-                    self.rect.w as usize,
-                    self.properties.style,
-                );
-                self.properties.offset = (nx - self.rect.x) as u32;
-                self
-            }
-            HAlign::Center => {
-                let text_width = UnicodeWidthStr::width(text);
-                let rect_width = self.rect.w as usize;
-                let start_x = if text_width >= rect_width {
-                    self.rect.x
-                } else {
-                    self.rect.x + (rect_width - text_width) as u16 / 2
-                };
-                buf.set_stringn(
-                    start_x,
-                    self.rect.y,
-                    text,
-                    rect_width,
-                    self.properties.style,
-                );
-                // Center consumes the entire rectangle
-                self.properties.offset = self.rect.w as u32;
-                self
-            }
-            HAlign::Right => {
-                let text_width = UnicodeWidthStr::width(text);
-                // Available width is either the full rect or up to previous text
-                let available_width = if self.properties.offset == 0 {
-                    self.rect.w as usize
-                } else {
-                    self.properties.offset as usize
-                };
-                let start_x = if text_width >= available_width {
-                    self.rect.x
-                } else {
-                    self.rect.x + (available_width - text_width) as u16
-                };
-                buf.set_stringn(
-                    start_x,
-                    self.rect.y,
-                    text,
-                    available_width,
-                    self.properties.style,
-                );
-                // Offset points to start of text so more text can be added before it
-                self.properties.offset = (start_x - self.rect.x) as u32;
-                self
-            }
-        }
-    }
 }
 
 impl Rect {
@@ -1676,9 +1508,7 @@ impl Terminal {
     pub fn new(fd: RawFd, flags: TerminalFlags) -> std::io::Result<Terminal> {
         let mut stdout = ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(fd) });
         if !stdout.is_terminal() {
-            return Err(std::io::Error::other(
-                "Stdout is not a terminal",
-            ));
+            return Err(std::io::Error::other("Stdout is not a terminal"));
         }
         let termios = sys::attr::get_terminal_attr(stdout.as_fd())?;
         if flags.contains(TerminalFlags::RAW_MODE) {
@@ -1701,9 +1531,7 @@ impl Terminal {
     pub fn open(flags: TerminalFlags) -> std::io::Result<Terminal> {
         let mut stdout = ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(1) });
         if !stdout.is_terminal() {
-            return Err(std::io::Error::other(
-                "Stdout is not a terminal",
-            ));
+            return Err(std::io::Error::other("Stdout is not a terminal"));
         }
         let termios = sys::attr::get_terminal_attr(stdout.as_fd())?;
         if flags.contains(TerminalFlags::RAW_MODE) {
@@ -1981,50 +1809,54 @@ impl Block<'_> {
             BorderType::Thin => &BoxStyle::LIGHT,
         };
         if self.borders & Self::TOP != 0
-            && let Some(row) = buf.row_remaining_mut(x, y) {
-                if w >= 1 {
-                    row[0] = box_style.top_left;
-                }
-                for cell in row
-                    .iter_mut()
-                    .take(w as usize)
-                    .skip(1)
-                    .take(w.saturating_sub(2) as usize)
-                {
-                    *cell = box_style.horizontal;
-                }
-                if w >= 2 {
-                    row[w as usize - 1] = box_style.top_right;
-                }
+            && let Some(row) = buf.row_remaining_mut(x, y)
+        {
+            if w >= 1 {
+                row[0] = box_style.top_left;
             }
+            for cell in row
+                .iter_mut()
+                .take(w as usize)
+                .skip(1)
+                .take(w.saturating_sub(2) as usize)
+            {
+                *cell = box_style.horizontal;
+            }
+            if w >= 2 {
+                row[w as usize - 1] = box_style.top_right;
+            }
+        }
         if self.borders & Self::BOTTOM != 0
-            && let Some(row) = buf.row_remaining_mut(x, y + h - 1) {
-                if w >= 1 {
-                    row[0] = box_style.bottom_left;
-                }
-                for cell in row
-                    .iter_mut()
-                    .take(w as usize)
-                    .skip(1)
-                    .take(w.saturating_sub(2) as usize)
-                {
-                    *cell = box_style.horizontal;
-                }
-                if w >= 2 {
-                    row[w as usize - 1] = box_style.bottom_right;
-                }
+            && let Some(row) = buf.row_remaining_mut(x, y + h - 1)
+        {
+            if w >= 1 {
+                row[0] = box_style.bottom_left;
             }
+            for cell in row
+                .iter_mut()
+                .take(w as usize)
+                .skip(1)
+                .take(w.saturating_sub(2) as usize)
+            {
+                *cell = box_style.horizontal;
+            }
+            if w >= 2 {
+                row[w as usize - 1] = box_style.bottom_right;
+            }
+        }
         for y in y + (self.borders & Self::TOP != 0) as u16
             ..y + h - (self.borders & Self::BOTTOM != 0) as u16
         {
             if self.borders & Self::LEFT != 0
-                && let Some(row) = buf.row_remaining_mut(x, y) {
-                    row[0] = box_style.vertical;
-                }
+                && let Some(row) = buf.row_remaining_mut(x, y)
+            {
+                row[0] = box_style.vertical;
+            }
             if self.borders & Self::RIGHT != 0
-                && let Some(row) = buf.row_remaining_mut(x + w - 1, y) {
-                    row[0] = box_style.vertical;
-                }
+                && let Some(row) = buf.row_remaining_mut(x + w - 1, y)
+            {
+                row[0] = box_style.vertical;
+            }
         }
 
         buf.set_style(rect, self.style);
@@ -2038,7 +1870,7 @@ impl Block<'_> {
                 };
                 buf.set_stringn(title_x, y, title, (w - 2) as usize, self.border_style);
                 if title_x > x + 1 {
-                    buf.set_stringn(x + 1, y, " ", 1, self.border_style);
+                    buf.set_stringn(title_x - 1, y, " ", 1, self.border_style);
                 }
                 if title_x + title_len < x + w - 1 {
                     buf.set_stringn(title_x + title_len, y, " ", 1, self.border_style);
@@ -2239,65 +2071,5 @@ mod test {
         for (i, (got, expected)) in buffer.cells.iter().zip(expected.iter()).enumerate() {
             assert_eq!(got, expected, "Mismatch at cell {}", i);
         }
-    }
-
-    #[test]
-    fn halign_right_offset() {
-        let mut buffer = Buffer::new(10, 1);
-        let rect = Rect {
-            x: 0,
-            y: 0,
-            w: 10,
-            h: 1,
-        };
-
-        // Test with text that fits: "abc" (width 3) in a 10-wide rect
-        let result = rect.with(HAlign::Right).text_inner(&mut buffer, "abc");
-        // Right-aligned text should position "abc" at x=7,8,9
-        assert_eq!(buffer.cells[7].text(), "a");
-        assert_eq!(buffer.cells[8].text(), "b");
-        assert_eq!(buffer.cells[9].text(), "c");
-        // Offset should point to start of text (7) so more text can be added before it
-        assert_eq!(result.properties.offset, 7);
-
-        // Test chaining: add more text before the existing text
-        let mut buffer2 = Buffer::new(10, 1);
-        let rect2 = Rect {
-            x: 0,
-            y: 0,
-            w: 10,
-            h: 1,
-        };
-        let result2 = rect2.with(HAlign::Right).text_inner(&mut buffer2, "cd");
-        // "cd" at x=8,9, offset=8
-        assert_eq!(result2.properties.offset, 8);
-        // Now add "ab" before it - should go at x=6,7
-        let result3 = result2.text_inner(&mut buffer2, "ab");
-        assert_eq!(buffer2.cells[6].text(), "a");
-        assert_eq!(buffer2.cells[7].text(), "b");
-        assert_eq!(buffer2.cells[8].text(), "c");
-        assert_eq!(buffer2.cells[9].text(), "d");
-        assert_eq!(result3.properties.offset, 6);
-    }
-
-    #[test]
-    fn halign_center_offset() {
-        let mut buffer = Buffer::new(10, 1);
-        let rect = Rect {
-            x: 0,
-            y: 0,
-            w: 10,
-            h: 1,
-        };
-
-        // Test with text that fits: "abcd" (width 4) in a 10-wide rect
-        // Should be centered at x=3,4,5,6 (3 spaces on each side)
-        let result = rect.with(HAlign::Center).text_inner(&mut buffer, "abcd");
-        assert_eq!(buffer.cells[3].text(), "a");
-        assert_eq!(buffer.cells[4].text(), "b");
-        assert_eq!(buffer.cells[5].text(), "c");
-        assert_eq!(buffer.cells[6].text(), "d");
-        // Center should consume the entire rectangle
-        assert_eq!(result.properties.offset, 10);
     }
 }
