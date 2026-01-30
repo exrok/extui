@@ -46,7 +46,7 @@
 
 use std::{
     fmt::{self, Display, Write},
-    os::fd::AsRawFd,
+    os::fd::AsFd,
     time::Duration,
 };
 
@@ -81,7 +81,7 @@ impl Polled {
 /// # Errors
 ///
 /// Returns an error if the poll system call fails.
-pub fn poll(fd: &impl AsRawFd, timeout: Option<Duration>) -> std::io::Result<Polled> {
+pub fn poll(fd: &impl AsFd, timeout: Option<Duration>) -> std::io::Result<Polled> {
     poll_with_custom_waker(fd, polling::global_waker(), timeout)
 }
 
@@ -91,12 +91,11 @@ pub fn poll(fd: &impl AsRawFd, timeout: Option<Duration>) -> std::io::Result<Pol
 ///
 /// Returns an error if the poll system call fails.
 pub fn poll_with_custom_waker(
-    fd: &impl AsRawFd,
+    fd: &impl AsFd,
     waker: Option<&polling::Waker>,
     timeout: Option<Duration>,
 ) -> std::io::Result<Polled> {
-    
-    polling::wait_on_fd_inner(fd.as_raw_fd(), waker, timeout)
+    polling::wait_on_fd_inner(Some(fd.as_fd()), waker, timeout)
 }
 
 /// An internal event.

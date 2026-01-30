@@ -2,6 +2,7 @@ use libc::SIGWINCH;
 use libc::{POLLERR, POLLHUP, POLLIN, c_int, poll, pollfd};
 use std::io;
 use std::mem;
+use std::os::fd::BorrowedFd;
 use std::os::unix::io::AsRawFd;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64};
@@ -133,6 +134,14 @@ mod waker {
                 }
             }
 
+            /// Waits for waiter to be woken, if called concurrently no guarantees are made.
+            pub fn wait(&self) -> std::io::Result<()> {
+                match wait_on_fd_inner(None, Some(self), None) {
+                    Ok(_) => Ok(()),
+                    Err(e) => Err(e),
+                }
+            }
+
             /// Wakes up any thread waiting on this waker.
             ///
             /// # Errors
@@ -225,6 +234,14 @@ mod waker {
                 Ok(Waker { read_fd, write_fd })
             }
 
+            /// Waits for waiter to be woken, if called concurrently no guarantees are made.
+            pub fn wait(&self) -> std::io::Result<()> {
+                match wait_on_fd_inner(None, Some(self), None) {
+                    Ok(_) => Ok(()),
+                    Err(e) => Err(e),
+                }
+            }
+
             /// Wakes up any thread waiting on this waker.
             ///
             /// # Errors
@@ -282,7 +299,7 @@ mod waker {
 // --- Polling Logic ---
 
 pub(super) fn wait_on_fd_inner(
-    fd: i32,
+    fd: Option<BorrowedFd<'_>>,
     waker: Option<&Waker>,
     timeout: Option<Duration>,
 ) -> io::Result<Polled> {
@@ -291,12 +308,14 @@ pub(super) fn wait_on_fd_inner(
     let mut poll_fds: [pollfd; 2] = unsafe { mem::zeroed() };
     let mut nfds = 0;
 
-    poll_fds[nfds] = pollfd {
-        fd: fd.as_raw_fd(),
-        events: POLLIN | POLLERR | POLLHUP,
-        revents: 0,
-    };
-    nfds += 1;
+    if let Some(fd) = fd {
+        poll_fds[nfds] = pollfd {
+            fd: fd.as_raw_fd(),
+            events: POLLIN | POLLERR | POLLHUP,
+            revents: 0,
+        };
+        nfds += 1;
+    }
 
     let waker_index = if let Some(w) = waker {
         poll_fds[nfds] = pollfd {
