@@ -401,11 +401,17 @@ pub struct Style(u32);
 
 impl std::fmt::Debug for Style {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Style")
-            .field("fg", &self.fg())
-            .field("bg", &self.bg())
-            .field("modifiers", &self.modifiers())
-            .finish()
+        if self.is_palette() {
+            f.debug_struct("Style")
+                .field("palette_index", &self.palette_index())
+                .finish()
+        } else {
+            f.debug_struct("Style")
+                .field("fg", &self.fg())
+                .field("bg", &self.bg())
+                .field("modifiers", &self.modifiers())
+                .finish()
+        }
     }
 }
 
@@ -672,6 +678,29 @@ impl Style {
     pub(crate) const BG_MASK: u32 = 0x00ff_0000;
     pub(crate) const MASK: u32 = 0xffff_fff8;
     pub(crate) const HAS_FG: u32 = 0b01_000;
+    pub(crate) const IS_PALETTE: u32 = 0x8000;
+
+    /// Creates a palette style referencing an entry in the [`DoubleBuffer`]'s palette table.
+    ///
+    /// Palette entries contain raw VT escape bytes that are emitted verbatim during rendering,
+    /// replacing the modifier attributes. Foreground and background colors can still be set
+    /// independently via [`with_fg`](Self::with_fg) and [`with_bg`](Self::with_bg).
+    ///
+    /// Register entries with [`DoubleBuffer::set_palette`] before rendering.
+    /// Do not combine palette styles with modifier methods.
+    pub const fn palette(index: u8) -> Style {
+        Style((index as u32) << 5 | Self::IS_PALETTE)
+    }
+
+    /// Returns `true` if this is a palette style.
+    pub const fn is_palette(&self) -> bool {
+        self.0 & Self::IS_PALETTE != 0
+    }
+
+    /// Returns the palette index for a palette style.
+    pub const fn palette_index(&self) -> u8 {
+        ((self.0 >> 5) & 0xFF) as u8
+    }
 
     /// Creates a [`StyleDelta`] for transitioning to this style.
     pub const fn delta(self) -> StyleDelta {
@@ -989,18 +1018,65 @@ impl SplitRule for f64 {
     }
 }
 
-pub(crate) fn write_style_diff_ignore_fg(
+fn write_palette_or_diff(
     current: Style,
-    mut new: Style,
+    new: Style,
+    palette: &[Vec<u8>],
     buf: &mut Vec<u8>,
+    ignore_fg: bool,
 ) -> Style {
-    new.0 = (new.0 & !(Style::FG_MASK | Style::HAS_FG))
-        | (current.0 & (Style::FG_MASK | Style::HAS_FG));
+    let mut new = new;
+    if ignore_fg {
+        new.0 = (new.0 & !(Style::FG_MASK | Style::HAS_FG))
+            | (current.0 & (Style::FG_MASK | Style::HAS_FG));
+    }
+    if new.is_palette() {
+        if current == new {
+            return new;
+        }
+        // Same palette index: only fg/bg changed, no need to re-emit palette bytes
+        if current.is_palette() && current.palette_index() == new.palette_index() {
+            let removed = (new.0 | current.0) ^ new.0;
+            if removed & (Style::HAS_BG | Style::HAS_FG) == 0 {
+                let mut target = new;
+                if current.fg() == target.fg() {
+                    target = target.without_fg();
+                }
+                if current.bg() == target.bg() {
+                    target = target.without_bg();
+                }
+                let color_only = Style(
+                    target.0 & (Style::FG_MASK | Style::BG_MASK | Style::HAS_FG | Style::HAS_BG),
+                );
+                if color_only != Style::DEFAULT {
+                    vt::style(buf, color_only, false);
+                }
+                return new;
+            }
+        }
+        // Different palette index or colors removed: full clear + palette + colors
+        buf.extend_from_slice(b"\x1b[0m");
+        if let Some(entry) = palette.get(new.palette_index() as usize) {
+            buf.extend_from_slice(entry);
+        }
+        let color_only = Style(
+            new.0 & (Style::FG_MASK | Style::BG_MASK | Style::HAS_FG | Style::HAS_BG),
+        );
+        if color_only != Style::DEFAULT {
+            vt::style(buf, color_only, false);
+        }
+        return new;
+    }
     write_style_diff(current, new, buf)
 }
+
 pub(crate) fn write_style_diff(current: Style, new: Style, buf: &mut Vec<u8>) -> Style {
     if current == new {
         return current;
+    }
+    if current.is_palette() {
+        vt::style(buf, new, true);
+        return new;
     }
     let removed = (new.0 | current.0) ^ new.0;
     let clearing = removed & (Style::HAS_BG | Style::HAS_FG | Modifier::ALL.0 as u32) != 0;
@@ -1100,9 +1176,16 @@ impl Buffer {
         self.cells.get_mut(start as usize..end as usize)
     }
 
-    fn render_diff(&mut self, buf: &mut Vec<u8>, old: &Buffer, y_offset: u16, blanking: bool) {
+    fn render_diff(
+        &mut self,
+        buf: &mut Vec<u8>,
+        old: &Buffer,
+        y_offset: u16,
+        blanking: bool,
+        palette: &[Vec<u8>],
+    ) {
         if self.cells.len() != old.cells.len() {
-            self.render(buf, y_offset);
+            self.render(buf, y_offset, palette);
             return;
         }
         vt::CLEAR_STYLE.write_to_buffer(buf);
@@ -1147,10 +1230,12 @@ impl Buffer {
                                     MoveCursorRight(matching_count).write_to_buffer(buf);
                                     // matching_count = 0;
                                 }
-                                current_style = write_style_diff_ignore_fg(
+                                current_style = write_palette_or_diff(
                                     current_style,
                                     blank_kind.style(),
+                                    palette,
                                     buf,
+                                    true,
                                 );
                                 if !blanking || blank_overwrite < 50 {
                                     buf.extend(std::iter::repeat_n(b' ', blank_overwrite as usize));
@@ -1188,8 +1273,13 @@ impl Buffer {
                                 matching_count = 0;
                             }
 
-                            current_style =
-                                write_style_diff_ignore_fg(current_style, blank_kind.style(), buf);
+                            current_style = write_palette_or_diff(
+                                current_style,
+                                blank_kind.style(),
+                                palette,
+                                buf,
+                                true,
+                            );
                             if !blanking || blank_overwrite < 50 {
                                 buf.extend(std::iter::repeat_n(b' ', blank_overwrite as usize));
                             } else {
@@ -1221,8 +1311,13 @@ impl Buffer {
                             MoveCursorRight(matching_count).write_to_buffer(buf);
                             // matching_count = 0;
                         }
-                        current_style =
-                            write_style_diff_ignore_fg(current_style, blank_kind.style(), buf);
+                        current_style = write_palette_or_diff(
+                            current_style,
+                            blank_kind.style(),
+                            palette,
+                            buf,
+                            true,
+                        );
 
                         if blank_overwrite < 8 {
                             for _ in 0..blank_overwrite {
@@ -1246,11 +1341,13 @@ impl Buffer {
                     matching_count = 0;
                 }
                 let text = new.text();
-                if text.is_empty() {
-                    current_style = write_style_diff_ignore_fg(current_style, new.style(), buf);
-                } else {
-                    current_style = write_style_diff(current_style, new.style(), buf);
-                }
+                current_style = write_palette_or_diff(
+                    current_style,
+                    new.style(),
+                    palette,
+                    buf,
+                    text.is_empty(),
+                );
                 if text.is_empty() {
                     buf.push(b' ');
                 } else {
@@ -1259,7 +1356,7 @@ impl Buffer {
             }
         }
     }
-    fn render(&mut self, buf: &mut Vec<u8>, y_offset: u16) {
+    fn render(&mut self, buf: &mut Vec<u8>, y_offset: u16, palette: &[Vec<u8>]) {
         if y_offset == 0 {
             vt::MOVE_CURSOR_TO_ORIGIN.write_to_buffer(buf);
         } else {
@@ -1293,7 +1390,8 @@ impl Buffer {
                     }
                     blank_extension = 0;
                 }
-                current_style = write_style_diff(current_style, cell.style(), buf);
+                current_style =
+                    write_palette_or_diff(current_style, cell.style(), palette, buf, false);
                 let text = cell.text();
                 if text.is_empty() {
                     buf.push(b' ');
@@ -1588,6 +1686,7 @@ pub struct DoubleBuffer {
     #[doc(hidden)]
     pub y_offset: u16,
     epoch: u64,
+    palette: Vec<Vec<u8>>,
 }
 
 impl DoubleBuffer {
@@ -1655,6 +1754,7 @@ impl DoubleBuffer {
             scroll: 0,
             epoch: 0,
             y_offset: 0,
+            palette: Vec::new(),
         }
     }
 
@@ -1708,11 +1808,17 @@ impl DoubleBuffer {
                 }
             }
             self.scroll = 0;
-            self.current
-                .render_diff(&mut self.buf, &self.previous, self.y_offset, self.blanking);
+            self.current.render_diff(
+                &mut self.buf,
+                &self.previous,
+                self.y_offset,
+                self.blanking,
+                &self.palette,
+            );
         } else {
             self.scroll = 0;
-            self.current.render(&mut self.buf, self.y_offset);
+            self.current
+                .render(&mut self.buf, self.y_offset, &self.palette);
             self.diffable = true;
         }
         std::mem::swap(&mut self.current, &mut self.previous);
@@ -1724,6 +1830,23 @@ impl DoubleBuffer {
         term.write_all(&self.buf).unwrap();
         self.buf.clear();
     }
+    /// Sets a palette entry containing raw VT escape bytes at the given index.
+    ///
+    /// Gaps below `index` are filled with empty entries. Use [`Style::palette`]
+    /// to create a style referencing this index.
+    pub fn set_palette(&mut self, index: u8, entry: impl Into<Vec<u8>>) {
+        let index = index as usize;
+        if index >= self.palette.len() {
+            self.palette.resize(index + 1, Vec::new());
+        }
+        self.palette[index] = entry.into();
+    }
+
+    /// Returns the palette entries.
+    pub fn palette(&self) -> &[Vec<u8>] {
+        &self.palette
+    }
+
     /// Returns a mutable reference to the current buffer.
     pub fn current(&mut self) -> &mut Buffer {
         &mut self.current
@@ -2071,5 +2194,99 @@ mod test {
         for (i, (got, expected)) in buffer.cells.iter().zip(expected.iter()).enumerate() {
             assert_eq!(got, expected, "Mismatch at cell {}", i);
         }
+    }
+
+    #[test]
+    fn palette_style_roundtrip() {
+        for i in [0u8, 1, 42, 127, 255] {
+            let s = Style::palette(i);
+            assert!(s.is_palette());
+            assert_eq!(s.palette_index(), i);
+            assert_ne!(s, Style::DEFAULT);
+        }
+        assert!(!Style::DEFAULT.is_palette());
+        assert!(!Style::DEFAULT.with_fg(Color::Red1).is_palette());
+    }
+
+    #[test]
+    fn palette_preserves_fg_bg() {
+        let s = Style::palette(5).with_fg(Color::Red1).with_bg(Color::Blue1);
+        assert!(s.is_palette());
+        assert_eq!(s.palette_index(), 5);
+        assert_eq!(s.fg(), Some(Color::Red1));
+        assert_eq!(s.bg(), Some(Color::Blue1));
+    }
+
+    #[test]
+    fn palette_set_style_merges_colors() {
+        let mut buffer = Buffer::new(4, 1);
+        buffer.set_string(0, 0, "abcd", Color(1).as_fg() | Color(2).as_bg());
+        // set_style with palette (no fg/bg) should replace modifiers but keep existing colors
+        buffer.set_style(
+            Rect {
+                x: 1,
+                y: 0,
+                w: 2,
+                h: 1,
+            },
+            Style::palette(7),
+        );
+        let s1 = buffer.cells[1].style();
+        assert!(s1.is_palette());
+        assert_eq!(s1.palette_index(), 7);
+        // Existing fg/bg should be preserved through the merge
+        assert_eq!(s1.fg(), Some(Color(1)));
+        assert_eq!(s1.bg(), Some(Color(2)));
+        // Cells outside the region should be unchanged
+        assert!(!buffer.cells[0].style().is_palette());
+        assert!(!buffer.cells[3].style().is_palette());
+    }
+
+    #[test]
+    fn palette_render() {
+        // Palette entry for curly underline
+        let mut db = DoubleBuffer::new(20, 2);
+        db.set_palette(0, b"\x1b[4:3m".to_vec());
+        db.set_palette(1, b"\x1b[58;2;255;0;0m".to_vec());
+
+        let underline = Style::palette(0).with_fg(Color::Red1);
+        let colored_ul = Style::palette(1).with_fg(Color::Blue1);
+
+        // Frame 1: full render path
+        db.set_string(0, 0, "error", underline);
+        db.set_string(6, 0, "warn", colored_ul);
+        db.set_string(0, 1, "normal", Color::Red1.as_fg());
+        db.render_internal();
+
+        let output = String::from_utf8_lossy(&db.buf);
+        assert!(output.contains("\x1b[4:3m"), "palette 0 missing");
+        assert!(output.contains("error"), "text missing");
+        assert!(output.contains("\x1b[58;2;255;0;0m"), "palette 1 missing");
+        assert!(output.contains("warn"), "text missing");
+        assert!(output.contains("\x1b[0m"), "style reset missing");
+        db.buf.clear();
+
+        // Frame 2: diff path - same palette, different fg
+        let underline_blue = Style::palette(0).with_fg(Color::Blue1);
+        db.set_string(0, 0, "error", underline_blue);
+        db.set_string(6, 0, "warn", colored_ul);
+        db.set_string(0, 1, "normal", Color::Red1.as_fg());
+        db.render_internal();
+
+        let output = String::from_utf8_lossy(&db.buf);
+        // Same palette index - should NOT re-emit palette bytes, just the fg change
+        assert!(output.contains("error"), "changed text missing in diff");
+        assert!(!output.contains("warn"), "unchanged region should be skipped");
+        db.buf.clear();
+
+        // Frame 3: transition from palette to normal
+        db.set_string(0, 0, "plain", Color::Blue1.as_fg());
+        db.set_string(6, 0, "warn", colored_ul);
+        db.set_string(0, 1, "normal", Color::Red1.as_fg());
+        db.render_internal();
+
+        let output = String::from_utf8_lossy(&db.buf);
+        assert!(output.contains("plain"), "normal text missing");
+        db.buf.clear();
     }
 }

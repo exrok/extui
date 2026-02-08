@@ -157,6 +157,7 @@ static LOOKUP: [u32;256] = [
 ///
 /// If `clear` is true, prepends `0;` to reset attributes first.
 pub fn style(out: &mut Vec<u8>, style: Style, clear: bool) {
+    debug_assert!(!style.is_palette(), "palette styles should not be passed to vt::style()");
     if style == Style::DEFAULT {
         if clear {
             out.extend_from_slice(b"\x1b[0m");
@@ -604,6 +605,7 @@ impl BufferWrite for KeyboardEnhancementFlags {
 
 impl BufferWrite for Style {
     fn write_to_buffer(&self, buffer: &mut Vec<u8>) {
+        debug_assert!(!self.is_palette(), "palette styles cannot be written as VT sequences directly");
         style(buffer, *self, false);
     }
 }
@@ -636,6 +638,7 @@ impl BufferWrite for ScrollRegion {
 
 impl BufferWrite for StyleDelta {
     fn write_to_buffer(&self, buffer: &mut Vec<u8>) {
+        debug_assert!(!self.target.is_palette(), "palette styles cannot be used with StyleDelta");
         if self.current == u32::MAX {
             style(buffer, self.target, true);
             return;
