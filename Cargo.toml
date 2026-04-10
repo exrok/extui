@@ -24,3 +24,6 @@ vt100 = "0.16"
 
 [features]
 bracketed-paste = []
+
+[workspace]
+members = [ "crates/extui-neovim" ]
