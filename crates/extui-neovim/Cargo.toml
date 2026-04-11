@@ -1,0 +1,16 @@
+[package]
+name = "extui-neovim"
+version = "0.1.0"
+edition = "2024"
+description = "Embed a headless Neovim instance inside an extui DoubleBuffer region."
+license = "MIT"
+
+[dependencies]
+extui.path = "../.."
+
+[dev-dependencies]
+alacritty_terminal = "0.26.0"
+
+[[example]]
+name = "embed"
+path = "examples/embed.rs"

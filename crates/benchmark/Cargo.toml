@@ -1,0 +1,10 @@
+[package]
+name = "benchmark"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+jsony_bench.path = "/home/user/Projects/git/jsony/jsony_bench"
+extui.path = "../.."
+oorandom = "11.1.5"
+jsony = "0.1.9"
