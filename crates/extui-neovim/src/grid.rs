@@ -164,6 +164,7 @@ pub struct GridState {
     busy: bool,
     dirty: bool,
     alive: bool,
+    content_painted: bool,
 }
 
 impl GridState {
@@ -183,6 +184,7 @@ impl GridState {
             busy: false,
             dirty: false,
             alive: true,
+            content_painted: false,
         }
     }
 
@@ -222,6 +224,19 @@ impl GridState {
     /// Returns whether the embedded Neovim process is still alive.
     pub fn alive(&self) -> bool {
         self.alive
+    }
+
+    /// Returns `true` once Neovim has painted at least one non-whitespace
+    /// character into the grid.
+    ///
+    /// Useful for host TUIs that want to defer allocating screen space
+    /// for the embed until it actually has something to show — in
+    /// practice Neovim emits several redraw batches (default colors,
+    /// highlight definitions, a cleared grid, a blank statusline) before
+    /// the first real content lands, and a host that reacts to
+    /// [`take_dirty`](Self::take_dirty) alone will flash empty space.
+    pub fn has_content(&self) -> bool {
+        self.content_painted
     }
 
     /// Marks the process as no longer alive.
@@ -467,6 +482,14 @@ impl GridState {
                     col = col.saturating_add(1);
                 }
                 continue;
+            }
+            // text is guaranteed non-empty here (wide-char continuation
+            // cells were skipped above), so indexing byte 0 is safe.
+            // Checking just the leading byte is enough: multi-cell
+            // repeats of " " keep this false, while any real grapheme
+            // (ASCII non-space or any multi-byte lead byte) flips it.
+            if text.as_bytes()[0] != b' ' {
+                self.content_painted = true;
             }
             for _ in 0..repeat {
                 if col >= self.grid.width() || row >= self.grid.height() {

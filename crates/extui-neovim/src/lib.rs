@@ -342,6 +342,20 @@ impl NeovimEmbed {
             .unwrap_or_default()
     }
 
+    /// Returns `true` once Neovim has painted at least one non-whitespace
+    /// character into the grid.
+    ///
+    /// Host TUIs that want to defer allocating screen space for the embed
+    /// until it has something real to show should gate their layout on
+    /// this, rather than on [`poll_updates`](Self::poll_updates): Neovim
+    /// emits several redraw batches (default colors, highlight
+    /// definitions, a cleared grid, a blank statusline) before the first
+    /// real content lands, and reacting to the raw dirty flag flashes
+    /// empty space.
+    pub fn has_content(&self) -> bool {
+        self.state.lock().map(|g| g.has_content()).unwrap_or(false)
+    }
+
     /// Returns `true` if the embedded Neovim process is still running.
     ///
     /// This checks both the shared `alive` flag (set to `false` by the
