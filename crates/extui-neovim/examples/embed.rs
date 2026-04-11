@@ -22,6 +22,7 @@ fn main() -> std::io::Result<()> {
 
     let (w, h) = term.size()?;
     let mut buf = DoubleBuffer::new(w, h);
+    buf.set_rgb_supported(true);
     let mut events = Events::default();
     let stdin = std::io::stdin();
 
@@ -31,6 +32,9 @@ fn main() -> std::io::Result<()> {
         cmd.arg(arg);
     }
     let mut nvim = NeovimEmbed::spawn_with(cmd, w, h)?;
+    if extui::rgb_supported_from_env() {
+        nvim.set_termguicolors(true)?;
+    }
 
     loop {
         if !nvim.is_alive() {

@@ -768,15 +768,11 @@ impl Default for Writer {
 
 /// Encodes a `nvim_ui_attach` request into `w`.
 ///
-/// The options enable `ext_linegrid`, `ext_termcolors`, and `rgb=false`.
+/// The options enable `ext_linegrid`, `ext_termcolors`, and `rgb=true`.
 /// The first selects the modern line-grid protocol. `ext_termcolors`
 /// tells Neovim to leave external default colors unset so the client can
-/// inherit the host terminal defaults. `rgb=false` advertises a 256-color
-/// UI, so Neovim resolves highlight attrs for the cterm path directly.
-///
-/// `term_name`/`term_colors` mirror Neovim's own TUI client attach payload,
-/// which lets the server derive cterm attributes against the correct terminal
-/// model instead of a generic fallback.
+/// inherit the host terminal defaults. `rgb=true` advertises that the UI
+/// can display 24-bit colors once `termguicolors` is enabled inside Nvim.
 ///
 /// Sent as MessagePack-RPC request type 0.
 pub fn encode_ui_attach(
@@ -797,7 +793,7 @@ pub fn encode_ui_attach(
     let opt_count = if term_name.is_some() { 6 } else { 5 };
     w.write_map_header(opt_count);
     w.write_str("rgb");
-    w.write_bool(false);
+    w.write_bool(true);
     w.write_str("ext_linegrid");
     w.write_bool(true);
     w.write_str("ext_termcolors");
@@ -829,6 +825,17 @@ pub fn encode_input(w: &mut Writer, keys: &str) {
     w.write_str("nvim_input");
     w.write_array_header(1);
     w.write_str(keys);
+}
+
+/// Encodes `nvim_set_option_value` for a boolean option as a notification.
+pub fn encode_set_option_value_bool(w: &mut Writer, name: &str, value: bool) {
+    w.write_array_header(3);
+    w.write_u64(2);
+    w.write_str("nvim_set_option_value");
+    w.write_array_header(3);
+    w.write_str(name);
+    w.write_bool(value);
+    w.write_map_header(0);
 }
 
 /// Encodes a `nvim_input_mouse` notification into `w`.
@@ -1014,7 +1021,7 @@ mod tests {
         assert_eq!(r.read_u64().unwrap(), 24);
         assert_eq!(r.read_map_len().unwrap(), 6);
         assert_eq!(r.read_str().unwrap(), "rgb");
-        assert!(!r.read_bool().unwrap());
+        assert!(r.read_bool().unwrap());
         assert_eq!(r.read_str().unwrap(), "ext_linegrid");
         assert!(r.read_bool().unwrap());
         assert_eq!(r.read_str().unwrap(), "ext_termcolors");
@@ -1025,6 +1032,22 @@ mod tests {
         assert_eq!(r.read_str().unwrap(), "xterm-256color");
         assert_eq!(r.read_str().unwrap(), "term_colors");
         assert_eq!(r.read_u64().unwrap(), 256);
+        assert!(r.eof());
+    }
+
+    #[test]
+    fn encode_set_option_value_bool_shape() {
+        let mut w = Writer::new();
+        encode_set_option_value_bool(&mut w, "termguicolors", true);
+        let bytes = w.into_bytes();
+        let mut r = Reader::new(&bytes);
+        assert_eq!(r.read_array_len().unwrap(), 3);
+        assert_eq!(r.read_u64().unwrap(), 2);
+        assert_eq!(r.read_str().unwrap(), "nvim_set_option_value");
+        assert_eq!(r.read_array_len().unwrap(), 3);
+        assert_eq!(r.read_str().unwrap(), "termguicolors");
+        assert!(r.read_bool().unwrap());
+        assert_eq!(r.read_map_len().unwrap(), 0);
         assert!(r.eof());
     }
 

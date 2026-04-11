@@ -432,6 +432,9 @@ fn run_embed(cli: &Cli) -> io::Result<Capture> {
     }
 
     let mut nvim = NeovimEmbed::spawn_with(cmd, cli.cols, cli.rows)?;
+    if colorterm_implies_rgb(cli.colorterm.as_deref()) {
+        nvim.set_termguicolors(true)?;
+    }
     let mut terminal = VirtualTerminal::new(cli.cols, cli.rows);
     let mut raw = Vec::new();
     let mut frame_buf = DoubleBuffer::new(cli.cols, cli.rows);
@@ -577,6 +580,10 @@ fn copy_parent_env(env: &mut BTreeMap<String, String>, name: &str) {
     if let Ok(value) = std::env::var(name) {
         env.insert(name.to_owned(), value);
     }
+}
+
+fn colorterm_implies_rgb(value: Option<&str>) -> bool {
+    matches!(value, Some(v) if v.eq_ignore_ascii_case("truecolor") || v.eq_ignore_ascii_case("24bit"))
 }
 
 fn window_size(cols: u16, rows: u16) -> WindowSize {

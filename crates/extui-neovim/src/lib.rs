@@ -17,6 +17,29 @@
 //! [`extui::event::polling::initialize_global_waker`] or
 //! [`extui::event::polling::resize_waker`]). Otherwise the reader thread
 //! has no way to interrupt the main `event::poll` loop.
+//!
+//! Embedded UIs are attached as pure RPC clients, not as terminal UIs.
+//! That means Neovim's builtin TUI startup probes for things like
+//! `termguicolors` auto-detection do not run automatically. If the host has
+//! already decided whether RGB should be enabled, call
+//! [`NeovimEmbed::set_termguicolors`] explicitly.
+//!
+//! A typical setup keeps the host [`DoubleBuffer`] and Neovim in sync:
+//!
+//! ```ignore
+//! use extui::{DoubleBuffer, rgb_supported_from_env};
+//! use extui_neovim::NeovimEmbed;
+//!
+//! let mut buf = DoubleBuffer::new(width, height);
+//! let rgb = rgb_supported_from_env();
+//! buf.set_rgb_supported(rgb);
+//!
+//! let mut nvim = NeovimEmbed::spawn(width, height)?;
+//! if rgb {
+//!     nvim.set_termguicolors(true)?;
+//! }
+//! # Ok::<(), std::io::Error>(())
+//! ```
 
 use std::ffi::OsStr;
 use std::io::{self, Write};
@@ -98,9 +121,9 @@ impl NeovimEmbed {
             return Err(io::Error::other("failed to capture nvim stdout"));
         };
 
-        // Match Neovim's own TUI attach payload closely enough that the server
-        // can compute cterm defaults and highlights against the correct
-        // terminal model.
+        // Advertise a pure RPC UI. We intentionally do not set the TTY flags
+        // Neovim's builtin ui_client uses, because this embed does not forward
+        // `ui_send` terminal queries back to a real terminal.
         let term_name = command_term_name(&cmd);
         let term_colors = infer_term_colors(term_name.as_deref());
         let mut writer = Writer::with_capacity(96);
@@ -177,6 +200,19 @@ impl NeovimEmbed {
     pub fn send_input(&mut self, keys: &str) -> io::Result<()> {
         self.scratch_writer.clear();
         mp::encode_input(&mut self.scratch_writer, keys);
+        self.write_frame()
+    }
+
+    /// Sets Neovim's `termguicolors` option through RPC.
+    ///
+    /// Use this after you decide RGB support in the host.
+    ///
+    /// Keep this aligned with [`DoubleBuffer::set_rgb_supported`]. If the host
+    /// buffer is quantizing colors then leave `termguicolors` off. If the host
+    /// buffer supports RGB then enable both.
+    pub fn set_termguicolors(&mut self, enabled: bool) -> io::Result<()> {
+        self.scratch_writer.clear();
+        mp::encode_set_option_value_bool(&mut self.scratch_writer, "termguicolors", enabled);
         self.write_frame()
     }
 

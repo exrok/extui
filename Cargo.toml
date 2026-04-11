@@ -26,4 +26,5 @@ vt100 = "0.16"
 bracketed-paste = []
 
 [workspace]
-members = ["crates/benchmark", "crates/extui-neovim"]
+members = ["crates/extui-neovim"]
+exclude = ["crates/benchmark"]
