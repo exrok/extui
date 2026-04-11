@@ -15,6 +15,97 @@ use extui::{AnsiColor, Buffer, Color, CursorShape, DoubleBuffer, Rect, Rgb, Styl
 
 use crate::msgpack::{Error as MsgpackError, Kind, Reader};
 
+/// Identifies which underline variant a Neovim highlight requested.
+///
+/// The variants mirror the `underline`, `underdouble`, `undercurl`,
+/// `underdotted`, and `underdashed` boolean keys that Neovim emits in
+/// `hl_attr_define` events.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnderlineStyle {
+    /// A single straight underline.
+    Line,
+    /// A double underline.
+    Double,
+    /// A curly (squiggly) underline.
+    Curl,
+    /// A dotted underline.
+    Dotted,
+    /// A dashed underline.
+    Dashed,
+}
+
+/// Upper bound on the number of distinct decorations one
+/// [`NeovimEmbed`](crate::NeovimEmbed) can display at once.
+///
+/// A decoration is one unique combination of underline variant and
+/// `special` color. LSP themes typically need four (error, warn, info,
+/// hint) so eight slots leave headroom for a couple of plain
+/// underlines.
+pub const MAX_DECORATIONS: usize = 8;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DecorationKey {
+    style: UnderlineStyle,
+    color: Rgb,
+}
+
+struct DecorationRange {
+    offset: u8,
+    slots: [Option<DecorationKey>; MAX_DECORATIONS],
+    pending: Vec<(u8, Vec<u8>)>,
+}
+
+impl DecorationRange {
+    fn new(offset: u8) -> Self {
+        DecorationRange {
+            offset,
+            slots: [None; MAX_DECORATIONS],
+            pending: Vec::new(),
+        }
+    }
+
+    fn allocate(&mut self, key: DecorationKey) -> Option<u8> {
+        for (i, slot) in self.slots.iter().enumerate() {
+            if *slot == Some(key) {
+                return Some(self.offset.wrapping_add(i as u8));
+            }
+        }
+        let free = self.slots.iter().position(Option::is_none)?;
+        self.slots[free] = Some(key);
+        let palette_index = self.offset.wrapping_add(free as u8);
+        self.pending
+            .push((palette_index, build_decoration_bytes(key)));
+        Some(palette_index)
+    }
+}
+
+fn bake_palette(style: Style, palette: u8) -> Style {
+    let mut out = Style::palette(palette);
+    if let Some(c) = style.fg() {
+        out = out.with_fg(c);
+    }
+    if let Some(c) = style.bg() {
+        out = out.with_bg(c);
+    }
+    out
+}
+
+fn build_decoration_bytes(key: DecorationKey) -> Vec<u8> {
+    use std::io::Write;
+    let mut out = Vec::with_capacity(24);
+    let underline: &[u8] = match key.style {
+        UnderlineStyle::Line => b"\x1b[4m",
+        UnderlineStyle::Double => b"\x1b[4:2m",
+        UnderlineStyle::Curl => b"\x1b[4:3m",
+        UnderlineStyle::Dotted => b"\x1b[4:4m",
+        UnderlineStyle::Dashed => b"\x1b[4:5m",
+    };
+    out.extend_from_slice(underline);
+    let Rgb(r, g, b) = key.color;
+    let _ = write!(out, "\x1b[58;2;{r};{g};{b}m");
+    out
+}
+
 /// Error raised while applying a redraw event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
@@ -43,21 +134,18 @@ impl Default for ModeInfo {
     }
 }
 
-/// Both flavours of a resolved highlight attribute.
-///
-/// Stored once per `hl_attr_define` id so the render path can pick the
-/// right [`Style`] in O(1) based on the current `termguicolors` setting
-/// without touching the raw attr map.
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct HlEntry {
     rgb: Style,
     cterm: Style,
+    decoration: Option<DecorationKey>,
 }
 
 impl HlEntry {
     const DEFAULT: HlEntry = HlEntry {
         rgb: Style::DEFAULT,
         cterm: Style::DEFAULT,
+        decoration: None,
     };
 }
 
@@ -69,6 +157,7 @@ pub struct GridState {
     default_rgb_style: Style,
     default_cterm_style: Style,
     hl_attrs: Vec<HlEntry>,
+    decoration_range: Option<DecorationRange>,
     termguicolors: bool,
     modes: Vec<ModeInfo>,
     current_mode: usize,
@@ -87,6 +176,7 @@ impl GridState {
             default_rgb_style: Style::DEFAULT,
             default_cterm_style: Style::DEFAULT,
             hl_attrs: vec![HlEntry::DEFAULT],
+            decoration_range: None,
             termguicolors: true,
             modes: Vec::new(),
             current_mode: 0,
@@ -170,7 +260,7 @@ impl GridState {
     ///
     /// This runs once per run of same-styled cells inside
     /// `apply_grid_line`, never from the render path.
-    fn style_for(&self, hl_id: u64) -> Style {
+    fn style_for(&mut self, hl_id: u64) -> Style {
         let id = hl_id as usize;
         if id == 0 {
             return self.current_default_style();
@@ -192,7 +282,36 @@ impl GridState {
                 style = style.with_bg(c);
             }
         }
+        if let (Some(key), Some(range)) = (entry.decoration, self.decoration_range.as_mut()) {
+            if let Some(palette) = range.allocate(key) {
+                style = bake_palette(style, palette);
+            }
+        }
         style
+    }
+
+    /// Enables styled underlines backed by palette slots
+    /// `offset..offset + MAX_DECORATIONS`.
+    ///
+    /// See [`NeovimEmbed::enable_decorations`](crate::NeovimEmbed::enable_decorations)
+    /// for the user facing entry point.
+    pub fn enable_decorations(&mut self, offset: u8) {
+        self.decoration_range = Some(DecorationRange::new(offset));
+        self.dirty = true;
+    }
+
+    /// Installs any pending decoration escape bytes into `buf`.
+    ///
+    /// [`NeovimEmbed::render`](crate::NeovimEmbed::render) calls this
+    /// automatically before painting. Hosts that bypass `render` and
+    /// drive [`GridState`] directly can call it themselves.
+    pub fn sync_palettes(&mut self, buf: &mut DoubleBuffer) {
+        let Some(range) = self.decoration_range.as_mut() else {
+            return;
+        };
+        for (index, bytes) in range.pending.drain(..) {
+            buf.set_palette(index, bytes);
+        }
     }
 
     fn put_hl_attr(&mut self, id: u64, entry: HlEntry) {
@@ -429,16 +548,15 @@ impl GridState {
         }
         self.default_rgb_style = rgb_style;
         self.default_cterm_style = cterm_style;
+        let default_entry = HlEntry {
+            rgb: rgb_style,
+            cterm: cterm_style,
+            decoration: None,
+        };
         if self.hl_attrs.is_empty() {
-            self.hl_attrs.push(HlEntry {
-                rgb: rgb_style,
-                cterm: cterm_style,
-            });
+            self.hl_attrs.push(default_entry);
         } else {
-            self.hl_attrs[0] = HlEntry {
-                rgb: rgb_style,
-                cterm: cterm_style,
-            };
+            self.hl_attrs[0] = default_entry;
         }
         self.dirty = true;
         Ok(())
@@ -469,11 +587,16 @@ impl GridState {
         if let Some(c) = cterm.bg {
             cterm_style = cterm_style.with_bg(c);
         }
+        let decoration = match (rgb.underline, rgb.special) {
+            (Some(style), Some(color)) => Some(DecorationKey { style, color }),
+            _ => None,
+        };
         self.put_hl_attr(
             id,
             HlEntry {
                 rgb: rgb_style,
                 cterm: cterm_style,
+                decoration,
             },
         );
         self.dirty = true;
@@ -571,15 +694,23 @@ struct AttrMap {
     fg: Option<Color>,
     bg: Option<Color>,
     modifiers: Style,
+    underline: Option<UnderlineStyle>,
+    special: Option<Rgb>,
+}
+
+impl AttrMap {
+    const EMPTY: AttrMap = AttrMap {
+        fg: None,
+        bg: None,
+        modifiers: Style::DEFAULT,
+        underline: None,
+        special: None,
+    };
 }
 
 fn read_attr_map(r: &mut Reader<'_>) -> Result<AttrMap, Error> {
     let n = r.read_map_len()?;
-    let mut out = AttrMap {
-        fg: None,
-        bg: None,
-        modifiers: Style::DEFAULT,
-    };
+    let mut out = AttrMap::EMPTY;
     for _ in 0..n {
         let key = r.read_str()?;
         match key {
@@ -602,6 +733,7 @@ fn read_attr_map(r: &mut Reader<'_>) -> Result<AttrMap, Error> {
             "underline" | "underdouble" | "undercurl" | "underdotted" | "underdashed" => {
                 if r.read_bool()? {
                     out.modifiers = out.modifiers | Style::from(Modifier::UNDERLINED);
+                    out.underline = Some(underline_kind_from_key(key));
                 }
             }
             "reverse" | "standout" => {
@@ -622,6 +754,16 @@ fn read_attr_map(r: &mut Reader<'_>) -> Result<AttrMap, Error> {
     Ok(out)
 }
 
+fn underline_kind_from_key(key: &str) -> UnderlineStyle {
+    match key {
+        "underdouble" => UnderlineStyle::Double,
+        "undercurl" => UnderlineStyle::Curl,
+        "underdotted" => UnderlineStyle::Dotted,
+        "underdashed" => UnderlineStyle::Dashed,
+        _ => UnderlineStyle::Line,
+    }
+}
+
 /// Reads an `hl_attr_define` rgb-attr dict, preserving 24-bit colors.
 ///
 /// Modifier bits are collected identically to [`read_attr_map`]; the
@@ -630,16 +772,13 @@ fn read_attr_map(r: &mut Reader<'_>) -> Result<AttrMap, Error> {
 /// [`DoubleBuffer`] quantizes on emission.
 fn read_rgb_attr_map(r: &mut Reader<'_>) -> Result<AttrMap, Error> {
     let n = r.read_map_len()?;
-    let mut out = AttrMap {
-        fg: None,
-        bg: None,
-        modifiers: Style::DEFAULT,
-    };
+    let mut out = AttrMap::EMPTY;
     for _ in 0..n {
         let key = r.read_str()?;
         match key {
             "foreground" => out.fg = read_rgb_color(r)?,
             "background" => out.bg = read_rgb_color(r)?,
+            "special" => out.special = read_rgb_rgb(r)?,
             "bold" => {
                 if r.read_bool()? {
                     out.modifiers = out.modifiers | Style::from(Modifier::BOLD);
@@ -653,6 +792,7 @@ fn read_rgb_attr_map(r: &mut Reader<'_>) -> Result<AttrMap, Error> {
             "underline" | "underdouble" | "undercurl" | "underdotted" | "underdashed" => {
                 if r.read_bool()? {
                     out.modifiers = out.modifiers | Style::from(Modifier::UNDERLINED);
+                    out.underline = Some(underline_kind_from_key(key));
                 }
             }
             "reverse" | "standout" => {
@@ -671,6 +811,29 @@ fn read_rgb_attr_map(r: &mut Reader<'_>) -> Result<AttrMap, Error> {
         }
     }
     Ok(out)
+}
+
+/// Reads a `special` color (e.g. the undercurl colour) from an
+/// `hl_attr_define` rgb-attr dict as a bare [`Rgb`] triple.
+fn read_rgb_rgb(r: &mut Reader<'_>) -> Result<Option<Rgb>, Error> {
+    match r.peek_kind()? {
+        Kind::Nil => {
+            r.read_nil()?;
+            Ok(None)
+        }
+        Kind::Int => {
+            let v = r.read_i64()?;
+            if !(0..=0xff_ff_ff).contains(&v) {
+                return Ok(None);
+            }
+            let v = v as u32;
+            Ok(Some(Rgb((v >> 16) as u8, (v >> 8) as u8, v as u8)))
+        }
+        _ => {
+            r.skip()?;
+            Ok(None)
+        }
+    }
 }
 
 fn read_rgb_color(r: &mut Reader<'_>) -> Result<Option<Color>, Error> {
@@ -1154,6 +1317,112 @@ mod tests {
         let cell = g.grid.cells()[0];
         assert!(cell.is_handle());
         assert_eq!(g.grid.handle_text(cell).unwrap(), flag.as_bytes());
+    }
+
+    fn write_undercurl_hl(w: &mut Writer, id: u64, special: u32) {
+        w.write_array_header(2);
+        w.write_str("hl_attr_define");
+        w.write_array_header(4);
+        w.write_u64(id);
+        w.write_map_header(2);
+        w.write_str("undercurl");
+        w.write_bool(true);
+        w.write_str("special");
+        w.write_u64(special as u64);
+        w.write_map_header(1);
+        w.write_str("undercurl");
+        w.write_bool(true);
+        w.write_array_header(0);
+    }
+
+    #[test]
+    fn decorations_allocate_palette_slots_per_underline_and_special() {
+        let bytes = build_redraw(&[
+            &|w| write_undercurl_hl(w, 1, 0xff_00_00),
+            &|w| write_undercurl_hl(w, 2, 0xff_aa_00),
+            // Same (style, color) as id=1 → should share slot 0.
+            &|w| write_undercurl_hl(w, 3, 0xff_00_00),
+        ]);
+        let mut g = GridState::new(1, 1);
+        g.enable_decorations(32);
+        let mut r = Reader::new(&bytes);
+        g.apply_redraw(&mut r).unwrap();
+
+        let s1 = g.style_for(1);
+        let s2 = g.style_for(2);
+        let s3 = g.style_for(3);
+        assert!(s1.is_palette());
+        assert!(s2.is_palette());
+        assert!(s3.is_palette());
+        assert_eq!(s1.palette_index(), 32);
+        assert_eq!(s2.palette_index(), 33);
+        assert_eq!(s3.palette_index(), 32);
+
+        let mut buf = extui::DoubleBuffer::new(1, 1);
+        g.sync_palettes(&mut buf);
+        let p = buf.palette();
+        // Slots 0..=31 should be untouched; 32 & 33 hold the escape bytes.
+        assert!(p.len() >= 34);
+        assert!(p[32].windows(4).any(|w| w == b"\x1b[4:"));
+        assert!(p[32].windows(2).any(|w| w == b"58"));
+        assert!(p[33].windows(4).any(|w| w == b"\x1b[4:"));
+    }
+
+    #[test]
+    fn decorations_apply_even_when_enabled_after_hl_attr_define() {
+        // Matches the real embed sequence: Neovim delivers its full
+        // highlight table right after ui_attach, so `enable_decorations`
+        // is almost always called with highlights already in place.
+        let bytes = build_redraw(&[&|w| write_undercurl_hl(w, 1, 0xff_00_00)]);
+        let mut g = GridState::new(1, 1);
+        let mut r = Reader::new(&bytes);
+        g.apply_redraw(&mut r).unwrap();
+        assert!(!g.style_for(1).is_palette());
+
+        g.enable_decorations(16);
+        let resolved = g.style_for(1);
+        assert!(resolved.is_palette());
+        assert_eq!(resolved.palette_index(), 16);
+    }
+
+    #[test]
+    fn decorations_disabled_leaves_underline_modifier_intact() {
+        let bytes = build_redraw(&[&|w| write_undercurl_hl(w, 1, 0xff_00_00)]);
+        let mut g = GridState::new(1, 1);
+        let mut r = Reader::new(&bytes);
+        g.apply_redraw(&mut r).unwrap();
+        let s = g.style_for(1);
+        assert!(!s.is_palette());
+        assert!(s.modifiers().has(Modifier::UNDERLINED));
+    }
+
+    #[test]
+    fn decorations_overflow_falls_back_to_plain_underline() {
+        // Register 9 distinct colours into a range of MAX_DECORATIONS=8.
+        let mut events: Vec<Box<dyn Fn(&mut Writer)>> = Vec::new();
+        for i in 0..(MAX_DECORATIONS as u64 + 1) {
+            let id = i + 1;
+            let color = 0x10_00_00 * (i as u32 + 1);
+            events.push(Box::new(move |w: &mut Writer| {
+                write_undercurl_hl(w, id, color);
+            }));
+        }
+        let refs: Vec<&dyn Fn(&mut Writer)> = events.iter().map(|b| b.as_ref()).collect();
+        let bytes = build_redraw(&refs);
+
+        let mut g = GridState::new(1, 1);
+        g.enable_decorations(0);
+        let mut r = Reader::new(&bytes);
+        g.apply_redraw(&mut r).unwrap();
+
+        for i in 0..MAX_DECORATIONS as u64 {
+            assert!(g.style_for(i + 1).is_palette());
+        }
+        // The 9th unique decoration has no room left in the range and
+        // must gracefully fall back to the plain underline modifier.
+        let overflow = g.style_for(MAX_DECORATIONS as u64 + 1);
+        assert!(!overflow.is_palette());
+        assert!(overflow.modifiers().has(Modifier::UNDERLINED));
     }
 
     #[test]

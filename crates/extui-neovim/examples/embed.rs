@@ -35,6 +35,7 @@ fn main() -> std::io::Result<()> {
     if extui::rgb_supported_from_env() {
         nvim.set_termguicolors(true)?;
     }
+    nvim.enable_decorations(0);
 
     loop {
         if !nvim.is_alive() {

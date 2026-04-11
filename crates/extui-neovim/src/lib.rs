@@ -59,6 +59,7 @@ pub mod reader;
 pub use extui::CursorShape;
 
 use crate::grid::GridState;
+pub use crate::grid::{MAX_DECORATIONS, UnderlineStyle};
 use crate::msgpack::{self as mp, Writer};
 
 const UI_ATTACH_MSGID: u32 = 0;
@@ -203,6 +204,39 @@ impl NeovimEmbed {
         self.write_frame()
     }
 
+    /// Enables colored underlines, squiggles, and other Neovim
+    /// decorations.
+    ///
+    /// Reserves the palette slot range
+    /// `palette_offset..palette_offset + MAX_DECORATIONS` on the host
+    /// [`DoubleBuffer`] for the embed's exclusive use. Each distinct
+    /// combination of underline variant and color that Neovim asks for
+    /// is assigned one slot from that range, and styled underlines
+    /// render in the terminal with their intended color.
+    ///
+    /// Up to [`MAX_DECORATIONS`] distinct decorations are supported at
+    /// once. Any further combinations fall back to a plain underline.
+    ///
+    /// The reserved slots must not be written to from outside the
+    /// embed, otherwise the underline bytes will be overwritten.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// use extui::DoubleBuffer;
+    /// use extui_neovim::NeovimEmbed;
+    ///
+    /// let mut buf = DoubleBuffer::new(80, 24);
+    /// let mut nvim = NeovimEmbed::spawn(80, 24)?;
+    /// nvim.enable_decorations(0);
+    /// # Ok::<(), std::io::Error>(())
+    /// ```
+    pub fn enable_decorations(&mut self, palette_offset: u8) {
+        if let Ok(mut guard) = self.state.lock() {
+            guard.enable_decorations(palette_offset);
+        }
+    }
+
     /// Sets Neovim's `termguicolors` option through RPC.
     ///
     /// Use this after you decide RGB support in the host.
@@ -265,9 +299,10 @@ impl NeovimEmbed {
     /// state into [`DoubleBuffer::set_cursor`] / [`DoubleBuffer::hide_cursor`],
     /// so the host does not need to emit cursor escapes by hand.
     pub fn render(&self, rect: Rect, buf: &mut DoubleBuffer) {
-        let Ok(guard) = self.state.lock() else {
+        let Ok(mut guard) = self.state.lock() else {
             return;
         };
+        guard.sync_palettes(buf);
         guard.render(rect, buf);
 
         if guard.is_busy() {
