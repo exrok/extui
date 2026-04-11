@@ -7,7 +7,7 @@
 //! efficiently.
 //!
 //! ```no_run
-//! use extui::{Rect, DoubleBuffer, Style, Color};
+//! use extui::{Rect, DoubleBuffer, Style};
 //!
 //! fn render_list(items: &[&str], mut area: Rect, buf: &mut DoubleBuffer) {
 //!     for item in items {
@@ -24,17 +24,20 @@
 //! extui intentionally omits certain features for simpler interfaces and better
 //! performance:
 //!
-//! - **8-bit color only** - No 24-bit (true color) support. The 256-color palette
-//!   covers most use cases with significantly simpler encoding.
-//! - **4-byte grapheme limit** - Characters exceeding 4 bytes are truncated. This
-//!   enables fixed-size [`Cell`] storage. Most text fits within this limit.
+//! - **7-byte grapheme limit** - Grapheme clusters exceeding 7 bytes are dropped.
+//!   This enables a fixed-size 16-byte [`Cell`] layout. Most text fits within this
+//!   limit; flag emoji and skin-tone ZWJ sequences may be dropped.
 //! - **Unix only** - No Windows support. This allows direct use of POSIX APIs
 //!   without abstraction overhead.
+//!
+//! Foreground and background colors can be either a 256-color palette index
+//! ([`AnsiColor`]) or a 24-bit RGB value ([`Rgb`]), selected per cell. Use
+//! [`Color`] to hold either variant.
 //!
 //! # Getting Started
 //!
 //! ```no_run
-//! use extui::{Terminal, TerminalFlags, DoubleBuffer, Style, Color};
+//! use extui::{Terminal, TerminalFlags, DoubleBuffer, Style, AnsiColor};
 //! use extui::event::{self, Event, KeyCode, Events};
 //!
 //! // Open terminal in raw mode with alternate screen
@@ -48,7 +51,7 @@
 //!
 //! loop {
 //!     // Render
-//!     buf.rect().with(Color::Blue1.as_bg()).fill(&mut buf);
+//!     buf.rect().with(AnsiColor::Blue1.as_bg()).fill(&mut buf);
 //!     buf.rect().with(Style::DEFAULT).text(&mut buf, "Press 'q' to quit");
 //!     buf.render(&mut term);
 //!
@@ -118,18 +121,39 @@ macro_rules! splat {
 
 /// A single terminal cell containing styled text.
 ///
-/// Stores a grapheme cluster (up to 4 bytes) along with its associated
-/// [`Style`]. Cells are the fundamental unit for terminal rendering.
+/// Stores a grapheme cluster along with its associated [`Style`]. Cells are
+/// the fundamental unit for terminal rendering.
 ///
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub struct Cell(u64);
+/// The 8-byte `text` field is a tagged union controlled by `text[7]`:
+///
+/// - **Inline** (`text[7]` ∈ `0..=7`): `text[0..text[7]]` holds the UTF-8 bytes.
+/// - **Handle** (`text[7]` ∈ `8..=255`): `text[0..4]` is a u32 little-endian
+///   byte offset into the owning [`Buffer`]'s [`SideBuffer`]. `text[7]` holds
+///   the grapheme's length in bytes.
+///
+/// Cell is intentionally **not** `PartialEq`/`Eq`: a handle cell's identity
+/// depends on the contents of an external [`SideBuffer`] that the `Cell`
+/// itself cannot reach. Use [`Buffer::cells_eq`] (or the internal
+/// `cells_eq` helper) when comparing cells drawn from two buffers.
+#[repr(C, align(16))]
+#[derive(Clone, Copy)]
+pub struct Cell {
+    pub(crate) style: u64,
+    pub(crate) text: [u8; 8],
+}
 
 impl std::fmt::Debug for Cell {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Cell")
-            .field("style", &self.style())
-            .field("text", &self.text())
-            .finish()
+        let mut s = f.debug_struct("Cell");
+        s.field("style", &self.style());
+        if self.is_handle() {
+            s.field("handle_offset", &self.handle_offset())
+                .field("len", &self.text[7]);
+        } else {
+            // SAFETY: inline path. `text_inline` returns valid UTF-8.
+            s.field("text", &self.text_inline().unwrap_or(""));
+        }
+        s.finish()
     }
 }
 
@@ -366,8 +390,8 @@ impl BoxStyle {
 /// Computes the minimal set of escape codes needed to change from the
 /// current style to the target style.
 pub struct StyleDelta {
-    current: u32,
-    target: Style,
+    pub(crate) current: u64,
+    pub(crate) target: Style,
 }
 
 impl StyleDelta {
@@ -389,15 +413,18 @@ impl StyleDelta {
 /// # Examples
 ///
 /// ```
-/// use extui::{Style, Color, vt::Modifier};
+/// use extui::{Style, AnsiColor, Color, vt::Modifier};
 ///
-/// let style = Style::DEFAULT
-///     .with_fg(Color::Red1)
-///     .with_bg(Color::Black)
+/// let palette = Style::DEFAULT
+///     .with_fg(AnsiColor::Red1)
+///     .with_bg(AnsiColor::Black)
 ///     .with_modifier(Modifier::BOLD);
+///
+/// // 24-bit RGB is also supported per cell:
+/// let rgb = Style::DEFAULT.with_fg(Color::rgb(255, 128, 0));
 /// ```
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
-pub struct Style(u32);
+pub struct Style(pub(crate) u64);
 
 impl std::fmt::Debug for Style {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -415,6 +442,103 @@ impl std::fmt::Debug for Style {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rgb(pub u8, pub u8, pub u8);
+
+impl Rgb {
+    /// Maps this 24-bit RGB triple to the nearest 256-color palette index.
+    ///
+    /// Uses xterm's exact cube/grayscale tables (not a naive `v*6/256`) so
+    /// greys like `#767676` round to the grayscale ramp entry the user
+    /// actually sees in a 256-color xterm, and colors snap to their
+    /// intended cube slot. A round-trip through quantization stays stable
+    /// against the tables in `hl_cterm2rgb_color`.
+    pub const fn to_ansi(self) -> AnsiColor {
+        const CUBE_LEVELS: [i32; 6] = [0x00, 0x5f, 0x87, 0xaf, 0xd7, 0xff];
+        const GREY_LEVELS: [i32; 24] = [
+            0x08, 0x12, 0x1c, 0x26, 0x30, 0x3a, 0x44, 0x4e, 0x58, 0x62, 0x6c, 0x76, 0x80, 0x8a,
+            0x94, 0x9e, 0xa8, 0xb2, 0xbc, 0xc6, 0xd0, 0xda, 0xe4, 0xee,
+        ];
+
+        const fn closest(value: i32, table: &[i32]) -> usize {
+            let mut best = 0;
+            let mut best_d = i32::MAX;
+            let mut i = 0;
+            while i < table.len() {
+                let d = (value - table[i]).abs();
+                if d < best_d {
+                    best_d = d;
+                    best = i;
+                }
+                i += 1;
+            }
+            best
+        }
+
+        let Rgb(r, g, b) = self;
+        let r = r as i32;
+        let g = g as i32;
+        let b = b as i32;
+
+        let ci_r = closest(r, &CUBE_LEVELS);
+        let ci_g = closest(g, &CUBE_LEVELS);
+        let ci_b = closest(b, &CUBE_LEVELS);
+        let cube_idx = 16 + ci_r * 36 + ci_g * 6 + ci_b;
+        let cube_r = CUBE_LEVELS[ci_r];
+        let cube_g = CUBE_LEVELS[ci_g];
+        let cube_b = CUBE_LEVELS[ci_b];
+        let cube_dist = (r - cube_r).pow(2) + (g - cube_g).pow(2) + (b - cube_b).pow(2);
+
+        // The grayscale ramp is only a candidate when the color is close to
+        // neutral; picking the nearest ramp cell for saturated colors would
+        // wash them out.
+        let avg = (r + g + b) / 3;
+        let gi = closest(avg, &GREY_LEVELS);
+        let grey_level = GREY_LEVELS[gi];
+        let grey_dist = (r - grey_level).pow(2) + (g - grey_level).pow(2) + (b - grey_level).pow(2);
+
+        if grey_dist < cube_dist {
+            AnsiColor((232 + gi) as u8)
+        } else {
+            AnsiColor(cube_idx as u8)
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Color {
+    Ansi(AnsiColor),
+    Rgb(Rgb),
+}
+
+impl Color {
+    pub fn rgb(r: u8, g: u8, b: u8) -> Self {
+        Color::Rgb(Rgb(r, g, b))
+    }
+    pub fn ansi(color: u8) -> Self {
+        Color::Ansi(AnsiColor(color))
+    }
+
+    /// Returns this color as an [`AnsiColor`], quantizing RGB if needed.
+    pub const fn to_ansi(self) -> AnsiColor {
+        match self {
+            Color::Ansi(c) => c,
+            Color::Rgb(rgb) => rgb.to_ansi(),
+        }
+    }
+}
+
+impl From<AnsiColor> for Color {
+    fn from(value: AnsiColor) -> Self {
+        Color::Ansi(value)
+    }
+}
+
+impl From<Rgb> for Color {
+    fn from(value: Rgb) -> Self {
+        Color::Rgb(value)
+    }
+}
 /// A 256-color palette index.
 ///
 /// Provides named constants for common colors and a grayscale ramp.
@@ -423,204 +547,204 @@ impl std::fmt::Debug for Style {
 /// # Examples
 ///
 /// ```
-/// use extui::Color;
+/// use extui::AnsiColor;
 ///
-/// let red = Color::Red1;
-/// let gray = Color::Grey[15];
-/// let custom = Color(42);
+/// let red = AnsiColor::Red1;
+/// let gray = AnsiColor::Grey[15];
+/// let custom = AnsiColor(42);
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Color(pub u8);
+pub struct AnsiColor(pub u8);
 
 #[allow(non_upper_case_globals)]
-impl Color {
-    pub const NavyBlue: Color = Color(17);
-    pub const DarkBlue: Color = Color(18);
-    pub const Blue3: Color = Color(19);
-    pub const Blue1: Color = Color(21);
-    pub const DarkGreen: Color = Color(22);
-    pub const DeepSkyBlue4: Color = Color(23);
-    pub const DodgerBlue3: Color = Color(26);
-    pub const DodgerBlue2: Color = Color(27);
-    pub const Green4: Color = Color(28);
-    pub const SpringGreen4: Color = Color(29);
-    pub const Turquoise4: Color = Color(30);
-    pub const DeepSkyBlue3: Color = Color(31);
-    pub const DodgerBlue1: Color = Color(33);
-    pub const Green3: Color = Color(34);
-    pub const DarkCyan: Color = Color(36);
-    pub const DeepSkyBlue2: Color = Color(38);
-    pub const DeepSkyBlue1: Color = Color(39);
-    pub const SpringGreen3: Color = Color(41);
-    pub const SpringGreen: Color = Color(42);
-    pub const Cyan3: Color = Color(43);
-    pub const DarkTurquoise: Color = Color(44);
-    pub const Turquoise2: Color = Color(45);
-    pub const Green1: Color = Color(46);
-    pub const SpringGreen2: Color = Color(47);
-    pub const SpringGreen1: Color = Color(48);
-    pub const MediumSpringGreen: Color = Color(49);
-    pub const Cyan2: Color = Color(50);
-    pub const Cyan1: Color = Color(51);
-    pub const DarkRed: Color = Color(52);
-    pub const DeepPink4: Color = Color(53);
-    pub const Purple3: Color = Color(56);
-    pub const BlueViolet: Color = Color(57);
-    pub const Orange4: Color = Color(58);
-    pub const MediumPurple4: Color = Color(60);
-    pub const SlateBlue3: Color = Color(61);
-    pub const RoyalBlue1: Color = Color(63);
-    pub const Chartreuse4: Color = Color(64);
-    pub const PaleTurquoise4: Color = Color(66);
-    pub const SteelBlue: Color = Color(67);
-    pub const SteelBlue3: Color = Color(68);
-    pub const CornflowerBlue: Color = Color(69);
-    pub const Chartreuse3: Color = Color(70);
-    pub const DarkSeaGreen4: Color = Color(71);
-    pub const CadetBlue: Color = Color(72);
-    pub const SkyBlue3: Color = Color(74);
-    pub const SteelBlue1: Color = Color(75);
-    pub const PaleGreen3: Color = Color(77);
-    pub const SeaGreen3: Color = Color(78);
-    pub const Aquamarine3: Color = Color(79);
-    pub const MediumTurquoise: Color = Color(80);
-    pub const Chartreuse2: Color = Color(82);
-    pub const Aquamarine1: Color = Color(86);
-    pub const DarkSlateGray2: Color = Color(87);
-    pub const DarkViolet: Color = Color(92);
-    pub const Purple: Color = Color(93);
-    pub const LightPink4: Color = Color(95);
-    pub const Plum4: Color = Color(96);
-    pub const SlateBlue1: Color = Color(99);
-    pub const Yellow4: Color = Color(100);
-    pub const Wheat4: Color = Color(101);
-    pub const LightSlateGrey: Color = Color(103);
-    pub const MediumPurple: Color = Color(104);
-    pub const LightSlateBlue: Color = Color(105);
-    pub const DarkOliveGreen3: Color = Color(107);
-    pub const DarkSeaGreen: Color = Color(108);
-    pub const Grey: [Color; 31] = [
-        Color(16),
-        Color(232),
-        Color(233),
-        Color(234),
-        Color(235),
-        Color(236),
-        Color(237),
-        Color(238),
-        Color(239),
-        Color(240),
-        Color(59),
-        Color(241),
-        Color(242),
-        Color(243),
-        Color(244),
-        Color(102),
-        Color(245),
-        Color(246),
-        Color(247),
-        Color(139),
-        Color(248),
-        Color(145),
-        Color(249),
-        Color(250),
-        Color(251),
-        Color(252),
-        Color(188),
-        Color(253),
-        Color(254),
-        Color(255),
-        Color(231),
+impl AnsiColor {
+    pub const NavyBlue: AnsiColor = AnsiColor(17);
+    pub const DarkBlue: AnsiColor = AnsiColor(18);
+    pub const Blue3: AnsiColor = AnsiColor(19);
+    pub const Blue1: AnsiColor = AnsiColor(21);
+    pub const DarkGreen: AnsiColor = AnsiColor(22);
+    pub const DeepSkyBlue4: AnsiColor = AnsiColor(23);
+    pub const DodgerBlue3: AnsiColor = AnsiColor(26);
+    pub const DodgerBlue2: AnsiColor = AnsiColor(27);
+    pub const Green4: AnsiColor = AnsiColor(28);
+    pub const SpringGreen4: AnsiColor = AnsiColor(29);
+    pub const Turquoise4: AnsiColor = AnsiColor(30);
+    pub const DeepSkyBlue3: AnsiColor = AnsiColor(31);
+    pub const DodgerBlue1: AnsiColor = AnsiColor(33);
+    pub const Green3: AnsiColor = AnsiColor(34);
+    pub const DarkCyan: AnsiColor = AnsiColor(36);
+    pub const DeepSkyBlue2: AnsiColor = AnsiColor(38);
+    pub const DeepSkyBlue1: AnsiColor = AnsiColor(39);
+    pub const SpringGreen3: AnsiColor = AnsiColor(41);
+    pub const SpringGreen: AnsiColor = AnsiColor(42);
+    pub const Cyan3: AnsiColor = AnsiColor(43);
+    pub const DarkTurquoise: AnsiColor = AnsiColor(44);
+    pub const Turquoise2: AnsiColor = AnsiColor(45);
+    pub const Green1: AnsiColor = AnsiColor(46);
+    pub const SpringGreen2: AnsiColor = AnsiColor(47);
+    pub const SpringGreen1: AnsiColor = AnsiColor(48);
+    pub const MediumSpringGreen: AnsiColor = AnsiColor(49);
+    pub const Cyan2: AnsiColor = AnsiColor(50);
+    pub const Cyan1: AnsiColor = AnsiColor(51);
+    pub const DarkRed: AnsiColor = AnsiColor(52);
+    pub const DeepPink4: AnsiColor = AnsiColor(53);
+    pub const Purple3: AnsiColor = AnsiColor(56);
+    pub const BlueViolet: AnsiColor = AnsiColor(57);
+    pub const Orange4: AnsiColor = AnsiColor(58);
+    pub const MediumPurple4: AnsiColor = AnsiColor(60);
+    pub const SlateBlue3: AnsiColor = AnsiColor(61);
+    pub const RoyalBlue1: AnsiColor = AnsiColor(63);
+    pub const Chartreuse4: AnsiColor = AnsiColor(64);
+    pub const PaleTurquoise4: AnsiColor = AnsiColor(66);
+    pub const SteelBlue: AnsiColor = AnsiColor(67);
+    pub const SteelBlue3: AnsiColor = AnsiColor(68);
+    pub const CornflowerBlue: AnsiColor = AnsiColor(69);
+    pub const Chartreuse3: AnsiColor = AnsiColor(70);
+    pub const DarkSeaGreen4: AnsiColor = AnsiColor(71);
+    pub const CadetBlue: AnsiColor = AnsiColor(72);
+    pub const SkyBlue3: AnsiColor = AnsiColor(74);
+    pub const SteelBlue1: AnsiColor = AnsiColor(75);
+    pub const PaleGreen3: AnsiColor = AnsiColor(77);
+    pub const SeaGreen3: AnsiColor = AnsiColor(78);
+    pub const Aquamarine3: AnsiColor = AnsiColor(79);
+    pub const MediumTurquoise: AnsiColor = AnsiColor(80);
+    pub const Chartreuse2: AnsiColor = AnsiColor(82);
+    pub const Aquamarine1: AnsiColor = AnsiColor(86);
+    pub const DarkSlateGray2: AnsiColor = AnsiColor(87);
+    pub const DarkViolet: AnsiColor = AnsiColor(92);
+    pub const Purple: AnsiColor = AnsiColor(93);
+    pub const LightPink4: AnsiColor = AnsiColor(95);
+    pub const Plum4: AnsiColor = AnsiColor(96);
+    pub const SlateBlue1: AnsiColor = AnsiColor(99);
+    pub const Yellow4: AnsiColor = AnsiColor(100);
+    pub const Wheat4: AnsiColor = AnsiColor(101);
+    pub const LightSlateGrey: AnsiColor = AnsiColor(103);
+    pub const MediumPurple: AnsiColor = AnsiColor(104);
+    pub const LightSlateBlue: AnsiColor = AnsiColor(105);
+    pub const DarkOliveGreen3: AnsiColor = AnsiColor(107);
+    pub const DarkSeaGreen: AnsiColor = AnsiColor(108);
+    pub const Grey: [AnsiColor; 31] = [
+        AnsiColor(16),
+        AnsiColor(232),
+        AnsiColor(233),
+        AnsiColor(234),
+        AnsiColor(235),
+        AnsiColor(236),
+        AnsiColor(237),
+        AnsiColor(238),
+        AnsiColor(239),
+        AnsiColor(240),
+        AnsiColor(59),
+        AnsiColor(241),
+        AnsiColor(242),
+        AnsiColor(243),
+        AnsiColor(244),
+        AnsiColor(102),
+        AnsiColor(245),
+        AnsiColor(246),
+        AnsiColor(247),
+        AnsiColor(139),
+        AnsiColor(248),
+        AnsiColor(145),
+        AnsiColor(249),
+        AnsiColor(250),
+        AnsiColor(251),
+        AnsiColor(252),
+        AnsiColor(188),
+        AnsiColor(253),
+        AnsiColor(254),
+        AnsiColor(255),
+        AnsiColor(231),
     ];
-    pub const SkyBlue2: Color = Color(111);
-    pub const DarkOliveGreen: Color = Color(113);
-    pub const DarkSeaGreen3: Color = Color(115);
-    pub const DarkSlateGray3: Color = Color(116);
-    pub const SkyBlue1: Color = Color(117);
-    pub const Chartreuse1: Color = Color(118);
-    pub const LightGreen: Color = Color(119);
-    pub const PaleGreen1: Color = Color(121);
-    pub const DarkSlateGray1: Color = Color(123);
-    pub const Red3: Color = Color(124);
-    pub const MediumVioletRed: Color = Color(126);
-    pub const Magenta3: Color = Color(127);
-    pub const DarkOrange3: Color = Color(130);
-    pub const IndianRed: Color = Color(131);
-    pub const HotPink3: Color = Color(132);
-    pub const MediumOrchid3: Color = Color(133);
-    pub const MediumOrchid: Color = Color(134);
-    pub const DarkGoldenrod: Color = Color(136);
-    pub const LightSalmon3: Color = Color(137);
-    pub const RosyBrown: Color = Color(138);
-    pub const Violet: Color = Color(140);
-    pub const MediumPurple1: Color = Color(141);
-    pub const Gold3: Color = Color(142);
-    pub const DarkKhaki: Color = Color(143);
-    pub const NavajoWhite3: Color = Color(144);
-    pub const LightSteelBlue3: Color = Color(146);
-    pub const LightSteelBlue: Color = Color(147);
-    pub const Yellow3: Color = Color(148);
-    pub const LightCyan3: Color = Color(152);
-    pub const LightSkyBlue1: Color = Color(153);
-    pub const GreenYellow: Color = Color(154);
-    pub const DarkOliveGreen2: Color = Color(155);
-    pub const DarkSeaGreen1: Color = Color(158);
-    pub const PaleTurquoise1: Color = Color(159);
-    pub const Magenta2: Color = Color(165);
-    pub const HotPink2: Color = Color(169);
-    pub const Orchid: Color = Color(170);
-    pub const MediumOrchid1: Color = Color(171);
-    pub const Orange3: Color = Color(172);
-    pub const LightPink3: Color = Color(174);
-    pub const Pink3: Color = Color(175);
-    pub const Plum3: Color = Color(176);
-    pub const LightGoldenrod3: Color = Color(179);
-    pub const Tan: Color = Color(180);
-    pub const MistyRose3: Color = Color(181);
-    pub const Thistle3: Color = Color(182);
-    pub const Plum2: Color = Color(183);
-    pub const Khaki3: Color = Color(185);
-    pub const LightYellow3: Color = Color(187);
-    pub const LightSteelBlue1: Color = Color(189);
-    pub const Yellow2: Color = Color(190);
-    pub const DarkOliveGreen1: Color = Color(191);
-    pub const LightSeaGreen: Color = Color(193);
-    pub const Honeydew: Color = Color(194);
-    pub const LightCyan1: Color = Color(195);
-    pub const Red1: Color = Color(196);
-    pub const DeepPink2: Color = Color(197);
-    pub const DeepPink1: Color = Color(198);
-    pub const Magenta1: Color = Color(201);
-    pub const OrangeRed1: Color = Color(202);
-    pub const NeonRed: Color = Color(203);
-    pub const HotPink: Color = Color(205);
-    pub const DarkOrange: Color = Color(208);
-    pub const Salmon: Color = Color(209);
-    pub const LightCoral: Color = Color(210);
-    pub const PaleVioletRed1: Color = Color(211);
-    pub const Orchid2: Color = Color(212);
-    pub const Orchid1: Color = Color(213);
-    pub const Orange1: Color = Color(214);
-    pub const SandyBrown: Color = Color(215);
-    pub const LightSalmon1: Color = Color(216);
-    pub const LightPink1: Color = Color(217);
-    pub const Pink1: Color = Color(218);
-    pub const Plum1: Color = Color(219);
-    pub const Gold1: Color = Color(220);
-    pub const LightGoldenrod2: Color = Color(221);
-    pub const NavajoWhite: Color = Color(223);
-    pub const MistyRose: Color = Color(224);
-    pub const Thistle: Color = Color(225);
-    pub const Yellow1: Color = Color(226);
-    pub const LightGoldenrod1: Color = Color(227);
-    pub const Khaki1: Color = Color(228);
-    pub const Wheat1: Color = Color(229);
-    pub const Cornsilk1: Color = Color(230);
+    pub const SkyBlue2: AnsiColor = AnsiColor(111);
+    pub const DarkOliveGreen: AnsiColor = AnsiColor(113);
+    pub const DarkSeaGreen3: AnsiColor = AnsiColor(115);
+    pub const DarkSlateGray3: AnsiColor = AnsiColor(116);
+    pub const SkyBlue1: AnsiColor = AnsiColor(117);
+    pub const Chartreuse1: AnsiColor = AnsiColor(118);
+    pub const LightGreen: AnsiColor = AnsiColor(119);
+    pub const PaleGreen1: AnsiColor = AnsiColor(121);
+    pub const DarkSlateGray1: AnsiColor = AnsiColor(123);
+    pub const Red3: AnsiColor = AnsiColor(124);
+    pub const MediumVioletRed: AnsiColor = AnsiColor(126);
+    pub const Magenta3: AnsiColor = AnsiColor(127);
+    pub const DarkOrange3: AnsiColor = AnsiColor(130);
+    pub const IndianRed: AnsiColor = AnsiColor(131);
+    pub const HotPink3: AnsiColor = AnsiColor(132);
+    pub const MediumOrchid3: AnsiColor = AnsiColor(133);
+    pub const MediumOrchid: AnsiColor = AnsiColor(134);
+    pub const DarkGoldenrod: AnsiColor = AnsiColor(136);
+    pub const LightSalmon3: AnsiColor = AnsiColor(137);
+    pub const RosyBrown: AnsiColor = AnsiColor(138);
+    pub const Violet: AnsiColor = AnsiColor(140);
+    pub const MediumPurple1: AnsiColor = AnsiColor(141);
+    pub const Gold3: AnsiColor = AnsiColor(142);
+    pub const DarkKhaki: AnsiColor = AnsiColor(143);
+    pub const NavajoWhite3: AnsiColor = AnsiColor(144);
+    pub const LightSteelBlue3: AnsiColor = AnsiColor(146);
+    pub const LightSteelBlue: AnsiColor = AnsiColor(147);
+    pub const Yellow3: AnsiColor = AnsiColor(148);
+    pub const LightCyan3: AnsiColor = AnsiColor(152);
+    pub const LightSkyBlue1: AnsiColor = AnsiColor(153);
+    pub const GreenYellow: AnsiColor = AnsiColor(154);
+    pub const DarkOliveGreen2: AnsiColor = AnsiColor(155);
+    pub const DarkSeaGreen1: AnsiColor = AnsiColor(158);
+    pub const PaleTurquoise1: AnsiColor = AnsiColor(159);
+    pub const Magenta2: AnsiColor = AnsiColor(165);
+    pub const HotPink2: AnsiColor = AnsiColor(169);
+    pub const Orchid: AnsiColor = AnsiColor(170);
+    pub const MediumOrchid1: AnsiColor = AnsiColor(171);
+    pub const Orange3: AnsiColor = AnsiColor(172);
+    pub const LightPink3: AnsiColor = AnsiColor(174);
+    pub const Pink3: AnsiColor = AnsiColor(175);
+    pub const Plum3: AnsiColor = AnsiColor(176);
+    pub const LightGoldenrod3: AnsiColor = AnsiColor(179);
+    pub const Tan: AnsiColor = AnsiColor(180);
+    pub const MistyRose3: AnsiColor = AnsiColor(181);
+    pub const Thistle3: AnsiColor = AnsiColor(182);
+    pub const Plum2: AnsiColor = AnsiColor(183);
+    pub const Khaki3: AnsiColor = AnsiColor(185);
+    pub const LightYellow3: AnsiColor = AnsiColor(187);
+    pub const LightSteelBlue1: AnsiColor = AnsiColor(189);
+    pub const Yellow2: AnsiColor = AnsiColor(190);
+    pub const DarkOliveGreen1: AnsiColor = AnsiColor(191);
+    pub const LightSeaGreen: AnsiColor = AnsiColor(193);
+    pub const Honeydew: AnsiColor = AnsiColor(194);
+    pub const LightCyan1: AnsiColor = AnsiColor(195);
+    pub const Red1: AnsiColor = AnsiColor(196);
+    pub const DeepPink2: AnsiColor = AnsiColor(197);
+    pub const DeepPink1: AnsiColor = AnsiColor(198);
+    pub const Magenta1: AnsiColor = AnsiColor(201);
+    pub const OrangeRed1: AnsiColor = AnsiColor(202);
+    pub const NeonRed: AnsiColor = AnsiColor(203);
+    pub const HotPink: AnsiColor = AnsiColor(205);
+    pub const DarkOrange: AnsiColor = AnsiColor(208);
+    pub const Salmon: AnsiColor = AnsiColor(209);
+    pub const LightCoral: AnsiColor = AnsiColor(210);
+    pub const PaleVioletRed1: AnsiColor = AnsiColor(211);
+    pub const Orchid2: AnsiColor = AnsiColor(212);
+    pub const Orchid1: AnsiColor = AnsiColor(213);
+    pub const Orange1: AnsiColor = AnsiColor(214);
+    pub const SandyBrown: AnsiColor = AnsiColor(215);
+    pub const LightSalmon1: AnsiColor = AnsiColor(216);
+    pub const LightPink1: AnsiColor = AnsiColor(217);
+    pub const Pink1: AnsiColor = AnsiColor(218);
+    pub const Plum1: AnsiColor = AnsiColor(219);
+    pub const Gold1: AnsiColor = AnsiColor(220);
+    pub const LightGoldenrod2: AnsiColor = AnsiColor(221);
+    pub const NavajoWhite: AnsiColor = AnsiColor(223);
+    pub const MistyRose: AnsiColor = AnsiColor(224);
+    pub const Thistle: AnsiColor = AnsiColor(225);
+    pub const Yellow1: AnsiColor = AnsiColor(226);
+    pub const LightGoldenrod1: AnsiColor = AnsiColor(227);
+    pub const Khaki1: AnsiColor = AnsiColor(228);
+    pub const Wheat1: AnsiColor = AnsiColor(229);
+    pub const Cornsilk1: AnsiColor = AnsiColor(230);
 
-    pub const White: Color = Color(231);
-    pub const Black: Color = Color(16);
+    pub const White: AnsiColor = AnsiColor(231);
+    pub const Black: AnsiColor = AnsiColor(16);
 }
-impl Color {
+impl AnsiColor {
     /// Creates a style with this color as the foreground.
     pub fn as_fg(self) -> Style {
         Style::DEFAULT.with_fg(self)
@@ -632,19 +756,19 @@ impl Color {
     }
 
     /// Creates a style with this color as background and the given foreground.
-    pub fn with_fg(self, fg: Color) -> Style {
+    pub fn with_fg(self, fg: AnsiColor) -> Style {
         Style::DEFAULT.with_fg(fg).with_bg(self)
     }
 
     /// Creates a style with this color as foreground and the given background.
-    pub fn with_bg(self, bg: Color) -> Style {
+    pub fn with_bg(self, bg: AnsiColor) -> Style {
         Style::DEFAULT.with_bg(bg).with_fg(self)
     }
 }
 
 impl std::ops::BitOrAssign<Modifier> for Style {
     fn bitor_assign(&mut self, rhs: Modifier) {
-        self.0 |= rhs.0 as u32;
+        self.0 |= rhs.0 as u64;
     }
 }
 
@@ -652,7 +776,7 @@ impl std::ops::BitOr<Modifier> for Style {
     type Output = Style;
 
     fn bitor(self, rhs: Modifier) -> Self::Output {
-        Style(self.0 | rhs.0 as u32)
+        Style(self.0 | rhs.0 as u64)
     }
 }
 
@@ -673,12 +797,15 @@ impl std::ops::BitOr for Style {
 impl Style {
     /// The default style with no colors or modifiers.
     pub const DEFAULT: Style = Style(0);
-    pub(crate) const HAS_BG: u32 = 0b10_000;
-    pub(crate) const FG_MASK: u32 = 0xff00_0000;
-    pub(crate) const BG_MASK: u32 = 0x00ff_0000;
-    pub(crate) const MASK: u32 = 0xffff_fff8;
-    pub(crate) const HAS_FG: u32 = 0b01_000;
-    pub(crate) const IS_PALETTE: u32 = 0x8000;
+    pub(crate) const HAS_FG: u64 = 1 << 9;
+    pub(crate) const FG_IS_RGB: u64 = 1 << 10;
+    pub(crate) const HAS_BG: u64 = 1 << 11;
+    pub(crate) const BG_IS_RGB: u64 = 1 << 12;
+    pub(crate) const IS_PALETTE: u64 = 1 << 13;
+    pub(crate) const FG_MASK: u64 = 0x00ff_ffff << 16;
+    pub(crate) const BG_MASK: u64 = 0x00ff_ffff << 40;
+    pub(crate) const FG_ALL_MASK: u64 = Self::HAS_FG | Self::FG_IS_RGB | Self::FG_MASK;
+    pub(crate) const BG_ALL_MASK: u64 = Self::HAS_BG | Self::BG_IS_RGB | Self::BG_MASK;
 
     /// Creates a palette style referencing an entry in the [`DoubleBuffer`]'s palette table.
     ///
@@ -689,7 +816,8 @@ impl Style {
     /// Register entries with [`DoubleBuffer::set_palette`] before rendering.
     /// Do not combine palette styles with modifier methods.
     pub const fn palette(index: u8) -> Style {
-        Style((index as u32) << 5 | Self::IS_PALETTE)
+        // In palette-style mode modifier bits are unused; overlay the index at bits 0..8.
+        Style((index as u64) | Self::IS_PALETTE)
     }
 
     /// Returns `true` if this is a palette style.
@@ -699,29 +827,73 @@ impl Style {
 
     /// Returns the palette index for a palette style.
     pub const fn palette_index(&self) -> u8 {
-        ((self.0 >> 5) & 0xFF) as u8
+        (self.0 & 0xff) as u8
     }
 
     /// Creates a [`StyleDelta`] for transitioning to this style.
     pub const fn delta(self) -> StyleDelta {
         StyleDelta {
-            current: u32::MAX,
+            current: u64::MAX,
             target: self,
         }
     }
+
     /// Returns a new style with the given foreground color.
-    pub const fn with_fg(self, color: Color) -> Style {
-        Style((self.0 & 0x00ff_ffff) | ((color.0 as u32) << 24) | 0b1_000)
+    ///
+    /// Accepts any type convertible to [`Color`] — typically [`AnsiColor`] or [`Rgb`].
+    pub fn with_fg(self, color: impl Into<Color>) -> Style {
+        match color.into() {
+            Color::Ansi(c) => self.with_fg_ansi(c),
+            Color::Rgb(Rgb(r, g, b)) => self.with_fg_rgb(r, g, b),
+        }
+    }
+
+    /// Returns a new style with the given foreground color in the 256-color palette.
+    ///
+    /// `const`-friendly variant of [`with_fg`](Self::with_fg).
+    pub const fn with_fg_ansi(self, color: AnsiColor) -> Style {
+        let cleared = self.0 & !Self::FG_ALL_MASK;
+        Style(cleared | Self::HAS_FG | ((color.0 as u64) << 16))
+    }
+
+    /// Returns a new style with the given 24-bit RGB foreground color.
+    ///
+    /// `const`-friendly variant of [`with_fg`](Self::with_fg).
+    pub const fn with_fg_rgb(self, r: u8, g: u8, b: u8) -> Style {
+        let cleared = self.0 & !Self::FG_ALL_MASK;
+        let packed = (r as u64) | ((g as u64) << 8) | ((b as u64) << 16);
+        Style(cleared | Self::HAS_FG | Self::FG_IS_RGB | (packed << 16))
     }
 
     /// Returns a new style without a foreground color.
     pub const fn without_fg(self) -> Style {
-        Style(self.0 & !(Style::FG_MASK | Style::HAS_FG))
+        Style(self.0 & !Self::FG_ALL_MASK)
     }
 
     /// Returns a new style without a background color.
     pub const fn without_bg(self) -> Style {
-        Style(self.0 & !(Style::BG_MASK | Style::HAS_BG))
+        Style(self.0 & !Self::BG_ALL_MASK)
+    }
+
+    /// Returns a copy of this style with any 24-bit RGB fg/bg colors
+    /// replaced by their nearest 256-color palette equivalent.
+    ///
+    /// Ansi colors and palette styles are returned unchanged.
+    pub const fn quantize_rgb(self) -> Style {
+        let mut out = self.0;
+        if self.0 & Self::FG_IS_RGB != 0 {
+            let raw = ((self.0 >> 16) & 0x00ff_ffff) as u32;
+            let rgb = Rgb(raw as u8, (raw >> 8) as u8, (raw >> 16) as u8);
+            let idx = rgb.to_ansi().0 as u64;
+            out = (out & !Self::FG_ALL_MASK) | Self::HAS_FG | (idx << 16);
+        }
+        if self.0 & Self::BG_IS_RGB != 0 {
+            let raw = ((self.0 >> 40) & 0x00ff_ffff) as u32;
+            let rgb = Rgb(raw as u8, (raw >> 8) as u8, (raw >> 16) as u8);
+            let idx = rgb.to_ansi().0 as u64;
+            out = (out & !Self::BG_ALL_MASK) | Self::HAS_BG | (idx << 40);
+        }
+        Style(out)
     }
 
     /// Returns the text modifiers applied to this style.
@@ -731,35 +903,65 @@ impl Style {
 
     /// Returns a new style with the given modifiers added.
     pub const fn with_modifier(self, mods: Modifier) -> Style {
-        Style(self.0 | mods.0 as u32)
+        Style(self.0 | mods.0 as u64)
     }
 
     /// Returns a new style with the given modifiers removed.
     pub const fn without_modifier(self, mods: Modifier) -> Style {
-        Style(self.0 & !(mods.0 as u32))
+        Style(self.0 & !(mods.0 as u64))
     }
 
     /// Returns the foreground color if set.
     pub const fn fg(self) -> Option<Color> {
-        if self.0 & 0b1_000 != 0 {
-            Some(Color(((self.0 >> 24) & 0xff) as u8))
-        } else {
-            None
+        if self.0 & Self::HAS_FG == 0 {
+            return None;
         }
+        let raw = ((self.0 >> 16) & 0x00ff_ffff) as u32;
+        Some(if self.0 & Self::FG_IS_RGB != 0 {
+            Color::Rgb(Rgb(raw as u8, (raw >> 8) as u8, (raw >> 16) as u8))
+        } else {
+            Color::Ansi(AnsiColor(raw as u8))
+        })
     }
 
     /// Returns a new style with the given background color.
-    pub const fn with_bg(self, color: Color) -> Style {
-        Style((self.0 & 0xff00_ffff) | ((color.0 as u32) << 16) | 0b10_000)
+    ///
+    /// Accepts any type convertible to [`Color`] — typically [`AnsiColor`] or [`Rgb`].
+    pub fn with_bg(self, color: impl Into<Color>) -> Style {
+        match color.into() {
+            Color::Ansi(c) => self.with_bg_ansi(c),
+            Color::Rgb(Rgb(r, g, b)) => self.with_bg_rgb(r, g, b),
+        }
+    }
+
+    /// Returns a new style with the given background color in the 256-color palette.
+    ///
+    /// `const`-friendly variant of [`with_bg`](Self::with_bg).
+    pub const fn with_bg_ansi(self, color: AnsiColor) -> Style {
+        let cleared = self.0 & !Self::BG_ALL_MASK;
+        Style(cleared | Self::HAS_BG | ((color.0 as u64) << 40))
+    }
+
+    /// Returns a new style with the given 24-bit RGB background color.
+    ///
+    /// `const`-friendly variant of [`with_bg`](Self::with_bg).
+    pub const fn with_bg_rgb(self, r: u8, g: u8, b: u8) -> Style {
+        let cleared = self.0 & !Self::BG_ALL_MASK;
+        let packed = (r as u64) | ((g as u64) << 8) | ((b as u64) << 16);
+        Style(cleared | Self::HAS_BG | Self::BG_IS_RGB | (packed << 40))
     }
 
     /// Returns the background color if set.
     pub const fn bg(self) -> Option<Color> {
-        if self.0 & 0b10_000 != 0 {
-            Some(Color(((self.0 >> 16) & 0xff) as u8))
-        } else {
-            None
+        if self.0 & Self::HAS_BG == 0 {
+            return None;
         }
+        let raw = ((self.0 >> 40) & 0x00ff_ffff) as u32;
+        Some(if self.0 & Self::BG_IS_RGB != 0 {
+            Color::Rgb(Rgb(raw as u8, (raw >> 8) as u8, (raw >> 16) as u8))
+        } else {
+            Color::Ansi(AnsiColor(raw as u8))
+        })
     }
 }
 
@@ -772,56 +974,171 @@ impl Style {
 // }
 
 impl Cell {
-    const EMPTY: Cell = Cell(0);
-    const BLANK: Cell = unsafe { Cell::new_ascii(b' ', Style::DEFAULT) };
+    const EMPTY: Cell = Cell {
+        style: 0,
+        text: [0; 8],
+    };
 
     /// Returns `true` if the cell contains no visible content.
     pub fn is_empty(self) -> bool {
-        self.0 <= 0xffff_ffff
+        self.text == [0; 8]
     }
+
+    /// Returns `true` if the cell stores its grapheme in a side buffer.
     #[inline]
-    fn text(&self) -> &str {
-        let len = (self.0 & 0b111) as usize;
-        unsafe {
-            std::str::from_utf8_unchecked(std::slice::from_raw_parts(
-                ((&self.0 as *const u64) as *const u8).add(4),
-                len,
-            ))
+    pub fn is_handle(self) -> bool {
+        self.text[7] > 7
+    }
+
+    #[inline]
+    pub(crate) fn handle_offset(self) -> u32 {
+        u32::from_le_bytes([self.text[0], self.text[1], self.text[2], self.text[3]])
+    }
+
+    /// Returns the inline UTF-8 text of this cell, or `None` if the cell
+    /// references a side buffer. Use [`Cell::text`] when you have the
+    /// owning [`Buffer`] in scope.
+    #[inline]
+    pub fn text_inline(&self) -> Option<&str> {
+        if self.is_handle() {
+            return None;
+        }
+        let len = self.text[7] as usize;
+        // SAFETY: inline path always holds valid UTF-8 in `text[..len]`.
+        Some(unsafe { std::str::from_utf8_unchecked(self.text.get_unchecked(..len)) })
+    }
+
+    /// Returns the raw grapheme bytes of this cell, resolving handles
+    /// through the given [`SideBuffer`]. Returns an empty slice for empty
+    /// cells or for handles that fail bounds checking.
+    #[inline]
+    fn text<'a>(&'a self, side: &'a SideBuffer) -> &'a [u8] {
+        if self.is_handle() {
+            side.get(self.handle_offset(), self.text[7]).unwrap_or(&[])
+        } else {
+            let len = self.text[7] as usize;
+            // `len` is at most 7, always in bounds of `text: [u8; 8]`.
+            &self.text[..len]
         }
     }
     fn new(text: &str, style: Style) -> Cell {
-        if text.len() > 4 {
-            panic!();
+        let bytes = text.as_bytes();
+        let len = bytes.len();
+        if len > 7 {
+            panic!("extui::Cell::new grapheme exceeds 7-byte cap — use set_stringn");
         }
-        let mut initial = [0u8; 8];
-        for (i, ch) in text.as_bytes().iter().enumerate() {
-            initial[i + 4] = *ch;
+        let mut buf = [0u8; 8];
+        buf[..len].copy_from_slice(bytes);
+        buf[7] = len as u8;
+        Cell {
+            style: style.0,
+            text: buf,
         }
-        Cell(u64::from_ne_bytes(initial) | (style.0 as u64) | text.len() as u64)
     }
     const fn new_const(text: &str, style: Style) -> Cell {
-        if text.len() > 4 {
-            panic!();
-        }
-        let mut initial = [0u8; 8];
         let bytes = text.as_bytes();
+        if bytes.len() > 7 {
+            panic!("extui::Cell grapheme exceeds 7-byte cap");
+        }
+        let mut buf = [0u8; 8];
         let mut i = 0;
         while i < bytes.len() {
-            initial[i + 4] = bytes[i];
+            buf[i] = bytes[i];
             i += 1;
         }
-        Cell(u64::from_ne_bytes(initial) | (style.0 as u64) | text.len() as u64)
+        buf[7] = bytes.len() as u8;
+        Cell {
+            style: style.0,
+            text: buf,
+        }
+    }
+
+    /// Builds a cell that references a grapheme stored at `offset` in the
+    /// owning [`Buffer`]'s side buffer. `len` is the byte length of the
+    /// grapheme (must be > 7 and ≤ 255).
+    #[inline]
+    fn new_handle(offset: u32, len: u8, style: Style) -> Cell {
+        debug_assert!(len > 7, "handle cells must carry a len > 7");
+        let o = offset.to_le_bytes();
+        Cell {
+            style: style.0,
+            text: [o[0], o[1], o[2], o[3], 0, 0, 0, len],
+        }
     }
 
     /// Returns a new cell with the given style merged into the existing style.
+    ///
+    /// For handle cells, the returned cell still references the same slot in
+    /// the originating buffer's side buffer; only valid within that buffer.
     pub fn with_style_merged(&self, style: Style) -> Cell {
-        Cell(self.0 | style.0 as u64)
+        Cell {
+            style: self.style | style.0,
+            text: self.text,
+        }
     }
     fn style(&self) -> Style {
-        Style((self.0 & 0xfffffff8) as u32)
+        Style(self.style)
     }
     const unsafe fn new_ascii(ch: u8, style: Style) -> Cell {
-        Cell(((ch as u64) << (4 * 8)) | (style.0 as u64) | 1)
+        Cell {
+            style: style.0,
+            text: [ch, 0, 0, 0, 0, 0, 0, 1],
+        }
+    }
+
+    /// Returns true if this cell is one of the blank constants
+    /// ([`Cell::EMPTY`] or [`Cell::BLANK`]). Handle cells are never blank.
+    #[inline]
+    fn is_blank_or_empty(&self) -> bool {
+        // Both constants have style == 0 and are non-handles.
+        self.style == 0
+            && (self.text == [0; 8] || self.text == [b' ', 0, 0, 0, 0, 0, 0, 1])
+    }
+}
+
+/// Flat append-only byte arena holding UTF-8 graphemes that are too long
+/// to fit inline in a [`Cell`] (strictly more than 7 bytes).
+///
+/// Each [`Buffer`] owns one of these. Handle cells carry a u32 byte offset
+/// into [`SideBuffer::data`] plus the grapheme's length in the cell itself,
+/// so the arena stores no framing — just concatenated UTF-8.
+#[derive(Default)]
+pub(crate) struct SideBuffer {
+    data: Vec<u8>,
+}
+
+impl SideBuffer {
+    /// Appends `s` to the arena and returns the byte offset of the start
+    /// of the entry. The caller is responsible for storing `s.len()` on
+    /// the cell itself.
+    #[inline]
+    fn intern(&mut self, s: &str) -> u32 {
+        let offset = self.data.len() as u32;
+        self.data.extend_from_slice(s.as_bytes());
+        offset
+    }
+
+    /// Returns the raw grapheme bytes stored at `offset` with the given
+    /// byte length, or `None` if the slice is out of bounds.
+    ///
+    /// The `(offset, len)` pair comes from a [`Cell`]'s `text` field, which
+    /// is callee-controlled and may be stale (e.g. carried across a swap
+    /// or copied between buffers via [`Cell::with_style_merged`]). Bounds
+    /// are therefore checked on every lookup.
+    ///
+    /// Returns `&[u8]` rather than `&str`: the renderer only ever writes
+    /// bytes to VT output, and equality comparisons only need byte
+    /// equality, so validating UTF-8 on every read would be wasted work.
+    #[inline]
+    fn get(&self, offset: u32, len: u8) -> Option<&[u8]> {
+        let o = offset as usize;
+        let end = o.checked_add(len as usize)?;
+        self.data.get(o..end)
+    }
+
+    #[inline]
+    fn clear(&mut self) {
+        self.data.clear(); // keeps capacity
     }
 }
 
@@ -832,8 +1149,13 @@ impl Cell {
 /// to modify the buffer contents.
 pub struct Buffer {
     pub(crate) cells: Box<[Cell]>,
+    pub(crate) side: SideBuffer,
     pub(crate) width: u16,
     pub(crate) height: u16,
+    /// When `true`, styles written via [`set_stringn`](Self::set_stringn)
+    /// and [`set_style`](Self::set_style) are quantized to the 256-color
+    /// palette before being stored. Owned and toggled by [`DoubleBuffer`].
+    pub(crate) quantize_rgb: bool,
 }
 
 /// A rectangular region defined by position and size.
@@ -1027,8 +1349,7 @@ fn write_palette_or_diff(
 ) -> Style {
     let mut new = new;
     if ignore_fg {
-        new.0 = (new.0 & !(Style::FG_MASK | Style::HAS_FG))
-            | (current.0 & (Style::FG_MASK | Style::HAS_FG));
+        new.0 = (new.0 & !Style::FG_ALL_MASK) | (current.0 & Style::FG_ALL_MASK);
     }
     if new.is_palette() {
         if current == new {
@@ -1045,9 +1366,8 @@ fn write_palette_or_diff(
                 if current.bg() == target.bg() {
                     target = target.without_bg();
                 }
-                let color_only = Style(
-                    target.0 & (Style::FG_MASK | Style::BG_MASK | Style::HAS_FG | Style::HAS_BG),
-                );
+                let color_only =
+                    Style(target.0 & (Style::FG_ALL_MASK | Style::BG_ALL_MASK));
                 if color_only != Style::DEFAULT {
                     vt::style(buf, color_only, false);
                 }
@@ -1059,9 +1379,7 @@ fn write_palette_or_diff(
         if let Some(entry) = palette.get(new.palette_index() as usize) {
             buf.extend_from_slice(entry);
         }
-        let color_only = Style(
-            new.0 & (Style::FG_MASK | Style::BG_MASK | Style::HAS_FG | Style::HAS_BG),
-        );
+        let color_only = Style(new.0 & (Style::FG_ALL_MASK | Style::BG_ALL_MASK));
         if color_only != Style::DEFAULT {
             vt::style(buf, color_only, false);
         }
@@ -1079,7 +1397,7 @@ pub(crate) fn write_style_diff(current: Style, new: Style, buf: &mut Vec<u8>) ->
         return new;
     }
     let removed = (new.0 | current.0) ^ new.0;
-    let clearing = removed & (Style::HAS_BG | Style::HAS_FG | Modifier::ALL.0 as u32) != 0;
+    let clearing = removed & (Style::HAS_BG | Style::HAS_FG | Modifier::ALL.0 as u64) != 0;
     if clearing {
         vt::style(buf, new, true);
         return new;
@@ -1112,6 +1430,48 @@ pub(crate) fn write_style_diff(current: Style, new: Style, buf: &mut Vec<u8>) ->
     //     }
     // }
     new
+}
+
+/// Compares two cells for rendering equivalence across distinct buffers.
+///
+/// Fast path: when `a` is inline, degenerates to a direct style + `[u8; 8]`
+/// compare — the same codegen the old `derive(Eq)` produced. Only when `a`
+/// is a handle do we consult the two side buffers.
+#[inline(always)]
+fn cells_eq(a: Cell, b: Cell, a_side: &SideBuffer, b_side: &SideBuffer) -> bool {
+    if a.is_handle() {
+        cells_eq_slow(a, b, a_side, b_side)
+    } else {
+        // `a` is inline (text[7] ≤ 7). If `b` is a handle (text[7] > 7), the
+        // raw byte compare below catches it on the length byte alone, so the
+        // fast path is correct whether or not `b` is a handle.
+        a.style == b.style && a.text == b.text
+    }
+}
+
+#[cold]
+fn cells_eq_slow(a: Cell, b: Cell, a_side: &SideBuffer, b_side: &SideBuffer) -> bool {
+    if !b.is_handle() {
+        return false;
+    }
+    if a.style != b.style {
+        return false;
+    }
+    let la = a.text[7];
+    let lb = b.text[7];
+    if la != lb {
+        return false;
+    }
+    // A `None` return from `get` means a corrupted or stale handle. Treat
+    // that as unequal so the diff forces a redraw rather than silently
+    // conflating two bogus cells.
+    match (
+        a_side.get(a.handle_offset(), la),
+        b_side.get(b.handle_offset(), lb),
+    ) {
+        (Some(a_bytes), Some(b_bytes)) => a_bytes == b_bytes,
+        _ => false,
+    }
 }
 
 impl Buffer {
@@ -1158,8 +1518,10 @@ impl Buffer {
         let cells = vec![Cell::EMPTY; width as usize * height as usize].into_boxed_slice();
         Buffer {
             cells,
+            side: SideBuffer::default(),
             width,
             height,
+            quantize_rgb: false,
         }
     }
     /// Returns a mutable reference to the cell at the given position.
@@ -1188,6 +1550,8 @@ impl Buffer {
             self.render(buf, y_offset, palette);
             return;
         }
+        let new_side = &self.side;
+        let old_side = &old.side;
         vt::CLEAR_STYLE.write_to_buffer(buf);
         let mut current_style = Style::DEFAULT;
         let mut old_cells = old.cells.iter();
@@ -1202,7 +1566,7 @@ impl Buffer {
                 let Some(old) = erased_cell.or_else(|| old_cells.next().copied()) else {
                     return;
                 };
-                if new == old {
+                if cells_eq(new, old, new_side, old_side) {
                     matching_count += 1;
                     continue;
                 }
@@ -1220,7 +1584,7 @@ impl Buffer {
                                 // end of file
                                 break;
                             };
-                            if old_k == new_k {
+                            if cells_eq(new_k, old_k, new_side, old_side) {
                                 if !moved {
                                     moved = true;
                                     MoveCursor(matching_count, y).write_to_buffer(buf);
@@ -1248,7 +1612,7 @@ impl Buffer {
                                     }
                                     erased_cell = Some(blank_kind);
                                     matching_count = blank_overwrite;
-                                    if new_k == blank_kind {
+                                    if cells_eq(new_k, blank_kind, new_side, new_side) {
                                         matching_count += 1;
                                         continue 'next_cell;
                                     } else {
@@ -1258,7 +1622,7 @@ impl Buffer {
                                 }
                                 continue 'next_cell;
                             }
-                            if new_k == blank_kind {
+                            if cells_eq(new_k, blank_kind, new_side, new_side) {
                                 blank_overwrite += 1;
                                 continue;
                             }
@@ -1340,7 +1704,7 @@ impl Buffer {
                     MoveCursorRight(matching_count).write_to_buffer(buf);
                     matching_count = 0;
                 }
-                let text = new.text();
+                let text = new.text(new_side);
                 current_style = write_palette_or_diff(
                     current_style,
                     new.style(),
@@ -1351,7 +1715,7 @@ impl Buffer {
                 if text.is_empty() {
                     buf.push(b' ');
                 } else {
-                    buf.extend_from_slice(text.as_bytes());
+                    buf.extend_from_slice(text);
                 }
             }
         }
@@ -1365,13 +1729,14 @@ impl Buffer {
         vt::CLEAR_STYLE.write_to_buffer(buf);
         buf.extend_from_slice(vt::CLEAR_BELOW);
 
+        let side = &self.side;
         let mut current_style = Style::DEFAULT;
         for (y, row) in self.cells.chunks_exact(self.width as usize).enumerate() {
             let y = y as u16 + y_offset;
             let mut moved = false;
             let mut blank_extension = 0;
             for &cell in row.iter() {
-                if cell == Cell::BLANK || cell == Cell::EMPTY {
+                if cell.is_blank_or_empty() {
                     blank_extension += 1;
                     continue;
                 }
@@ -1390,13 +1755,18 @@ impl Buffer {
                     }
                     blank_extension = 0;
                 }
-                current_style =
-                    write_palette_or_diff(current_style, cell.style(), palette, buf, false);
-                let text = cell.text();
+                current_style = write_palette_or_diff(
+                    current_style,
+                    cell.style(),
+                    palette,
+                    buf,
+                    false,
+                );
+                let text = cell.text(side);
                 if text.is_empty() {
                     buf.push(b' ');
                 } else {
-                    buf.extend_from_slice(text.as_bytes());
+                    buf.extend_from_slice(text);
                 }
             }
         }
@@ -1404,21 +1774,26 @@ impl Buffer {
     }
     pub fn set_style(&mut self, area: Rect, style: Style) {
         let Rect { x, y, w, h } = area;
-        let mut keep_mask = !(Style::MASK as u64);
-        let mut new_mask = style.0 as u64;
+        let style = if self.quantize_rgb {
+            style.quantize_rgb()
+        } else {
+            style
+        };
+        let mut keep_mask: u64 = 0;
+        let mut new_mask: u64 = style.0;
 
         if style.fg().is_none() {
-            keep_mask |= (Style::HAS_FG as u64) | Style::FG_MASK as u64;
+            keep_mask |= Style::FG_ALL_MASK;
         }
         if style.bg().is_none() {
-            keep_mask |= (Style::HAS_BG as u64) | Style::BG_MASK as u64;
+            keep_mask |= Style::BG_ALL_MASK;
         }
         new_mask &= !keep_mask;
 
         for y in y..y + h {
             if let Some(row) = self.row_remaining_mut(x, y) {
                 for cell in row.iter_mut().take(w as usize) {
-                    cell.0 = (cell.0 & keep_mask) | new_mask;
+                    cell.style = (cell.style & keep_mask) | new_mask;
                 }
             }
         }
@@ -1432,7 +1807,9 @@ impl Buffer {
 
     /// Writes a styled string with a maximum width.
     ///
-    /// Returns the cursor position after writing.
+    /// Returns the cursor position after writing. Graphemes up to 7 bytes
+    /// are stored inline; longer graphemes are interned into the buffer's
+    /// [`SideBuffer`] and referenced via a handle cell.
     pub fn set_stringn(
         &mut self,
         x: u16,
@@ -1441,31 +1818,68 @@ impl Buffer {
         max_width: usize,
         style: Style,
     ) -> (u16, u16) {
+        let style = if self.quantize_rgb {
+            style.quantize_rgb()
+        } else {
+            style
+        };
         let mut remaining_width = (self.width.saturating_sub(x) as usize).min(max_width) as u16;
         let initial_remaining_width = remaining_width;
-        let Some(target) = self.row_remaining_mut(x, y) else {
+
+        // Split borrow on `self`: grab `cells` and `side` independently so
+        // long graphemes can be interned while we're writing to cells.
+        let row_width = self.width as u32;
+        let base = (y as u32) * row_width;
+        let start = (base + x as u32) as usize;
+        let end = (base + row_width) as usize;
+        let Some(target) = self.cells.get_mut(start..end) else {
             return (x, y);
         };
-        let graphemes = UnicodeSegmentation::graphemes(string, true)
-            .filter(|symbol| !symbol.contains(char::is_control))
-            .map(|symbol| (symbol, symbol.width() as u16))
-            .filter(|(_symbol, width)| *width > 0)
-            .map_while(|(symbol, width)| {
-                remaining_width = remaining_width.checked_sub(width)?;
-                Some((symbol, width))
-            });
+        let side = &mut self.side;
+
         let mut target_cells = target.iter_mut();
-        for (symbol, width) in graphemes {
-            if let Some(cell) = target_cells.next() {
-                *cell = Cell::new(symbol, style);
+        for symbol in UnicodeSegmentation::graphemes(string, true) {
+            if symbol.contains(char::is_control) {
+                continue;
+            }
+            let width = symbol.width() as u16;
+            if width == 0 {
+                continue;
+            }
+            let Some(new_rem) = remaining_width.checked_sub(width) else {
+                break;
+            };
+            remaining_width = new_rem;
+
+            let cell = if symbol.len() <= 7 {
+                Cell::new(symbol, style)
+            } else {
+                // The handle cell carries a u8 length, so graphemes wider
+                // than 255 bytes are truncated at the largest UTF-8 char
+                // boundary that still fits. No realistic grapheme hits this.
+                let truncated = if symbol.len() <= u8::MAX as usize {
+                    symbol
+                } else {
+                    &symbol[..symbol.floor_char_boundary(u8::MAX as usize)]
+                };
+                if truncated.len() <= 7 {
+                    Cell::new(truncated, style)
+                } else {
+                    let offset = side.intern(truncated);
+                    Cell::new_handle(offset, truncated.len() as u8, style)
+                }
+            };
+
+            if let Some(slot) = target_cells.next() {
+                *slot = cell;
             } else {
                 return (x + initial_remaining_width, y);
             }
-            // Todo: When a cell takes more space, what do we do with the pad spaces
-            // do we these, what happens in some over rights them?
+            // Pad wider-than-one graphemes with empty cells so they occupy
+            // their full display width.
             for _ in 1..width {
-                if let Some(cell) = target_cells.next() {
-                    *cell = Cell::EMPTY;
+                if let Some(slot) = target_cells.next() {
+                    *slot = Cell::EMPTY;
                 } else {
                     return (x + initial_remaining_width, y);
                 }
@@ -1682,6 +2096,7 @@ pub struct DoubleBuffer {
     pub buf: Vec<u8>,
     diffable: bool,
     blanking: bool,
+    rgb_supported: bool,
     scroll: i16,
     #[doc(hidden)]
     pub y_offset: u16,
@@ -1750,6 +2165,7 @@ impl DoubleBuffer {
             previous: Buffer::new(width, height),
             diffable: false,
             blanking: true,
+            rgb_supported: true,
             buf: Vec::with_capacity(16 * 1024),
             scroll: 0,
             epoch: 0,
@@ -1758,18 +2174,52 @@ impl DoubleBuffer {
         }
     }
 
+    /// Returns `true` if the output terminal is assumed to accept 24-bit
+    /// RGB color escapes. When `false`, any [`Color::Rgb`](Color::Rgb) on
+    /// a [`Style`] passed into [`set_string`](Self::set_string),
+    /// [`set_stringn`](Self::set_stringn), or [`set_style`](Self::set_style)
+    /// is quantized to the nearest 256-color palette index before the
+    /// cell is stored.
+    pub fn rgb_supported(&self) -> bool {
+        self.rgb_supported
+    }
+
+    /// Sets whether the output terminal supports 24-bit RGB color.
+    ///
+    /// When disabled, [`Style`]s carrying [`Color::Rgb`](Color::Rgb) are
+    /// transparently downgraded via [`Rgb::to_ansi`] at the moment they
+    /// are written into the buffer, so callers can build RGB-styled
+    /// buffers without caring whether the receiving terminal can display
+    /// them.
+    ///
+    /// This should be called once during setup, before any cells are
+    /// written. Toggling mid-frame only affects subsequent writes; cells
+    /// already in the buffer keep whatever colors they were stored with.
+    /// Call [`reset`](Self::reset) after toggling if you need a clean
+    /// slate.
+    pub fn set_rgb_supported(&mut self, supported: bool) {
+        self.rgb_supported = supported;
+        self.current.quantize_rgb = !supported;
+        self.previous.quantize_rgb = !supported;
+    }
+
     /// Clears both buffers and increments the epoch.
     pub fn reset(&mut self) {
         self.current.cells.fill(Cell::EMPTY);
+        self.current.side.clear();
         self.previous.cells.fill(Cell::EMPTY);
+        self.previous.side.clear();
         self.diffable = false;
         self.epoch = self.epoch.wrapping_add(1);
     }
     /// Resizes the buffer if dimensions have changed.
     pub fn resize(&mut self, width: u16, height: u16) {
         if self.current.width != width || self.current.height != height {
+            let quantize = !self.rgb_supported;
             self.current = Buffer::new(width, height);
             self.previous = Buffer::new(width, height);
+            self.current.quantize_rgb = quantize;
+            self.previous.quantize_rgb = quantize;
             self.diffable = false;
             self.epoch = self.epoch.wrapping_add(1);
         }
@@ -1823,6 +2273,7 @@ impl DoubleBuffer {
         }
         std::mem::swap(&mut self.current, &mut self.previous);
         self.current.cells.fill(Cell::EMPTY);
+        self.current.side.clear();
     }
     /// Renders and writes the output to the terminal.
     pub fn render(&mut self, term: &mut Terminal) {
@@ -2031,16 +2482,258 @@ mod test {
     #[test]
     fn style_encoding() {
         for fg in 0..=255u8 {
-            let fg = Color(fg);
+            let fg = AnsiColor(fg);
             let colored = Style::DEFAULT.with_fg(fg);
-            assert_eq!(colored.fg().unwrap(), fg);
+            assert_eq!(colored.fg().unwrap(), Color::Ansi(fg));
             for bg in 0..=255u8 {
-                let bg = Color(bg);
+                let bg = AnsiColor(bg);
                 let colored = colored.with_bg(bg);
-                assert_eq!(colored.bg().unwrap(), bg);
-                assert_eq!(colored.fg().unwrap(), fg);
+                assert_eq!(colored.bg().unwrap(), Color::Ansi(bg));
+                assert_eq!(colored.fg().unwrap(), Color::Ansi(fg));
             }
         }
+    }
+
+    #[test]
+    fn cell_size_is_16_bytes() {
+        assert_eq!(std::mem::size_of::<Cell>(), 16);
+        assert_eq!(std::mem::align_of::<Cell>(), 16);
+    }
+
+    #[test]
+    fn rgb_to_ansi_snaps_to_cube_and_ramp() {
+        // Exact corners of the 6x6x6 color cube.
+        assert_eq!(Rgb(0x00, 0x00, 0x00).to_ansi(), AnsiColor(16));
+        assert_eq!(Rgb(0xff, 0xff, 0xff).to_ansi(), AnsiColor(231));
+        // Mid cube slot.
+        assert_eq!(Rgb(0x5f, 0x87, 0xaf).to_ansi(), AnsiColor(16 + 36 + 12 + 3));
+        // Grayscale ramp snaps to the 24-step ramp entries.
+        assert_eq!(Rgb(0x1c, 0x1c, 0x1c).to_ansi(), AnsiColor(234));
+        assert_eq!(Rgb(0xc6, 0xc6, 0xc6).to_ansi(), AnsiColor(251));
+    }
+
+    #[test]
+    fn style_quantize_rgb_preserves_non_rgb() {
+        let s = Style::DEFAULT
+            .with_fg(AnsiColor::Red1)
+            .with_bg(AnsiColor::Blue1)
+            .with_modifier(Modifier::BOLD);
+        assert_eq!(s.quantize_rgb(), s);
+
+        let palette = Style::palette(3).with_fg(AnsiColor::Red1);
+        assert_eq!(palette.quantize_rgb(), palette);
+    }
+
+    #[test]
+    fn style_quantize_rgb_downgrades_rgb_colors() {
+        let s = Style::DEFAULT
+            .with_fg(Color::rgb(0x5f, 0x87, 0xaf))
+            .with_bg(Color::rgb(0xff, 0xff, 0xff))
+            .with_modifier(Modifier::BOLD);
+        let q = s.quantize_rgb();
+        assert_eq!(q.fg(), Some(Color::Ansi(AnsiColor(16 + 36 + 12 + 3))));
+        assert_eq!(q.bg(), Some(Color::Ansi(AnsiColor(231))));
+        assert!(q.modifiers().has(Modifier::BOLD));
+    }
+
+    #[test]
+    fn double_buffer_without_rgb_support_emits_palette_escape() {
+        // With RGB disabled, an RGB cell should quantize to 256-color SGR.
+        let mut db = DoubleBuffer::new(4, 1);
+        db.set_rgb_supported(false);
+        let style = Style::DEFAULT.with_fg(Color::rgb(0x5f, 0x87, 0xaf));
+        db.set_string(0, 0, "x", style);
+        db.render_internal();
+        let bytes = std::str::from_utf8(&db.buf).unwrap();
+        let expected_idx = (16 + 36 + 12 + 3).to_string();
+        assert!(
+            bytes.contains(&format!("38;5;{expected_idx}")),
+            "expected 256-color SGR, got: {bytes:?}",
+        );
+        assert!(
+            !bytes.contains("38;2;"),
+            "must not emit truecolor SGR when rgb is disabled: {bytes:?}",
+        );
+    }
+
+    #[test]
+    fn double_buffer_with_rgb_support_emits_truecolor_escape() {
+        let mut db = DoubleBuffer::new(4, 1);
+        assert!(db.rgb_supported());
+        let style = Style::DEFAULT.with_fg(Color::rgb(0x5f, 0x87, 0xaf));
+        db.set_string(0, 0, "x", style);
+        db.render_internal();
+        let bytes = std::str::from_utf8(&db.buf).unwrap();
+        assert!(
+            bytes.contains("38;2;95;135;175"),
+            "expected truecolor SGR, got: {bytes:?}",
+        );
+    }
+
+    #[test]
+    fn rgb_quantized_via_buffer_set_style_bypass() {
+        // `DisplayRect::fill` writes through `buf.current.set_style(...)`,
+        // bypassing the `DoubleBuffer::set_style` wrapper. The flag lives
+        // on `Buffer` itself, so this path must still quantize.
+        let mut db = DoubleBuffer::new(4, 1);
+        db.set_rgb_supported(false);
+        let style = Style::DEFAULT.with_bg(Color::rgb(0x5f, 0x87, 0xaf));
+        db.set_string(0, 0, "xxxx", Style::DEFAULT);
+        let rect = db.rect();
+        db.current().set_style(rect, style);
+        db.render_internal();
+        let bytes = std::str::from_utf8(&db.buf).unwrap();
+        let expected_idx = (16 + 36 + 12 + 3).to_string();
+        assert!(
+            bytes.contains(&format!("48;5;{expected_idx}")),
+            "expected quantized bg, got: {bytes:?}",
+        );
+        assert!(
+            !bytes.contains("48;2;"),
+            "must not emit truecolor bg: {bytes:?}",
+        );
+    }
+
+    #[test]
+    fn style_rgb_roundtrip() {
+        let s = Style::DEFAULT.with_fg(Color::rgb(12, 34, 56));
+        assert_eq!(s.fg(), Some(Color::Rgb(Rgb(12, 34, 56))));
+        assert_eq!(s.bg(), None);
+
+        let s = s.with_bg(Color::rgb(200, 100, 50));
+        assert_eq!(s.fg(), Some(Color::Rgb(Rgb(12, 34, 56))));
+        assert_eq!(s.bg(), Some(Color::Rgb(Rgb(200, 100, 50))));
+
+        // Mixing RGB fg with palette bg
+        let s = Style::DEFAULT
+            .with_fg(Color::rgb(1, 2, 3))
+            .with_bg(AnsiColor::Red1);
+        assert_eq!(s.fg(), Some(Color::Rgb(Rgb(1, 2, 3))));
+        assert_eq!(s.bg(), Some(Color::Ansi(AnsiColor::Red1)));
+    }
+
+    #[test]
+    fn cell_seven_byte_grapheme_roundtrip() {
+        let seven = "éabcde"; // 2 + 5 = 7 bytes.
+        assert_eq!(seven.len(), 7);
+        let cell = Cell::new(seven, Style::DEFAULT);
+        assert!(!cell.is_handle());
+        assert_eq!(cell.text_inline(), Some(seven));
+
+        let four = "🎉"; // 4 bytes.
+        assert_eq!(four.len(), 4);
+        let cell = Cell::new(four, Style::DEFAULT);
+        assert!(!cell.is_handle());
+        assert_eq!(cell.text_inline(), Some(four));
+    }
+
+    #[test]
+    fn long_grapheme_via_side_buffer() {
+        // 🇨🇦 (Canadian flag) is a 2-codepoint ZWJ-like sequence = 8 bytes.
+        let flag = "🇨🇦";
+        assert_eq!(flag.len(), 8);
+
+        let mut buffer = Buffer::new(4, 1);
+        buffer.set_string(0, 0, flag, Style::DEFAULT);
+
+        // The flag should land in cell 0 as a handle cell.
+        let cell = buffer.cells[0];
+        assert!(cell.is_handle(), "flag emoji should become a handle cell");
+        assert_eq!(cell.text_inline(), None);
+        assert_eq!(cell.text(&buffer.side), flag.as_bytes());
+
+        // A family ZWJ sequence: 18 bytes.
+        let family = "👨‍👩‍👧";
+        let mut buffer = Buffer::new(4, 1);
+        buffer.set_string(0, 0, family, Style::DEFAULT);
+        let cell = buffer.cells[0];
+        assert!(cell.is_handle());
+        assert_eq!(cell.text(&buffer.side), family.as_bytes());
+    }
+
+    #[test]
+    fn zalgo_grapheme_roundtrip() {
+        // A modest zalgo cluster: base 'a' + 44 combining marks = 45
+        // codepoints, 89 bytes, visual width 1. Stored as raw bytes so
+        // the source file stays readable.
+        #[rustfmt::skip]
+        const ZALGO_BYTES: &[u8] = &[
+            0x61,
+            0xCC, 0xB5, 0xCD, 0x80, 0xCD, 0x98, 0xCD, 0x8A, 0xCD, 0x86, 0xCD, 0x81,
+            0xCC, 0x9B, 0xCC, 0x9A, 0xCC, 0x82, 0xCC, 0x83, 0xCC, 0x84, 0xCD, 0x80,
+            0xCC, 0x90, 0xCC, 0x8F, 0xCD, 0x97, 0xCC, 0xBE, 0xCC, 0x84, 0xCC, 0x92,
+            0xCD, 0x9D, 0xCC, 0x94, 0xCC, 0x87, 0xCC, 0xA4, 0xCC, 0xBB, 0xCC, 0xB2,
+            0xCC, 0xBC, 0xCC, 0xBC, 0xCC, 0xA3, 0xCC, 0x9F, 0xCC, 0x98, 0xCC, 0x9D,
+            0xCC, 0x9C, 0xCD, 0x87, 0xCD, 0x87, 0xCC, 0x97, 0xCC, 0x9E, 0xCC, 0xB2,
+            0xCC, 0x9C, 0xCC, 0xAF, 0xCC, 0xA4, 0xCC, 0xBA, 0xCC, 0xAA, 0xCC, 0x9D,
+            0xCD, 0x8D, 0xCD, 0x8D,
+        ];
+        let zalgo = std::str::from_utf8(ZALGO_BYTES).unwrap();
+        assert_eq!(zalgo.len(), 89);
+        assert!(zalgo.len() > 7 && zalgo.len() <= u8::MAX as usize);
+
+        let mut buffer = Buffer::new(4, 1);
+        buffer.set_string(0, 0, zalgo, Style::DEFAULT);
+        let cell = buffer.cells[0];
+        assert!(cell.is_handle());
+        assert_eq!(cell.text(&buffer.side), ZALGO_BYTES);
+    }
+
+    #[test]
+    fn extreme_zalgo_truncates_at_char_boundary() {
+        // Synthetic zalgo exceeding the 255-byte handle cap so that
+        // `set_stringn` is forced down the truncation path. Base letter
+        // 'a' (1 byte) plus 200 U+0301 COMBINING ACUTE ACCENT (2 bytes
+        // each) = 401 bytes total in a single grapheme cluster.
+        let mut extreme = String::from("a");
+        for _ in 0..200 {
+            extreme.push('\u{0301}');
+        }
+        assert!(extreme.len() > u8::MAX as usize);
+        assert_eq!(
+            UnicodeSegmentation::graphemes(extreme.as_str(), true).count(),
+            1,
+            "combining marks must collapse into one grapheme cluster",
+        );
+
+        let mut buffer = Buffer::new(4, 1);
+        buffer.set_string(0, 0, &extreme, Style::DEFAULT);
+        let cell = buffer.cells[0];
+        assert!(cell.is_handle(), "truncated zalgo should still be a handle");
+
+        let stored = cell.text(&buffer.side);
+        assert!(
+            stored.len() <= u8::MAX as usize,
+            "stored length {} exceeds u8 cap",
+            stored.len(),
+        );
+        // Must still be valid UTF-8 — truncation is at a codepoint boundary.
+        let decoded = std::str::from_utf8(stored)
+            .expect("truncation landed off a UTF-8 boundary");
+        // Must be a non-empty prefix of the input.
+        assert!(!decoded.is_empty());
+        assert!(extreme.starts_with(decoded));
+    }
+
+    #[test]
+    fn long_grapheme_diff_is_idempotent() {
+        // Writing the same long grapheme twice should diff to empty output
+        // (after the initial paint), exercising the slow-path equality.
+        let mut db = DoubleBuffer::new(4, 1);
+        db.set_string(0, 0, "🇨🇦hi", Style::DEFAULT);
+        db.render_internal();
+        db.buf.clear();
+        // Frame 2: identical content; expect only trailing cursor-return and
+        // clear-style, no text output.
+        db.set_string(0, 0, "🇨🇦hi", Style::DEFAULT);
+        db.render_internal();
+        // No grapheme bytes should appear in the diff output.
+        let out = &db.buf;
+        assert!(
+            !out.windows(4).any(|w| w == [0xF0, 0x9F, 0x87, 0xA8]),
+            "diff re-emitted the flag grapheme: {:?}",
+            out
+        );
     }
 
     pub struct BufferDiffCheck {
@@ -2096,22 +2789,22 @@ mod test {
             for i in 0..4 {
                 let (mut a, mut b) = rect.take_top(1).h_split(0.5);
                 a.take_left(6)
-                    .with(Color::LightGoldenrod2.with_fg(Color::Black))
+                    .with(AnsiColor::LightGoldenrod2.with_fg(AnsiColor::Black))
                     .text(out, " Done ");
 
                 a.with(if i == 0 {
-                    Color::Blue1.with_fg(Color::Black)
+                    AnsiColor::Blue1.with_fg(AnsiColor::Black)
                 } else {
-                    Color(248).as_fg()
+                    AnsiColor(248).as_fg()
                 })
                 .fill(out)
                 .skip(1)
                 .text(out, "die R:0 S:0");
 
                 b.take_left(6)
-                    .with(Color::Aquamarine1.with_bg(Color::Grey[4]))
+                    .with(AnsiColor::Aquamarine1.with_bg(AnsiColor::Grey[4]))
                     .text(out, " Fail ");
-                b.with(Color(248).as_fg())
+                b.with(AnsiColor(248).as_fg())
                     .fill(out)
                     .skip(1)
                     .text(out, "cargo run -- die")
@@ -2124,22 +2817,22 @@ mod test {
             for i in 0..4 {
                 let (mut a, mut b) = rect.take_top(1).h_split(0.5);
                 a.take_left(6)
-                    .with(Color::LightGoldenrod2.with_fg(Color::Black))
+                    .with(AnsiColor::LightGoldenrod2.with_fg(AnsiColor::Black))
                     .text(out, " Done ");
 
                 a.with(if i == 1 {
-                    Color::Blue1.with_fg(Color::Black)
+                    AnsiColor::Blue1.with_fg(AnsiColor::Black)
                 } else {
-                    Color(248).as_fg()
+                    AnsiColor(248).as_fg()
                 })
                 .fill(out)
                 .skip(1)
                 .text(out, "die R:0 S:0");
 
                 b.take_left(6)
-                    .with(Color::BlueViolet.with_bg(Color::Grey[4]))
+                    .with(AnsiColor::BlueViolet.with_bg(AnsiColor::Grey[4]))
                     .text(out, " Done ");
-                b.with(Color(248).as_fg())
+                b.with(AnsiColor(248).as_fg())
                     .fill(out)
                     .skip(1)
                     .text(out, "cargo info")
@@ -2161,7 +2854,7 @@ mod test {
                 w: 5,
                 h: 1,
             },
-            Color(1).as_bg(),
+            AnsiColor(1).as_bg(),
         );
         buffer.set_style(
             Rect {
@@ -2170,7 +2863,7 @@ mod test {
                 w: 6,
                 h: 1,
             },
-            Color(2).as_fg(),
+            AnsiColor(2).as_fg(),
         );
         buffer.set_style(
             Rect {
@@ -2182,17 +2875,22 @@ mod test {
             Style::DEFAULT.with_modifier(Modifier::BOLD),
         );
         let expected = [
-            /* 0 */ Cell::new("", Color(1).as_bg()),
-            /* 1 */ Cell::new("h", Color(1).as_bg()),
-            /* 2 */ Cell::new("e", Color(1).as_bg() | Color(2).as_fg()),
-            /* 3 */ Cell::new("l", Color(1).as_bg() | Color(2).as_fg() | Modifier::BOLD),
-            /* 4 */ Cell::new("l", Color(1).as_bg() | Color(2).as_fg()),
-            /* 5 */ Cell::new("o", Color(2).as_fg()),
-            /* 6 */ Cell::new("", Color(2).as_fg()),
-            /* 7 */ Cell::new("", Color(2).as_fg()),
+            /* 0 */ Cell::new("", AnsiColor(1).as_bg()),
+            /* 1 */ Cell::new("h", AnsiColor(1).as_bg()),
+            /* 2 */ Cell::new("e", AnsiColor(1).as_bg() | AnsiColor(2).as_fg()),
+            /* 3 */
+            Cell::new(
+                "l",
+                AnsiColor(1).as_bg() | AnsiColor(2).as_fg() | Modifier::BOLD,
+            ),
+            /* 4 */ Cell::new("l", AnsiColor(1).as_bg() | AnsiColor(2).as_fg()),
+            /* 5 */ Cell::new("o", AnsiColor(2).as_fg()),
+            /* 6 */ Cell::new("", AnsiColor(2).as_fg()),
+            /* 7 */ Cell::new("", AnsiColor(2).as_fg()),
         ];
         for (i, (got, expected)) in buffer.cells.iter().zip(expected.iter()).enumerate() {
-            assert_eq!(got, expected, "Mismatch at cell {}", i);
+            assert_eq!(got.style, expected.style, "style mismatch at cell {}", i);
+            assert_eq!(got.text, expected.text, "text mismatch at cell {}", i);
         }
     }
 
@@ -2205,22 +2903,24 @@ mod test {
             assert_ne!(s, Style::DEFAULT);
         }
         assert!(!Style::DEFAULT.is_palette());
-        assert!(!Style::DEFAULT.with_fg(Color::Red1).is_palette());
+        assert!(!Style::DEFAULT.with_fg(AnsiColor::Red1).is_palette());
     }
 
     #[test]
     fn palette_preserves_fg_bg() {
-        let s = Style::palette(5).with_fg(Color::Red1).with_bg(Color::Blue1);
+        let s = Style::palette(5)
+            .with_fg(AnsiColor::Red1)
+            .with_bg(AnsiColor::Blue1);
         assert!(s.is_palette());
         assert_eq!(s.palette_index(), 5);
-        assert_eq!(s.fg(), Some(Color::Red1));
-        assert_eq!(s.bg(), Some(Color::Blue1));
+        assert_eq!(s.fg(), Some(Color::Ansi(AnsiColor::Red1)));
+        assert_eq!(s.bg(), Some(Color::Ansi(AnsiColor::Blue1)));
     }
 
     #[test]
     fn palette_set_style_merges_colors() {
         let mut buffer = Buffer::new(4, 1);
-        buffer.set_string(0, 0, "abcd", Color(1).as_fg() | Color(2).as_bg());
+        buffer.set_string(0, 0, "abcd", AnsiColor(1).as_fg() | AnsiColor(2).as_bg());
         // set_style with palette (no fg/bg) should replace modifiers but keep existing colors
         buffer.set_style(
             Rect {
@@ -2235,8 +2935,8 @@ mod test {
         assert!(s1.is_palette());
         assert_eq!(s1.palette_index(), 7);
         // Existing fg/bg should be preserved through the merge
-        assert_eq!(s1.fg(), Some(Color(1)));
-        assert_eq!(s1.bg(), Some(Color(2)));
+        assert_eq!(s1.fg(), Some(Color::Ansi(AnsiColor(1))));
+        assert_eq!(s1.bg(), Some(Color::Ansi(AnsiColor(2))));
         // Cells outside the region should be unchanged
         assert!(!buffer.cells[0].style().is_palette());
         assert!(!buffer.cells[3].style().is_palette());
@@ -2249,13 +2949,13 @@ mod test {
         db.set_palette(0, b"\x1b[4:3m".to_vec());
         db.set_palette(1, b"\x1b[58;2;255;0;0m".to_vec());
 
-        let underline = Style::palette(0).with_fg(Color::Red1);
-        let colored_ul = Style::palette(1).with_fg(Color::Blue1);
+        let underline = Style::palette(0).with_fg(AnsiColor::Red1);
+        let colored_ul = Style::palette(1).with_fg(AnsiColor::Blue1);
 
         // Frame 1: full render path
         db.set_string(0, 0, "error", underline);
         db.set_string(6, 0, "warn", colored_ul);
-        db.set_string(0, 1, "normal", Color::Red1.as_fg());
+        db.set_string(0, 1, "normal", AnsiColor::Red1.as_fg());
         db.render_internal();
 
         let output = String::from_utf8_lossy(&db.buf);
@@ -2267,22 +2967,25 @@ mod test {
         db.buf.clear();
 
         // Frame 2: diff path - same palette, different fg
-        let underline_blue = Style::palette(0).with_fg(Color::Blue1);
+        let underline_blue = Style::palette(0).with_fg(AnsiColor::Blue1);
         db.set_string(0, 0, "error", underline_blue);
         db.set_string(6, 0, "warn", colored_ul);
-        db.set_string(0, 1, "normal", Color::Red1.as_fg());
+        db.set_string(0, 1, "normal", AnsiColor::Red1.as_fg());
         db.render_internal();
 
         let output = String::from_utf8_lossy(&db.buf);
         // Same palette index - should NOT re-emit palette bytes, just the fg change
         assert!(output.contains("error"), "changed text missing in diff");
-        assert!(!output.contains("warn"), "unchanged region should be skipped");
+        assert!(
+            !output.contains("warn"),
+            "unchanged region should be skipped"
+        );
         db.buf.clear();
 
         // Frame 3: transition from palette to normal
-        db.set_string(0, 0, "plain", Color::Blue1.as_fg());
+        db.set_string(0, 0, "plain", AnsiColor::Blue1.as_fg());
         db.set_string(6, 0, "warn", colored_ul);
-        db.set_string(0, 1, "normal", Color::Red1.as_fg());
+        db.set_string(0, 1, "normal", AnsiColor::Red1.as_fg());
         db.render_internal();
 
         let output = String::from_utf8_lossy(&db.buf);

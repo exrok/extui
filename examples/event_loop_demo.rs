@@ -1,6 +1,6 @@
 use extui::event::polling::GlobalWakerConfig;
 use extui::event::{self, Event, Events, KeyCode, KeyEvent};
-use extui::{Color, DoubleBuffer, Style, Terminal, TerminalFlags};
+use extui::{AnsiColor, DoubleBuffer, Style, Terminal, TerminalFlags};
 
 fn main() -> std::io::Result<()> {
     // Setup signal handlers
@@ -21,7 +21,7 @@ fn main() -> std::io::Result<()> {
 
     loop {
         // Render
-        buf.rect().with(Color::Blue1.as_bg()).fill(&mut buf);
+        buf.rect().with(AnsiColor::Blue1.as_bg()).fill(&mut buf);
         let mut rect = buf.rect();
         rect.take_top(1)
             .with(Style::DEFAULT)
@@ -29,7 +29,7 @@ fn main() -> std::io::Result<()> {
 
         if let Some(key) = last_key {
             rect.take_top(1)
-                .with(Color::Black.with_fg(Color::White))
+                .with(AnsiColor::Black.with_fg(AnsiColor::White))
                 .text(&mut buf, "Last Key Pressed: ")
                 .fmt(&mut buf, format_args!("{key:?}"));
         }

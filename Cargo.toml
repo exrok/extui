@@ -9,7 +9,7 @@ repository = "https://github.com/exrok/extui"
 description = "An experimental fast compiling serialization and deserialization libary for JSON like formats."
 keywords = ["serialization"]
 categories = ["encoding"]
-rust-version = "1.88"
+rust-version = "1.91"
 
 [dependencies]
 itoap = "1.0.1"
@@ -26,4 +26,4 @@ vt100 = "0.16"
 bracketed-paste = []
 
 [workspace]
-members = [ "crates/extui-neovim" ]
+members = ["crates/benchmark", "crates/extui-neovim"]

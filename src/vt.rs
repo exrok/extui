@@ -65,7 +65,7 @@
 //!
 //! - [`BELL`] - Ring the terminal bell
 
-use crate::{Style, StyleDelta, event::KeyboardEnhancementFlags};
+use crate::{Color, Rgb, Style, StyleDelta, event::KeyboardEnhancementFlags};
 
 // # Safety Rationale for Unsafe Blocks
 //
@@ -157,21 +157,24 @@ static LOOKUP: [u32;256] = [
 ///
 /// If `clear` is true, prepends `0;` to reset attributes first.
 pub fn style(out: &mut Vec<u8>, style: Style, clear: bool) {
-    debug_assert!(!style.is_palette(), "palette styles should not be passed to vt::style()");
+    debug_assert!(
+        !style.is_palette(),
+        "palette styles should not be passed to vt::style()"
+    );
     if style == Style::DEFAULT {
         if clear {
             out.extend_from_slice(b"\x1b[0m");
         }
         return;
     }
-    out.reserve(64);
+    out.reserve(80);
     let len = out.len();
     let ogptr = out.as_mut_ptr();
-    let ptr = out.as_mut_ptr();
 
-    // SAFETY: Reserved 64 bytes. Max output is ~47 bytes.
+    // SAFETY: Reserved 80 bytes. Worst-case output (all 9 modifiers + fg RGB + bg RGB + ESC[ + m)
+    // is ~56 bytes.
     unsafe {
-        let mut ptr = ptr.add(len);
+        let mut ptr = ogptr.add(len);
         *(ptr as *mut [u8; 2]) = [0x1b, b'['];
         ptr = ptr.add(2);
         if clear {
@@ -186,33 +189,58 @@ pub fn style(out: &mut Vec<u8>, style: Style, clear: bool) {
         }
         if let Some(color) = style.fg() {
             if !first {
-                *(ptr as *mut u8) = b';';
+                *ptr = b';';
                 ptr = ptr.add(1);
             } else {
                 first = false;
             }
-            *(ptr as *mut [u8; 8]) = *b"38;5;000";
-            ptr = ptr.add(5);
-            let mask = LOOKUP[color.0 as usize];
-            let numlen = (mask >> 24) as usize;
-            *(ptr as *mut [u8; 4]) = mask.to_ne_bytes();
-            ptr = ptr.add(numlen);
+            ptr = write_sgr_color(ptr, color, b'3');
         }
         if let Some(color) = style.bg() {
             if !first {
-                *(ptr as *mut u8) = b';';
+                *ptr = b';';
                 ptr = ptr.add(1);
             }
-            *(ptr as *mut [u8; 8]) = *b"48;5;000";
-            ptr = ptr.add(5);
-            let mask = LOOKUP[color.0 as usize];
-            let numlen = (mask >> 24) as usize;
-            *(ptr as *mut [u8; 4]) = mask.to_ne_bytes();
-            ptr = ptr.add(numlen);
+            ptr = write_sgr_color(ptr, color, b'4');
         }
         *ptr = b'm';
         let new_len = ptr.offset_from(ogptr) as usize + 1;
         out.set_len(new_len);
+    }
+}
+
+/// Writes one SGR color escape parameter (`38;5;N` / `38;2;R;G;B` for fg,
+/// `48;...` for bg), without the leading `;` or trailing `m`.
+///
+/// `lead` is `b'3'` for foreground or `b'4'` for background — it becomes the
+/// first digit of the `38`/`48` SGR prefix.
+///
+/// # Safety
+/// `ptr` must point into a buffer with at least 19 writable bytes (the worst
+/// case is `"48;2;255;255;255"`).
+#[inline]
+unsafe fn write_sgr_color(mut ptr: *mut u8, color: Color, lead: u8) -> *mut u8 {
+    unsafe {
+        match color {
+            Color::Ansi(c) => {
+                *(ptr as *mut [u8; 8]) = [lead, b'8', b';', b'5', b';', b'0', b'0', b'0'];
+                ptr = ptr.add(5);
+                let mask = LOOKUP[c.0 as usize];
+                let numlen = (mask >> 24) as usize;
+                *(ptr as *mut [u8; 4]) = mask.to_ne_bytes();
+                ptr = ptr.add(numlen);
+            }
+            Color::Rgb(Rgb(r, g, b)) => {
+                *(ptr as *mut [u8; 4]) = [lead, b'8', b';', b'2'];
+                ptr = ptr.add(4);
+                for ch in [r, g, b] {
+                    *ptr = b';';
+                    ptr = ptr.add(1);
+                    ptr = ptr.add(itoap::write_to_ptr(ptr, ch));
+                }
+            }
+        }
+        ptr
     }
 }
 
@@ -461,7 +489,7 @@ impl BufferWrite for EraseChars {
 ///
 /// Combine modifiers using bitwise OR. Use [`Style::with_modifier`](crate::Style::with_modifier)
 /// to apply modifiers to a style.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Modifier(pub(crate) u16);
 
 impl std::fmt::Debug for Modifier {
@@ -494,25 +522,25 @@ impl std::fmt::Debug for Modifier {
 }
 impl Modifier {
     /// Bold text.
-    pub const BOLD: Modifier = Modifier(0b0000_0000_0001_00_000);
+    pub const BOLD: Modifier = Modifier(1 << 0);
     /// Dim/faint text.
-    pub const DIM: Modifier = Modifier(0b0000_0000_0010_00_000);
+    pub const DIM: Modifier = Modifier(1 << 1);
     /// Italic text.
-    pub const ITALIC: Modifier = Modifier(0b0000_0000_0100_00_000);
+    pub const ITALIC: Modifier = Modifier(1 << 2);
     /// Underlined text.
-    pub const UNDERLINED: Modifier = Modifier(0b0000_0000_1000_00_000);
+    pub const UNDERLINED: Modifier = Modifier(1 << 3);
     /// Slow blinking text.
-    pub const SLOW_BLINK: Modifier = Modifier(0b0000_0001_0000_00_000);
+    pub const SLOW_BLINK: Modifier = Modifier(1 << 4);
     /// Rapid blinking text.
-    pub const RAPID_BLINK: Modifier = Modifier(0b0000_0010_0000_00_000);
+    pub const RAPID_BLINK: Modifier = Modifier(1 << 5);
     /// Reversed foreground and background colors.
-    pub const REVERSED: Modifier = Modifier(0b0000_0100_0000_00_000);
+    pub const REVERSED: Modifier = Modifier(1 << 6);
     /// Hidden/invisible text.
-    pub const HIDDEN: Modifier = Modifier(0b0000_1000_0000_00_000);
+    pub const HIDDEN: Modifier = Modifier(1 << 7);
     /// Crossed-out/strikethrough text.
-    pub const CROSSED_OUT: Modifier = Modifier(0b0001_0000_0000_00_000);
+    pub const CROSSED_OUT: Modifier = Modifier(1 << 8);
     /// All modifiers combined.
-    pub const ALL: Modifier = Modifier(0b0001_1111_1111_00_000);
+    pub const ALL: Modifier = Modifier(0x01FF);
 
     /// Returns `true` if no modifiers are set.
     pub fn is_empty(self) -> bool {
@@ -522,7 +550,7 @@ impl Modifier {
 
 impl From<Modifier> for Style {
     fn from(value: Modifier) -> Self {
-        Style(value.0 as u32)
+        Style(value.0 as u64)
     }
 }
 impl Modifier {
@@ -605,7 +633,10 @@ impl BufferWrite for KeyboardEnhancementFlags {
 
 impl BufferWrite for Style {
     fn write_to_buffer(&self, buffer: &mut Vec<u8>) {
-        debug_assert!(!self.is_palette(), "palette styles cannot be written as VT sequences directly");
+        debug_assert!(
+            !self.is_palette(),
+            "palette styles cannot be written as VT sequences directly"
+        );
         style(buffer, *self, false);
     }
 }
@@ -638,8 +669,11 @@ impl BufferWrite for ScrollRegion {
 
 impl BufferWrite for StyleDelta {
     fn write_to_buffer(&self, buffer: &mut Vec<u8>) {
-        debug_assert!(!self.target.is_palette(), "palette styles cannot be used with StyleDelta");
-        if self.current == u32::MAX {
+        debug_assert!(
+            !self.target.is_palette(),
+            "palette styles cannot be used with StyleDelta"
+        );
+        if self.current == u64::MAX {
             style(buffer, self.target, true);
             return;
         }
@@ -647,7 +681,7 @@ impl BufferWrite for StyleDelta {
             return;
         }
         let removed = (self.target.0 | self.current) ^ self.target.0;
-        let clearing = removed & (Style::HAS_BG | Style::HAS_FG | Modifier::ALL.0 as u32) != 0;
+        let clearing = removed & (Style::HAS_BG | Style::HAS_FG | Modifier::ALL.0 as u64) != 0;
         if clearing {
             style(buffer, self.target, true);
             return;
@@ -721,11 +755,7 @@ mod tests {
             (&MoveCursorPrevLine(1), b"\x1b[1F", "MoveCursorPrevLine(1)"),
             (&MoveCursorPrevLine(5), b"\x1b[5F", "MoveCursorPrevLine(5)"),
             // MoveCursorToColumn
-            (
-                &MoveCursorToColumn(0),
-                b"\x1b[1G",
-                "MoveCursorToColumn(0)",
-            ),
+            (&MoveCursorToColumn(0), b"\x1b[1G", "MoveCursorToColumn(0)"),
             (
                 &MoveCursorToColumn(79),
                 b"\x1b[80G",
@@ -751,7 +781,7 @@ mod tests {
             (&ScrollRegion::RESET, b"\x1b[r", "ScrollRegion::RESET"),
             // Style with fg
             (
-                &Style::DEFAULT.with_fg(crate::Color(196)),
+                &Style::DEFAULT.with_fg(crate::AnsiColor(196)),
                 b"\x1b[38;5;196m".as_slice(),
                 "Style with fg color 196",
             ),

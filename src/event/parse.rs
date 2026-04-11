@@ -62,7 +62,9 @@ impl Events {
             match parse_event(remaining, in_raw_mode) {
                 ParseResult::Event { consumed, event } => {
                     self.read += consumed as usize;
-                    if let InternalEvent::Event(event) = event { return Some(event) }
+                    if let InternalEvent::Event(event) = event {
+                        return Some(event);
+                    }
                 }
                 ParseResult::Incomplete => {
                     let new_resize_count = resize_count();
@@ -537,7 +539,8 @@ fn translate_functional_keypad(codepoint: u32) -> Option<KeyCode> {
         Delete,
         KeypadBegin,
     ];
-    LUT.get(codepoint.wrapping_sub(57399) as usize).map(|value| *value)
+    LUT.get(codepoint.wrapping_sub(57399) as usize)
+        .map(|value| *value)
 }
 
 fn translate_functional_other(codepoint: u32) -> Option<KeyCode> {
@@ -664,10 +667,10 @@ pub(crate) fn parse_csi_u_encoded_key_code(event_buffer: &[u8], is_raw: bool) ->
                 .next()
                 .and_then(|cp| cp.parse::<u32>().ok())
                 .and_then(char::from_u32)
-            {
-                keycode = KeyCode::Char(shifted_c);
-                modifiers.set(KeyModifiers::SHIFT, false);
-            }
+        {
+            keycode = KeyCode::Char(shifted_c);
+            modifiers.set(KeyModifiers::SHIFT, false);
+        }
         Ok(InternalEvent::Event(Event::Key(
             KeyEvent::new_with_kind_and_state(
                 keycode,

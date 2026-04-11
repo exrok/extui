@@ -1,5 +1,5 @@
 use extui::{
-    BoxStyle, Color, DoubleBuffer, HAlign, Rect, Style, TerminalFlags,
+    AnsiColor, BoxStyle, DoubleBuffer, HAlign, Rect, Style, TerminalFlags,
     event::{Event, KeyCode, KeyEvent, KeyModifiers},
     widget::ScrollBar,
 };
@@ -78,12 +78,12 @@ fn render(app: &mut App, dst: &mut DoubleBuffer) {
         &app.items,
         |mut rect, buf, item, selected| {
             let bg = if selected {
-                Color(242).as_bg()
+                AnsiColor(242).as_bg()
             } else {
                 Style::default()
             };
             rect.take_right(5)
-                .with(Color(4).as_fg() | bg)
+                .with(AnsiColor(4).as_fg() | bg)
                 .fill(buf)
                 .fmt(buf, item.value);
             rect.with(bg).fill(buf).text(buf, &item.name);

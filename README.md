@@ -17,7 +17,7 @@ extui was largly made for my own needs and is used some of my other projects suc
 ```rust
 use extui::event::polling::GlobalWakerConfig;
 use extui::event::{self, Event, Events, KeyCode, KeyEvent};
-use extui::{Color, DoubleBuffer, Style, Terminal, TerminalFlags};
+use extui::{AnsiColor, DoubleBuffer, Style, Terminal, TerminalFlags};
 
 fn main() -> std::io::Result<()> {
     extui::event::polling::initialize_global_waker(GlobalWakerConfig {
@@ -37,7 +37,7 @@ fn main() -> std::io::Result<()> {
 
     loop {
         // Render
-        buf.rect().with(Color::Blue1.as_bg()).fill(&mut buf);
+        buf.rect().with(AnsiColor::Blue1.as_bg()).fill(&mut buf);
         let mut rect = buf.rect();
         rect.take_top(1)
             .with(Style::DEFAULT)
@@ -45,7 +45,7 @@ fn main() -> std::io::Result<()> {
 
         if let Some(key) = last_key {
             rect.take_top(1)
-                .with(Color::Black.with_fg(Color::White))
+                .with(AnsiColor::Black.with_fg(AnsiColor::White))
                 .text(&mut buf, "Last Key Pressed: ")
                 .fmt(&mut buf, format_args!("{key:?}"));
         }
@@ -82,24 +82,20 @@ fn main() -> std::io::Result<()> {
 
 extui intentionally omits certain features. This results in simpler interfaces and better performance:
 
-| Limitation                | Rationale                                                                                |
-| ------------------------- | ---------------------------------------------------------------------------------------- |
-| **8-bit color only**      | No 24-bit true color. The 256-color palette covers most use cases with simpler encoding. |
-| **4-byte grapheme limit** | Characters exceeding 4 bytes are truncated. Enables fixed-size `Cell` storage.           |
-| **Unix only**             | No Windows support. Allows direct POSIX APIs without abstraction overhead.               |
+- **Unix only.** No Windows support. Allows direct POSIX APIs without abstraction overhead.
 
 ## Inspirations
 
 extui draws inspiration from excellent crates in the Rust terminal ecosystem while pursuing different tradeoffs.
 
-### ratatouille
+### ratatui
 
-The lower-level buffer API designs are influenced by [ratatouille](https://github.com/ratatui/ratatui), with the following
+The lower-level buffer API designs are influenced by [ratatui](https://github.com/ratatui/ratatui), with the following
 differences:
 
 - New diffing algorithm: Generates VT rendering bytes directly in a greedy single-pass fashion, rather than computing diffs separately.
 - Smaller diffs: Smarter about style transitions and leverages advanced VT escape sequences when possible, such as clearing whole lines to fill spaces.
-- Compact Cell storage: The core `Cell` abstraction is 8 bytes by default, packed into a single `u64` for trivial diffing and cache-friendly iteration.
+- Compact Cell storage: The core `Cell` abstraction is a 16-byte value with a `u64` style half (modifiers plus fg/bg in either the 256 palette or 24-bit RGB) and an 8-byte text half that holds up to 7 UTF-8 bytes inline. Longer graphemes spill into a per-buffer side arena. Iteration stays cache-friendly and the hot diff path reduces to a single 16-byte compare.
 
 ### crossterm
 

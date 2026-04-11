@@ -1,7 +1,7 @@
 use std::io::Write;
 
 use extui::{
-    Color,
+    AnsiColor,
     vt::{self, Modifier},
 };
 
@@ -10,7 +10,9 @@ fn main() {
     buf.extend_from_slice(b"hello");
     vt::style(
         &mut buf,
-        Color(34).with_bg(Color(90)).with_modifier(Modifier::ITALIC),
+        AnsiColor(34)
+            .with_bg(AnsiColor(90))
+            .with_modifier(Modifier::ITALIC),
         true,
     );
     buf.extend_from_slice(b"hello");

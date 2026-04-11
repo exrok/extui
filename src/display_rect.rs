@@ -263,9 +263,9 @@ mod tests {
         // Test with text that fits: "abc" (width 3) in a 10-wide rect
         let result = rect.with(HAlign::Right).text_inner(&mut buffer, "abc");
         // Right-aligned text should position "abc" at x=7,8,9
-        assert_eq!(buffer.cells[7].text(), "a");
-        assert_eq!(buffer.cells[8].text(), "b");
-        assert_eq!(buffer.cells[9].text(), "c");
+        assert_eq!(buffer.cells[7].text_inline().unwrap(), "a");
+        assert_eq!(buffer.cells[8].text_inline().unwrap(), "b");
+        assert_eq!(buffer.cells[9].text_inline().unwrap(), "c");
         // Right offset should be 3 (consumed from right)
         assert_eq!(result.properties.right_offset, 3);
 
@@ -282,10 +282,10 @@ mod tests {
         assert_eq!(result2.properties.right_offset, 2);
         // Now add "ab" before it - should go at x=6,7
         let result3 = result2.text_inner(&mut buffer2, "ab");
-        assert_eq!(buffer2.cells[6].text(), "a");
-        assert_eq!(buffer2.cells[7].text(), "b");
-        assert_eq!(buffer2.cells[8].text(), "c");
-        assert_eq!(buffer2.cells[9].text(), "d");
+        assert_eq!(buffer2.cells[6].text_inline().unwrap(), "a");
+        assert_eq!(buffer2.cells[7].text_inline().unwrap(), "b");
+        assert_eq!(buffer2.cells[8].text_inline().unwrap(), "c");
+        assert_eq!(buffer2.cells[9].text_inline().unwrap(), "d");
         // Right offset should now be 4 (consumed 4 from right)
         assert_eq!(result3.properties.right_offset, 4);
     }
@@ -303,10 +303,10 @@ mod tests {
         // Test with text that fits: "abcd" (width 4) in a 10-wide rect
         // Should be centered at x=3,4,5,6 (3 spaces on each side)
         let result = rect.with(HAlign::Center).text_inner(&mut buffer, "abcd");
-        assert_eq!(buffer.cells[3].text(), "a");
-        assert_eq!(buffer.cells[4].text(), "b");
-        assert_eq!(buffer.cells[5].text(), "c");
-        assert_eq!(buffer.cells[6].text(), "d");
+        assert_eq!(buffer.cells[3].text_inline().unwrap(), "a");
+        assert_eq!(buffer.cells[4].text_inline().unwrap(), "b");
+        assert_eq!(buffer.cells[5].text_inline().unwrap(), "c");
+        assert_eq!(buffer.cells[6].text_inline().unwrap(), "d");
         // Center should consume the entire rectangle
         assert_eq!(result.properties.offset, 10);
     }
