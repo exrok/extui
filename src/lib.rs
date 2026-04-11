@@ -21,14 +21,10 @@
 //!
 //! # Deliberate Limitations
 //!
-//! extui intentionally omits certain features for simpler interfaces and better
-//! performance:
+//! extui intentionally omits certain features in exchange for simpler
+//! interfaces and better performance:
 //!
-//! - **7-byte grapheme limit** - Grapheme clusters exceeding 7 bytes are dropped.
-//!   This enables a fixed-size 16-byte [`Cell`] layout. Most text fits within this
-//!   limit; flag emoji and skin-tone ZWJ sequences may be dropped.
-//! - **Unix only** - No Windows support. This allows direct use of POSIX APIs
-//!   without abstraction overhead.
+//! - **Unix only.** No Windows support.
 //!
 //! Foreground and background colors can be either a 256-color palette index
 //! ([`AnsiColor`]) or a 24-bit RGB value ([`Rgb`]), selected per cell. Use
@@ -119,22 +115,18 @@ macro_rules! splat {
     }};
 }
 
-/// A single terminal cell containing styled text.
+/// A single terminal cell holding one styled grapheme cluster.
 ///
-/// Stores a grapheme cluster along with its associated [`Style`]. Cells are
-/// the fundamental unit for terminal rendering.
+/// Cells are the fundamental unit of rendering in extui. Each cell pairs
+/// a [`Style`] with the grapheme that occupies one column of the
+/// terminal. Short graphemes (up to seven UTF-8 bytes) are stored
+/// directly inside the cell, while longer clusters such as flag emoji
+/// and ZWJ sequences are held in the owning [`Buffer`].
 ///
-/// The 8-byte `text` field is a tagged union controlled by `text[7]`:
-///
-/// - **Inline** (`text[7]` ∈ `0..=7`): `text[0..text[7]]` holds the UTF-8 bytes.
-/// - **Handle** (`text[7]` ∈ `8..=255`): `text[0..4]` is a u32 little-endian
-///   byte offset into the owning [`Buffer`]'s [`SideBuffer`]. `text[7]` holds
-///   the grapheme's length in bytes.
-///
-/// Cell is intentionally **not** `PartialEq`/`Eq`: a handle cell's identity
-/// depends on the contents of an external [`SideBuffer`] that the `Cell`
-/// itself cannot reach. Use [`Buffer::cells_eq`] (or the internal
-/// `cells_eq` helper) when comparing cells drawn from two buffers.
+/// [`Cell`] is deliberately not `PartialEq`/`Eq`. Comparing a cell that
+/// references text stored in its owning buffer against one from a
+/// different buffer requires access to both buffers, which a [`Cell`]
+/// alone cannot provide.
 #[repr(C, align(16))]
 #[derive(Clone, Copy)]
 pub struct Cell {
@@ -840,7 +832,8 @@ impl Style {
 
     /// Returns a new style with the given foreground color.
     ///
-    /// Accepts any type convertible to [`Color`] — typically [`AnsiColor`] or [`Rgb`].
+    /// Accepts any type convertible to [`Color`], typically
+    /// [`AnsiColor`] or [`Rgb`].
     pub fn with_fg(self, color: impl Into<Color>) -> Style {
         match color.into() {
             Color::Ansi(c) => self.with_fg_ansi(c),
@@ -926,7 +919,8 @@ impl Style {
 
     /// Returns a new style with the given background color.
     ///
-    /// Accepts any type convertible to [`Color`] — typically [`AnsiColor`] or [`Rgb`].
+    /// Accepts any type convertible to [`Color`], typically
+    /// [`AnsiColor`] or [`Rgb`].
     pub fn with_bg(self, color: impl Into<Color>) -> Style {
         match color.into() {
             Color::Ansi(c) => self.with_bg_ansi(c),
@@ -979,25 +973,66 @@ impl Cell {
         text: [0; 8],
     };
 
-    /// Returns `true` if the cell contains no visible content.
+    /// Returns `true` if this cell holds no grapheme.
+    ///
+    /// An empty cell renders as a transparent gap. Freshly created
+    /// buffers are filled with empty cells.
     pub fn is_empty(self) -> bool {
         self.text == [0; 8]
     }
 
-    /// Returns `true` if the cell stores its grapheme in a side buffer.
+    /// Returns `true` if this cell refers to a grapheme held by its
+    /// owning [`Buffer`] rather than inline in the cell itself.
+    ///
+    /// Handle cells are produced by [`Buffer::set_stringn`] for
+    /// clusters longer than seven UTF-8 bytes. Resolve their text with
+    /// [`Buffer::handle_text`], and pass a handle cell only to the
+    /// buffer that produced it.
     #[inline]
     pub fn is_handle(self) -> bool {
         self.text[7] > 7
     }
 
+    /// Returns the raw grapheme offset recorded on a handle cell.
+    ///
+    /// Most callers should use [`Buffer::handle_text`], which resolves
+    /// a handle cell against its owning buffer and hands back the
+    /// grapheme bytes directly. This accessor exists for the handful
+    /// of places that need to interpret the raw layout, and it is
+    /// trivially misusable.
+    ///
+    /// # Invariants
+    ///
+    /// The returned value is only meaningful when [`Cell::is_handle`]
+    /// is `true`, and only against the [`Buffer`] that produced the
+    /// cell. Feeding an offset from one buffer into another, or
+    /// reading one from an inline cell, yields garbage.
+    #[doc(hidden)]
     #[inline]
-    pub(crate) fn handle_offset(self) -> u32 {
+    pub fn handle_offset(self) -> u32 {
         u32::from_le_bytes([self.text[0], self.text[1], self.text[2], self.text[3]])
     }
 
-    /// Returns the inline UTF-8 text of this cell, or `None` if the cell
-    /// references a side buffer. Use [`Cell::text`] when you have the
-    /// owning [`Buffer`] in scope.
+    /// Returns the raw grapheme length recorded on a handle cell.
+    ///
+    /// Paired with [`Cell::handle_offset`] for low-level handle
+    /// inspection. Prefer [`Buffer::handle_text`] in normal code.
+    ///
+    /// # Invariants
+    ///
+    /// The value is only meaningful for handle cells. Inline cells
+    /// store their UTF-8 byte count here as well, but that shape is an
+    /// implementation detail and callers should not rely on it.
+    #[doc(hidden)]
+    #[inline]
+    pub fn handle_len(self) -> u8 {
+        self.text[7]
+    }
+
+    /// Returns the grapheme stored inline in this cell, if any.
+    ///
+    /// Returns `None` for handle cells and for empty cells. Use
+    /// [`Buffer::handle_text`] when the cell may be a handle.
     #[inline]
     pub fn text_inline(&self) -> Option<&str> {
         if self.is_handle() {
@@ -1066,17 +1101,26 @@ impl Cell {
         }
     }
 
-    /// Returns a new cell with the given style merged into the existing style.
+    /// Returns a copy of this cell with `style` merged on top of the
+    /// existing style.
     ///
-    /// For handle cells, the returned cell still references the same slot in
-    /// the originating buffer's side buffer; only valid within that buffer.
+    /// Modifier bits and color fields from `style` take precedence,
+    /// while fields left unset on `style` keep their existing values.
+    ///
+    /// # Invariants
+    ///
+    /// The returned cell shares any grapheme storage with its source
+    /// cell. If the source is a handle cell, the result is only valid
+    /// inside the [`Buffer`] that produced it.
     pub fn with_style_merged(&self, style: Style) -> Cell {
         Cell {
             style: self.style | style.0,
             text: self.text,
         }
     }
-    fn style(&self) -> Style {
+    /// Returns the style component of this cell.
+    #[inline]
+    pub fn style(&self) -> Style {
         Style(self.style)
     }
     const unsafe fn new_ascii(ch: u8, style: Style) -> Cell {
@@ -1475,10 +1519,10 @@ fn cells_eq_slow(a: Cell, b: Cell, a_side: &SideBuffer, b_side: &SideBuffer) -> 
 }
 
 impl Buffer {
-    /// Scrolls content up by the given number of lines.
+    /// Scrolls the buffer upward by `amount` lines.
     ///
-    /// Lines shifted off the top are discarded; new lines at the bottom
-    /// are filled with empty cells.
+    /// Lines shifted off the top are discarded. New lines exposed at
+    /// the bottom are filled with empty cells.
     pub fn scroll_up(&mut self, amount: u16) {
         if amount == 0 || self.height == 0 {
             return;
@@ -1489,10 +1533,10 @@ impl Buffer {
         self.cells.copy_within(shifted.., 0);
         self.cells[total - shifted..].fill(Cell::EMPTY);
     }
-    /// Scrolls content down by the given number of lines.
+    /// Scrolls the buffer downward by `amount` lines.
     ///
-    /// Lines shifted off the bottom are discarded; new lines at the top
-    /// are filled with empty cells.
+    /// Lines shifted off the bottom are discarded. New lines exposed
+    /// at the top are filled with empty cells.
     pub fn scroll_down(&mut self, amount: u16) {
         if amount == 0 || self.height == 0 {
             return;
@@ -1502,6 +1546,50 @@ impl Buffer {
         let shifted = (self.width as usize) * (amount as usize);
         self.cells.copy_within(0..total - shifted, shifted);
         self.cells[0..shifted].fill(Cell::EMPTY);
+    }
+
+    /// Scrolls a rectangular sub-region by `rows` lines.
+    ///
+    /// The region covers columns `left..right` and rows `top..bot`.
+    /// A positive `rows` value shifts content upward and a negative
+    /// value shifts content downward. Cells exposed on the trailing
+    /// edge are left untouched, so callers should overwrite them with
+    /// fresh content if the vacated area needs to be cleared.
+    ///
+    /// Out-of-range coordinates are clamped to the buffer dimensions.
+    /// If the region is empty or `rows` is zero the call is a no-op.
+    pub fn scroll_region(&mut self, top: u16, bot: u16, left: u16, right: u16, rows: i32) {
+        if bot <= top || right <= left || rows == 0 {
+            return;
+        }
+        let top = top.min(self.height) as usize;
+        let bot = bot.min(self.height) as usize;
+        let left = left.min(self.width) as usize;
+        let right = right.min(self.width) as usize;
+        let width = self.width as usize;
+        let run = right - left;
+        let region_rows = bot - top;
+        if rows > 0 {
+            let s = rows as usize;
+            if s >= region_rows {
+                return;
+            }
+            for y in top..bot - s {
+                let src = (y + s) * width + left;
+                let dst = y * width + left;
+                self.cells.copy_within(src..src + run, dst);
+            }
+        } else {
+            let s = (-rows) as usize;
+            if s >= region_rows {
+                return;
+            }
+            for y in ((top + s)..bot).rev() {
+                let src = (y - s) * width + left;
+                let dst = y * width + left;
+                self.cells.copy_within(src..src + run, dst);
+            }
+        }
     }
     /// Returns the buffer width in cells.
     pub fn width(&self) -> u16 {
@@ -1513,7 +1601,8 @@ impl Buffer {
         self.height
     }
 
-    /// Creates a new buffer with the given dimensions.
+    /// Creates a new buffer of `width` columns by `height` rows,
+    /// filled with empty cells.
     pub fn new(width: u16, height: u16) -> Buffer {
         let cells = vec![Cell::EMPTY; width as usize * height as usize].into_boxed_slice();
         Buffer {
@@ -1524,12 +1613,127 @@ impl Buffer {
             quantize_rgb: false,
         }
     }
-    /// Returns a mutable reference to the cell at the given position.
+    /// Returns a mutable reference to the cell at `(x, y)`, or `None`
+    /// if the position is outside the buffer.
+    ///
+    /// This is a raw escape hatch that bypasses grapheme segmentation,
+    /// display-width accounting, and RGB quantization. Prefer
+    /// [`Buffer::set_stringn`] and [`Buffer::set_style`] for ordinary
+    /// drawing.
+    ///
+    /// # Invariants
+    ///
+    /// Writing a handle cell obtained from a different buffer leaves
+    /// the new slot pointing at the wrong arena and produces garbage
+    /// on resolution. Writing a wide grapheme into a single cell
+    /// without also clearing the cell to its right desynchronizes the
+    /// display-width accounting that the render path relies on.
+    #[doc(hidden)]
     pub fn get_mut(&mut self, x: u16, y: u16) -> Option<&mut Cell> {
         let index = (y as u32) * (self.width as u32) + (x as u32);
         self.cells.get_mut(index as usize)
     }
-    /// Returns a mutable slice of cells from position (x, y) to the end of the row.
+    /// Returns a read-only view of every cell in the buffer in row-major
+    /// order.
+    ///
+    /// The slice length is always `width * height`. Index a cell at
+    /// `(x, y)` as `cells[y * width + x]`.
+    ///
+    /// # Invariants
+    ///
+    /// A handle cell borrows its grapheme from the buffer it came from.
+    /// Resolve handle cells with [`Buffer::handle_text`] before copying
+    /// them into any other buffer.
+    #[inline]
+    pub fn cells(&self) -> &[Cell] {
+        &self.cells
+    }
+
+    /// Returns the grapheme bytes of a handle cell produced by this
+    /// buffer.
+    ///
+    /// For inline cells use [`Cell::text_inline`] instead. The
+    /// returned slice is valid UTF-8 and points into storage owned by
+    /// this buffer.
+    ///
+    /// # Invariants
+    ///
+    /// `cell` must have been produced by this buffer. Passing a handle
+    /// cell from another buffer returns `None` if its offset happens to
+    /// fall outside this buffer's storage, and silently returns
+    /// unrelated bytes if it does not.
+    #[inline]
+    pub fn handle_text(&self, cell: Cell) -> Option<&[u8]> {
+        if !cell.is_handle() {
+            return None;
+        }
+        self.side.get(cell.handle_offset(), cell.handle_len())
+    }
+
+    /// Returns the number of bytes currently retained to back handle
+    /// cells in this buffer.
+    ///
+    /// Handle storage grows every time a cluster longer than seven
+    /// UTF-8 bytes is written, and overwritten handle cells leave
+    /// their former bytes behind until the storage is compacted. Use
+    /// this reading to decide when to call [`Buffer::compact_side`] on
+    /// long-lived buffers.
+    #[inline]
+    pub fn side_len(&self) -> usize {
+        self.side.data.len()
+    }
+
+    /// Reclaims handle storage that is no longer referenced by any
+    /// live handle cell.
+    ///
+    /// Long-lived buffers accumulate unreferenced handle bytes as
+    /// cells are overwritten. Calling this method rebuilds the storage
+    /// so that only the bytes reachable from the current cell grid
+    /// remain. Handle cells are updated in place and continue to
+    /// resolve through [`Buffer::handle_text`] afterwards. Cells whose
+    /// recorded position is already out of range are reset to empty.
+    pub fn compact_side(&mut self) {
+        if self.side.data.is_empty() {
+            return;
+        }
+        let mut new_side = SideBuffer::default();
+        let old_side = &self.side;
+        for cell in self.cells.iter_mut() {
+            if !cell.is_handle() {
+                continue;
+            }
+            let len = cell.handle_len();
+            let offset = cell.handle_offset();
+            let Some(bytes) = old_side.get(offset, len) else {
+                *cell = Cell::EMPTY;
+                continue;
+            };
+            let new_offset = new_side.data.len() as u32;
+            new_side.data.extend_from_slice(bytes);
+            let o = new_offset.to_le_bytes();
+            cell.text[0] = o[0];
+            cell.text[1] = o[1];
+            cell.text[2] = o[2];
+            cell.text[3] = o[3];
+        }
+        self.side = new_side;
+    }
+
+    /// Returns a mutable slice covering the cells from `(x, y)` to the
+    /// end of row `y`, or `None` if the position is outside the
+    /// buffer.
+    ///
+    /// Intended for internal row-at-a-time overwrites. The same risks
+    /// that apply to [`Buffer::get_mut`] apply here, amplified by
+    /// acting on a whole run of cells at once.
+    ///
+    /// # Invariants
+    ///
+    /// Every cell written into the returned slice must come from this
+    /// same buffer or be an inline cell. Wide graphemes must be
+    /// followed by an empty cell so the render path preserves their
+    /// display width.
+    #[doc(hidden)]
     pub fn row_remaining_mut(&mut self, x: u16, y: u16) -> Option<&mut [Cell]> {
         let base = (y as u32) * (self.width as u32);
         let start = base + (x as u32);
@@ -1772,6 +1976,12 @@ impl Buffer {
         }
         vt::MOVE_CURSOR_TO_ORIGIN.write_to_buffer(buf);
     }
+    /// Merges `style` into every cell inside `area`.
+    ///
+    /// Foreground and background colors on `style` overwrite whatever
+    /// the cell currently carries, and any color left unset on `style`
+    /// is preserved. Modifier bits on `style` are applied on top of
+    /// the existing modifiers. Cells outside the buffer are ignored.
     pub fn set_style(&mut self, area: Rect, style: Style) {
         let Rect { x, y, w, h } = area;
         let style = if self.quantize_rgb {
@@ -1798,18 +2008,23 @@ impl Buffer {
             }
         }
     }
-    /// Writes a styled string at the given position.
+    /// Writes `string` at `(x, y)` using `style`.
     ///
-    /// Returns the cursor position after writing.
+    /// Writing stops at the right edge of the buffer or when `string`
+    /// is exhausted. Returns the position one cell past the last cell
+    /// written.
     pub fn set_string(&mut self, x: u16, y: u16, string: &str, style: Style) -> (u16, u16) {
         self.set_stringn(x, y, string, usize::MAX, style)
     }
 
-    /// Writes a styled string with a maximum width.
+    /// Writes `string` at `(x, y)` using `style`, stopping after
+    /// `max_width` columns of display width.
     ///
-    /// Returns the cursor position after writing. Graphemes up to 7 bytes
-    /// are stored inline; longer graphemes are interned into the buffer's
-    /// [`SideBuffer`] and referenced via a handle cell.
+    /// Text is segmented into grapheme clusters and each cluster
+    /// occupies its natural display width. Wide clusters such as CJK
+    /// characters take two columns, and clusters that cannot fit in
+    /// the remaining width are dropped. Returns the position one cell
+    /// past the last cell written.
     pub fn set_stringn(
         &mut self,
         x: u16,
@@ -2128,7 +2343,20 @@ impl DoubleBuffer {
     pub fn height(&self) -> u16 {
         self.current.height
     }
-    pub(crate) fn set_cell(&mut self, x: u16, y: u16, cell: Cell) {
+    /// Writes `cell` verbatim at `(x, y)`, skipping grapheme
+    /// segmentation and width accounting.
+    ///
+    /// This is the fast path for copying cells between buffers when
+    /// the caller already knows the grapheme and style.
+    ///
+    /// # Invariants
+    ///
+    /// Only inline cells may be safely copied across buffers. A handle
+    /// cell produced by one buffer must not be written into another
+    /// via this method. To copy a handle cell, resolve it with
+    /// [`Buffer::handle_text`] on its source buffer and write the
+    /// resulting text through [`DoubleBuffer::set_stringn`].
+    pub fn set_cell(&mut self, x: u16, y: u16, cell: Cell) {
         if let Some(target) = self.current.get_mut(x, y) {
             *target = cell;
         }
@@ -2138,16 +2366,17 @@ impl DoubleBuffer {
         self.current.set_style(area, style)
     }
 
-    /// Writes a styled string at the given position.
+    /// Writes `string` at `(x, y)` using `style`.
     ///
-    /// Returns the cursor position after writing.
+    /// See [`Buffer::set_string`] for the detailed semantics.
     pub fn set_string(&mut self, x: u16, y: u16, string: &str, style: Style) -> (u16, u16) {
         self.current.set_string(x, y, string, style)
     }
 
-    /// Writes a styled string with a maximum width.
+    /// Writes `string` at `(x, y)` using `style`, stopping after
+    /// `max_width` columns of display width.
     ///
-    /// Returns the cursor position after writing.
+    /// See [`Buffer::set_stringn`] for the detailed semantics.
     pub fn set_stringn(
         &mut self,
         x: u16,
@@ -2158,7 +2387,9 @@ impl DoubleBuffer {
     ) -> (u16, u16) {
         self.current.set_stringn(x, y, string, max_width, style)
     }
-    /// Creates a new double buffer with the given dimensions.
+
+    /// Creates a new double buffer of `width` columns by `height`
+    /// rows.
     pub fn new(width: u16, height: u16) -> DoubleBuffer {
         DoubleBuffer {
             current: Buffer::new(width, height),
@@ -2175,7 +2406,7 @@ impl DoubleBuffer {
     }
 
     /// Returns `true` if the output terminal is assumed to accept 24-bit
-    /// RGB color escapes. When `false`, any [`Color::Rgb`](Color::Rgb) on
+    /// RGB color escapes. When `false`, any [`Color::Rgb`] on
     /// a [`Style`] passed into [`set_string`](Self::set_string),
     /// [`set_stringn`](Self::set_stringn), or [`set_style`](Self::set_style)
     /// is quantized to the nearest 256-color palette index before the
@@ -2186,17 +2417,16 @@ impl DoubleBuffer {
 
     /// Sets whether the output terminal supports 24-bit RGB color.
     ///
-    /// When disabled, [`Style`]s carrying [`Color::Rgb`](Color::Rgb) are
-    /// transparently downgraded via [`Rgb::to_ansi`] at the moment they
-    /// are written into the buffer, so callers can build RGB-styled
-    /// buffers without caring whether the receiving terminal can display
-    /// them.
+    /// When disabled, any [`Color::Rgb`] written into the
+    /// buffer is quantized to the nearest 256-color palette entry on
+    /// the spot. Callers can build RGB-styled buffers without having
+    /// to special-case terminals that lack truecolor.
     ///
-    /// This should be called once during setup, before any cells are
-    /// written. Toggling mid-frame only affects subsequent writes; cells
-    /// already in the buffer keep whatever colors they were stored with.
-    /// Call [`reset`](Self::reset) after toggling if you need a clean
-    /// slate.
+    /// Call this once during setup, before any cells are written.
+    /// Toggling mid-frame affects only subsequent writes, so cells
+    /// already in the buffer keep whatever colors they were stored
+    /// with. Call [`reset`](Self::reset) after toggling to start from
+    /// a clean slate.
     pub fn set_rgb_supported(&mut self, supported: bool) {
         self.rgb_supported = supported;
         self.current.quantize_rgb = !supported;
@@ -2649,6 +2879,49 @@ mod test {
         let cell = buffer.cells[0];
         assert!(cell.is_handle());
         assert_eq!(cell.text(&buffer.side), family.as_bytes());
+    }
+
+    #[test]
+    fn compact_side_drops_orphaned_bytes() {
+        let flag = "🇨🇦"; // 8 bytes → handle cell.
+        let family = "👨‍👩‍👧"; // 18 bytes → handle cell.
+        let mut buffer = Buffer::new(4, 1);
+
+        // Write flag, then overwrite the same cell with family. The
+        // flag's 8 bytes are now dead weight in the side arena.
+        buffer.set_string(0, 0, flag, Style::DEFAULT);
+        buffer.set_string(0, 0, family, Style::DEFAULT);
+        // Write another throwaway into cell 1 and then overwrite it
+        // with a plain inline char so *nothing* references it.
+        buffer.set_string(1, 0, flag, Style::DEFAULT);
+        buffer.set_string(1, 0, "x", Style::DEFAULT);
+
+        let before = buffer.side_len();
+        assert_eq!(before, flag.len() * 2 + family.len());
+
+        buffer.compact_side();
+
+        // Only the family bytes survive.
+        let after = buffer.side_len();
+        assert_eq!(after, family.len());
+
+        // The surviving handle cell still resolves correctly.
+        let cell = buffer.cells[0];
+        assert!(cell.is_handle());
+        assert_eq!(buffer.handle_text(cell).unwrap(), family.as_bytes());
+
+        // Cell 1 is untouched (still the inline 'x').
+        assert_eq!(buffer.cells[1].text_inline(), Some("x"));
+    }
+
+    #[test]
+    fn compact_side_is_noop_on_empty_arena() {
+        let mut buffer = Buffer::new(4, 1);
+        buffer.set_string(0, 0, "abcd", Style::DEFAULT);
+        assert_eq!(buffer.side_len(), 0);
+        buffer.compact_side();
+        assert_eq!(buffer.side_len(), 0);
+        assert_eq!(buffer.cells[0].text_inline(), Some("a"));
     }
 
     #[test]

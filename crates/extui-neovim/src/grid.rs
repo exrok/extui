@@ -1,11 +1,14 @@
 //! Internal grid state mirroring Neovim's `ext_linegrid` protocol.
 //!
-//! The reader thread decodes each `redraw` notification and calls the
-//! corresponding `apply_*` method on [`GridState`]. Rendering walks the
-//! cell buffer and emits styled runs into an [`extui::DoubleBuffer`].
+//! The reader thread decodes each `redraw` notification and forwards
+//! it to [`GridState`]. The grid owns an [`extui::Buffer`] directly,
+//! so [`GridState::render`] paints into an [`extui::DoubleBuffer`] by
+//! copying cells in place rather than re-segmenting text on every
+//! frame. Highlight attributes are resolved once at definition time
+//! and stored as ready-to-use [`extui::Style`] values.
 
 use extui::vt::Modifier;
-use extui::{AnsiColor, Color, DoubleBuffer, Rect, Rgb, Style};
+use extui::{AnsiColor, Buffer, Color, DoubleBuffer, Rect, Rgb, Style};
 
 use crate::msgpack::{Error as MsgpackError, Kind, Reader};
 
@@ -54,86 +57,32 @@ impl Default for ModeInfo {
     }
 }
 
+/// Resolved rgb and cterm flavours of a single highlight attribute.
+///
+/// One entry is stored per `hl_attr_define` id so the render path can
+/// pick the active [`Style`] in O(1) based on the current
+/// `termguicolors` setting.
 #[derive(Clone, Copy, PartialEq, Eq)]
-struct HighlightStyle {
+struct HlEntry {
     rgb: Style,
     cterm: Style,
 }
 
-impl Default for HighlightStyle {
-    fn default() -> Self {
-        HighlightStyle {
-            rgb: Style::DEFAULT,
-            cterm: Style::DEFAULT,
-        }
-    }
-}
-
-/// A single grid cell: up to four UTF-8 bytes plus a style.
-///
-/// `len == 0` marks a continuation cell placed after a double-width
-/// grapheme. Renderers must skip continuations; `extui` consumes the second
-/// column automatically via the width of the lead grapheme.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct GridCell {
-    bytes: [u8; 4],
-    len: u8,
-    hl_id: u64,
-}
-
-impl GridCell {
-    const fn blank() -> Self {
-        GridCell {
-            bytes: [b' ', 0, 0, 0],
-            len: 1,
-            hl_id: 0,
-        }
-    }
-
-    fn with_hl_id(hl_id: u64) -> Self {
-        GridCell {
-            bytes: [b' ', 0, 0, 0],
-            len: 1,
-            hl_id,
-        }
-    }
-
-    fn from_str(s: &str, hl_id: u64) -> Self {
-        let mut bytes = [0u8; 4];
-        let len = s.len().min(4);
-        if s.len() <= 4 {
-            bytes[..len].copy_from_slice(s.as_bytes());
-            GridCell {
-                bytes,
-                len: len as u8,
-                hl_id,
-            }
-        } else {
-            bytes[0] = b'?';
-            GridCell {
-                bytes,
-                len: 1,
-                hl_id,
-            }
-        }
-    }
-
-    fn text(&self) -> &str {
-        let len = self.len as usize;
-        unsafe { std::str::from_utf8_unchecked(&self.bytes[..len]) }
-    }
+impl HlEntry {
+    const DEFAULT: HlEntry = HlEntry {
+        rgb: Style::DEFAULT,
+        cterm: Style::DEFAULT,
+    };
 }
 
 /// Mirrors the `ext_linegrid` grid maintained by an embedded Neovim.
 pub struct GridState {
-    width: u16,
-    height: u16,
-    cells: Vec<GridCell>,
+    grid: Buffer,
     cursor_row: u16,
     cursor_col: u16,
     default_rgb_style: Style,
     default_cterm_style: Style,
-    hl_attrs: Vec<HighlightStyle>,
+    hl_attrs: Vec<HlEntry>,
     termguicolors: bool,
     modes: Vec<ModeInfo>,
     current_mode: usize,
@@ -143,19 +92,15 @@ pub struct GridState {
 }
 
 impl GridState {
-    /// Creates a new grid of the given dimensions filled with blank cells.
+    /// Creates an empty grid of `width` columns by `height` rows.
     pub fn new(width: u16, height: u16) -> Self {
-        let mut hl_attrs = Vec::new();
-        hl_attrs.push(HighlightStyle::default());
         GridState {
-            width,
-            height,
-            cells: vec![GridCell::blank(); width as usize * height as usize],
+            grid: Buffer::new(width, height),
             cursor_row: 0,
             cursor_col: 0,
             default_rgb_style: Style::DEFAULT,
             default_cterm_style: Style::DEFAULT,
-            hl_attrs,
+            hl_attrs: vec![HlEntry::DEFAULT],
             termguicolors: true,
             modes: Vec::new(),
             current_mode: 0,
@@ -167,12 +112,12 @@ impl GridState {
 
     /// Returns the grid width in cells.
     pub fn width(&self) -> u16 {
-        self.width
+        self.grid.width()
     }
 
     /// Returns the grid height in cells.
     pub fn height(&self) -> u16 {
-        self.height
+        self.grid.height()
     }
 
     /// Returns the cursor row, zero-based within the grid.
@@ -226,20 +171,30 @@ impl GridState {
         self.dirty = true;
     }
 
-    fn index(&self, row: u16, col: u16) -> Option<usize> {
-        if row >= self.height || col >= self.width {
-            return None;
+    fn current_default_style(&self) -> Style {
+        if self.termguicolors {
+            self.default_rgb_style
+        } else {
+            self.default_cterm_style
         }
-        Some(row as usize * self.width as usize + col as usize)
     }
 
+    /// Picks the active [`Style`] for a highlight id, merging in the
+    /// current default fg/bg when the highlight leaves them unset.
+    ///
+    /// This runs once per run of same-styled cells inside
+    /// `apply_grid_line`, never from the render path.
     fn style_for(&self, hl_id: u64) -> Style {
         let id = hl_id as usize;
         if id == 0 {
             return self.current_default_style();
         }
-        let raw = self.hl_attrs.get(id).copied().unwrap_or_default();
-        let mut style = self.resolve_hl_style(raw);
+        let entry = self.hl_attrs.get(id).copied().unwrap_or(HlEntry::DEFAULT);
+        let mut style = if self.termguicolors {
+            entry.rgb
+        } else {
+            entry.cterm
+        };
         let default_style = self.current_default_style();
         if style.fg().is_none() {
             if let Some(c) = default_style.fg() {
@@ -254,30 +209,24 @@ impl GridState {
         style
     }
 
-    fn current_default_style(&self) -> Style {
-        if self.termguicolors {
-            self.default_rgb_style
-        } else {
-            self.default_cterm_style
-        }
-    }
-
-    fn resolve_hl_style(&self, hl: HighlightStyle) -> Style {
-        if self.termguicolors { hl.rgb } else { hl.cterm }
-    }
-
-    fn put_hl_attr(&mut self, id: u64, style: HighlightStyle) {
+    fn put_hl_attr(&mut self, id: u64, entry: HlEntry) {
         let id = id as usize;
         if id >= self.hl_attrs.len() {
-            self.hl_attrs.resize(id + 1, HighlightStyle::default());
+            self.hl_attrs.resize(id + 1, HlEntry::DEFAULT);
         }
-        self.hl_attrs[id] = style;
+        self.hl_attrs[id] = entry;
     }
 
-    /// Dispatches a top-level `redraw` event batch from a [`Reader`].
+    /// Applies a batch of `redraw` events decoded from `r`.
     ///
-    /// Expects the reader to be positioned at the outer array of events
-    /// (each element is `[name, params_1, params_2, ...]`).
+    /// The reader must be positioned at the outer array of events,
+    /// where each element takes the shape `[name, params_1, ...]`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Msgpack`] if the payload is truncated or
+    /// malformed, or [`Error::OutOfBounds`] if an event references a
+    /// coordinate outside the grid.
     pub fn apply_redraw(&mut self, r: &mut Reader<'_>) -> Result<(), Error> {
         let event_count = r.read_array_len()?;
         for _ in 0..event_count {
@@ -291,7 +240,24 @@ impl GridState {
                 self.apply_event(name, params_len, r)?;
             }
         }
+        self.maybe_compact_side();
         Ok(())
+    }
+
+    /// Calls [`extui::Buffer::compact_side`] when the grid's handle
+    /// storage has grown past a size proportional to the grid area.
+    ///
+    /// Neovim rewrites the grid on every frame. Sessions that touch
+    /// long graphemes such as flag emoji, ZWJ sequences, or combining
+    /// marks accumulate unreferenced handle bytes over time. Running
+    /// this check after each redraw keeps the storage bounded without
+    /// triggering work in sessions made up of ordinary ASCII text.
+    fn maybe_compact_side(&mut self) {
+        let area = self.grid.width() as usize * self.grid.height() as usize;
+        let threshold = (area * 32).max(16 * 1024);
+        if self.grid.side_len() > threshold {
+            self.grid.compact_side();
+        }
     }
 
     fn apply_event(
@@ -345,10 +311,7 @@ impl GridState {
     }
 
     fn resize(&mut self, width: u16, height: u16) {
-        self.width = width;
-        self.height = height;
-        let blank = GridCell::with_hl_id(0);
-        self.cells = vec![blank; width as usize * height as usize];
+        self.grid = Buffer::new(width, height);
         if self.cursor_col >= width {
             self.cursor_col = width.saturating_sub(1);
         }
@@ -359,8 +322,10 @@ impl GridState {
 
     fn apply_grid_clear(&mut self, params_len: usize, r: &mut Reader<'_>) -> Result<(), Error> {
         skip_remaining(r, params_len)?;
-        let blank = GridCell::with_hl_id(0);
-        self.cells.fill(blank);
+        // Neovim follows `grid_clear` with fresh `grid_line` events that
+        // repaint the visible area, so we just drop back to an empty
+        // buffer here.
+        self.grid = Buffer::new(self.grid.width(), self.grid.height());
         Ok(())
     }
 
@@ -371,6 +336,7 @@ impl GridState {
         let cell_count = r.read_array_len()?;
         let mut col = col_start;
         let mut current_hl_id: u64 = 0;
+        let mut current_style = self.style_for(current_hl_id);
         for _ in 0..cell_count {
             let tuple_len = r.read_array_len()?;
             if tuple_len == 0 {
@@ -379,7 +345,11 @@ impl GridState {
             let text = r.read_str()?;
             let mut repeat: u64 = 1;
             if tuple_len >= 2 {
-                current_hl_id = r.read_u64()?;
+                let new_hl_id = r.read_u64()?;
+                if new_hl_id != current_hl_id {
+                    current_hl_id = new_hl_id;
+                    current_style = self.style_for(current_hl_id);
+                }
             }
             if tuple_len >= 3 {
                 repeat = r.read_u64()?;
@@ -387,20 +357,26 @@ impl GridState {
             for _ in 3..tuple_len {
                 r.skip()?;
             }
-            let cell = if text.is_empty() {
-                GridCell {
-                    bytes: [0; 4],
-                    len: 0,
-                    hl_id: current_hl_id,
+            // An empty text marks a wide-char continuation cell; leave
+            // the slot as the EMPTY cell the lead grapheme already
+            // installed via `set_stringn`'s width-aware fill.
+            if text.is_empty() {
+                for _ in 0..repeat {
+                    col = col.saturating_add(1);
                 }
-            } else {
-                GridCell::from_str(text, current_hl_id)
-            };
+                continue;
+            }
             for _ in 0..repeat {
-                let Some(idx) = self.index(row, col) else {
+                if col >= self.grid.width() || row >= self.grid.height() {
                     break;
-                };
-                self.cells[idx] = cell;
+                }
+                // `max_width = usize::MAX` lets wide graphemes (e.g.
+                // `日`, width 2) actually land; the wire protocol sends
+                // an explicit empty continuation cell that we
+                // subsequently skip over, so advancing `col` by one
+                // here is correct regardless of grapheme width.
+                self.grid
+                    .set_stringn(col, row, text, usize::MAX, current_style);
                 col = col.saturating_add(1);
             }
         }
@@ -420,46 +396,8 @@ impl GridState {
         for _ in 6..params_len {
             r.skip()?;
         }
-        self.scroll_region(top, bot, left, right, rows);
+        self.grid.scroll_region(top, bot, left, right, rows as i32);
         Ok(())
-    }
-
-    fn scroll_region(&mut self, top: u16, bot: u16, left: u16, right: u16, rows: i64) {
-        if bot <= top || right <= left || rows == 0 {
-            return;
-        }
-        let top = top.min(self.height);
-        let bot = bot.min(self.height);
-        let left = left.min(self.width);
-        let right = right.min(self.width);
-        let width = self.width as usize;
-        let run = (right - left) as usize;
-        if rows > 0 {
-            let s = rows as u16;
-            if s >= bot - top {
-                return;
-            }
-            for y in top..bot - s {
-                let src = (y + s) as usize * width + left as usize;
-                let dst = y as usize * width + left as usize;
-                self.cells.copy_within(src..src + run, dst);
-            }
-        } else {
-            let s = (-rows) as u16;
-            if s >= bot - top {
-                return;
-            }
-            let mut y = bot - 1;
-            while y >= top + s {
-                let src = (y - s) as usize * width + left as usize;
-                let dst = y as usize * width + left as usize;
-                self.cells.copy_within(src..src + run, dst);
-                if y == 0 {
-                    break;
-                }
-                y -= 1;
-            }
-        }
     }
 
     fn apply_grid_cursor_goto(
@@ -488,9 +426,6 @@ impl GridState {
         let _rgb_sp = r.read_i64()?;
         let cterm_fg = r.read_i64()?;
         let cterm_bg = r.read_i64()?;
-        eprintln!(
-            "[grid] default_colors_set rgb_fg={rgb_fg:#x} rgb_bg={rgb_bg:#x} cterm_fg={cterm_fg} cterm_bg={cterm_bg}"
-        );
         for _ in 5..params_len {
             r.skip()?;
         }
@@ -512,12 +447,12 @@ impl GridState {
         self.default_rgb_style = rgb_style;
         self.default_cterm_style = cterm_style;
         if self.hl_attrs.is_empty() {
-            self.hl_attrs.push(HighlightStyle {
+            self.hl_attrs.push(HlEntry {
                 rgb: rgb_style,
                 cterm: cterm_style,
             });
         } else {
-            self.hl_attrs[0] = HighlightStyle {
+            self.hl_attrs[0] = HlEntry {
                 rgb: rgb_style,
                 cterm: cterm_style,
             };
@@ -533,10 +468,9 @@ impl GridState {
         for _ in 3..params_len {
             r.skip()?;
         }
-        // Linegrid always sends both rgb and cterm attrs. We keep both and
-        // decide which one to render based on the current 'termguicolors'
-        // setting. When the host terminal lacks truecolor, DoubleBuffer
-        // quantizes the rgb path to 256-color on emission.
+        // Linegrid always sends both rgb and cterm attrs. Resolve both
+        // into a [`Style`] here, once; the render path just picks one
+        // based on the current `termguicolors` setting.
         let mut rgb_style = rgb.modifiers;
         if let Some(c) = rgb.fg {
             rgb_style = rgb_style.with_fg(c);
@@ -554,7 +488,7 @@ impl GridState {
         }
         self.put_hl_attr(
             id,
-            HighlightStyle {
+            HlEntry {
                 rgb: rgb_style,
                 cterm: cterm_style,
             },
@@ -609,43 +543,34 @@ impl GridState {
         Ok(())
     }
 
-    /// Renders the grid into `rect` of `buf`, clipping to `rect`'s dimensions.
+    /// Paints the grid into `rect` on `buf`.
     ///
-    /// A scratch string is used to coalesce contiguous cells sharing the
-    /// same [`Style`] into a single [`DoubleBuffer::set_stringn`] call.
+    /// The grid is clipped to fit `rect` if its dimensions differ. The
+    /// area of `buf` outside the grid's footprint is left untouched.
     pub fn render(&self, rect: Rect, buf: &mut DoubleBuffer) {
-        let mut run = String::new();
-        let height = self.height.min(rect.h);
-        let width = self.width.min(rect.w);
+        let grid_w = self.grid.width();
+        let grid_h = self.grid.height();
+        let height = grid_h.min(rect.h);
+        let width = grid_w.min(rect.w);
+        let cells = self.grid.cells();
         for row in 0..height {
-            let base = row as usize * self.width as usize;
-            let mut col: u16 = 0;
-            while col < width {
-                let lead_idx = base + col as usize;
-                let lead = self.cells[lead_idx];
-                if lead.len == 0 {
-                    col += 1;
+            let base = (row as usize) * (grid_w as usize);
+            let row_slice = &cells[base..base + width as usize];
+            for (col, &cell) in row_slice.iter().enumerate() {
+                let target_x = rect.x + col as u16;
+                let target_y = rect.y + row;
+                if !cell.is_handle() {
+                    buf.set_cell(target_x, target_y, cell);
                     continue;
                 }
-                let style = self.style_for(lead.hl_id);
-                let run_start = col;
-                run.clear();
-                run.push_str(lead.text());
-                col += 1;
-                while col < width {
-                    let cell = self.cells[base + col as usize];
-                    if cell.len == 0 {
-                        col += 1;
-                        continue;
-                    }
-                    if self.style_for(cell.hl_id) != style {
-                        break;
-                    }
-                    run.push_str(cell.text());
-                    col += 1;
+                if let Some(bytes) = self.grid.handle_text(cell) {
+                    // Handle cells only exist for graphemes that passed
+                    // UTF-8 validation via `set_stringn`, so this is
+                    // guaranteed valid.
+                    let text =
+                        unsafe { std::str::from_utf8_unchecked(bytes) };
+                    buf.set_stringn(target_x, target_y, text, 1, cell.style());
                 }
-                let run_cols = (col - run_start) as usize;
-                buf.set_stringn(rect.x + run_start, rect.y + row, &run, run_cols, style);
             }
         }
     }
@@ -715,10 +640,10 @@ fn read_attr_map(r: &mut Reader<'_>) -> Result<AttrMap, Error> {
 
 /// Reads an `hl_attr_define` rgb-attr dict, preserving 24-bit colors.
 ///
-/// Modifier bits are collected identically to [`read_attr_map`]; the
-/// caller picks whichever source it prefers based on `termguicolors`.
-/// If the host terminal does not support truecolor, the base
-/// [`DoubleBuffer`] quantizes on emission.
+/// Modifier bits are collected in the same way as [`read_attr_map`]
+/// and the caller picks whichever source it prefers based on the
+/// current `termguicolors` setting. The host terminal's truecolor
+/// support is handled by [`DoubleBuffer`] during emission.
 fn read_rgb_attr_map(r: &mut Reader<'_>) -> Result<AttrMap, Error> {
     let n = r.read_map_len()?;
     let mut out = AttrMap {
@@ -783,9 +708,8 @@ fn read_rgb_color(r: &mut Reader<'_>) -> Result<Option<Color>, Error> {
 
 /// Unpacks a 24-bit RGB value as received on the Neovim RPC wire.
 ///
-/// Any value outside `0..=0xffffff` means "no color"; the base
-/// [`DoubleBuffer`] handles any ANSI fallback when the host terminal
-/// does not support truecolor.
+/// Values outside `0..=0xffffff` mean "no color". ANSI fallback is
+/// handled by [`DoubleBuffer`] on terminals that lack truecolor.
 fn rgb_color_from_wire(v: i64) -> Option<Color> {
     if !(0..=0xff_ff_ff).contains(&v) {
         return None;
@@ -872,6 +796,19 @@ mod tests {
         w.into_bytes()
     }
 
+    fn cell_text(g: &GridState, col: u16, row: u16) -> String {
+        let w = g.grid.width() as usize;
+        let idx = row as usize * w + col as usize;
+        let cell = g.grid.cells()[idx];
+        if let Some(s) = cell.text_inline() {
+            s.to_string()
+        } else if let Some(bytes) = g.grid.handle_text(cell) {
+            std::str::from_utf8(bytes).unwrap().to_string()
+        } else {
+            String::new()
+        }
+    }
+
     #[test]
     fn grid_line_rle_and_inherit() {
         let bytes = build_redraw(&[&|w| {
@@ -902,28 +839,26 @@ mod tests {
         let mut g = GridState::new(5, 1);
         let mut r = Reader::new(&bytes);
         g.apply_redraw(&mut r).unwrap();
-        let cells: Vec<&str> = (0..5).map(|c| g.cells[c].text()).collect();
+        let cells: Vec<String> = (0..5).map(|c| cell_text(&g, c, 0)).collect();
         assert_eq!(cells, vec!["a", "a", "a", "b", "c"]);
     }
 
     #[test]
     fn grid_scroll_up() {
         let mut g = GridState::new(4, 3);
-        for row in 0..3 {
-            for col in 0..4 {
-                g.cells[row * 4 + col] = GridCell::from_str(
-                    match row {
-                        0 => "A",
-                        1 => "B",
-                        _ => "C",
-                    },
-                    0,
-                );
+        for row in 0..3u16 {
+            let s = match row {
+                0 => "A",
+                1 => "B",
+                _ => "C",
+            };
+            for col in 0..4u16 {
+                g.grid.set_stringn(col, row, s, 1, Style::DEFAULT);
             }
         }
-        g.scroll_region(0, 3, 0, 4, 1);
-        let row0: String = (0..4).map(|c| g.cells[c].text()).collect();
-        let row1: String = (0..4).map(|c| g.cells[4 + c].text()).collect();
+        g.grid.scroll_region(0, 3, 0, 4, 1);
+        let row0: String = (0..4).map(|c| cell_text(&g, c, 0)).collect();
+        let row1: String = (0..4).map(|c| cell_text(&g, c, 1)).collect();
         assert_eq!(row0, "BBBB");
         assert_eq!(row1, "CCCC");
     }
@@ -931,21 +866,19 @@ mod tests {
     #[test]
     fn grid_scroll_down() {
         let mut g = GridState::new(4, 3);
-        for row in 0..3 {
-            for col in 0..4 {
-                g.cells[row * 4 + col] = GridCell::from_str(
-                    match row {
-                        0 => "A",
-                        1 => "B",
-                        _ => "C",
-                    },
-                    0,
-                );
+        for row in 0..3u16 {
+            let s = match row {
+                0 => "A",
+                1 => "B",
+                _ => "C",
+            };
+            for col in 0..4u16 {
+                g.grid.set_stringn(col, row, s, 1, Style::DEFAULT);
             }
         }
-        g.scroll_region(0, 3, 0, 4, -1);
-        let row1: String = (0..4).map(|c| g.cells[4 + c].text()).collect();
-        let row2: String = (0..4).map(|c| g.cells[8 + c].text()).collect();
+        g.grid.scroll_region(0, 3, 0, 4, -1);
+        let row1: String = (0..4).map(|c| cell_text(&g, c, 1)).collect();
+        let row2: String = (0..4).map(|c| cell_text(&g, c, 2)).collect();
         assert_eq!(row1, "AAAA");
         assert_eq!(row2, "BBBB");
     }
@@ -1197,6 +1130,48 @@ mod tests {
     }
 
     #[test]
+    fn side_arena_stays_bounded_under_handle_churn() {
+        // Flag emojis always land as handle cells (8 bytes > 7 inline
+        // cap). Repeatedly overwriting the same slot with a fresh flag
+        // should not let the side arena grow without bound: once we
+        // cross the threshold, `apply_redraw` rebuilds it.
+        let flag = "🇨🇦";
+
+        let mut g = GridState::new(10, 1);
+        for _ in 0..4000 {
+            let bytes = build_redraw(&[&|w| {
+                w.write_array_header(2);
+                w.write_str("grid_line");
+                w.write_array_header(5);
+                w.write_u64(1);
+                w.write_u64(0);
+                w.write_u64(0);
+                w.write_array_header(1);
+                w.write_array_header(2);
+                w.write_str(flag);
+                w.write_u64(0);
+                w.write_bool(false);
+            }]);
+            let mut r = Reader::new(&bytes);
+            g.apply_redraw(&mut r).unwrap();
+        }
+
+        // Post-churn arena should be far below the uncompacted total
+        // (4000 × 8 = 32 KB). Threshold for a 10×1 grid is 16 KiB, so
+        // we should see at most one threshold's worth of bytes live.
+        assert!(
+            g.grid.side_len() <= 16 * 1024,
+            "side arena leaked: {} bytes",
+            g.grid.side_len(),
+        );
+
+        // Whatever survived must still resolve the flag correctly.
+        let cell = g.grid.cells()[0];
+        assert!(cell.is_handle());
+        assert_eq!(g.grid.handle_text(cell).unwrap(), flag.as_bytes());
+    }
+
+    #[test]
     fn grid_line_wide_char_continuation() {
         let bytes = build_redraw(&[&|w| {
             w.write_array_header(2);
@@ -1226,8 +1201,9 @@ mod tests {
         let mut g = GridState::new(3, 1);
         let mut r = Reader::new(&bytes);
         g.apply_redraw(&mut r).unwrap();
-        assert_eq!(g.cells[0].text(), "日");
-        assert_eq!(g.cells[1].len, 0);
-        assert_eq!(g.cells[2].text(), "x");
+        assert_eq!(cell_text(&g, 0, 0), "日");
+        // Continuation cell left empty by set_stringn width fill.
+        assert!(g.grid.cells()[1].is_empty());
+        assert_eq!(cell_text(&g, 2, 0), "x");
     }
 }

@@ -1,17 +1,16 @@
 //! Translation from extui input events to Neovim key-notation strings.
 //!
-//! All translation is done into a reusable scratch [`String`] to avoid
-//! per-keystroke allocations. The resulting string is suitable for the
-//! `nvim_input` RPC call.
-
-use std::fmt::Write;
+//! Translation is written into a caller-supplied scratch [`String`]
+//! so no allocation is needed per keystroke. The resulting string is
+//! suitable for the `nvim_input` RPC call.
 
 use extui::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
-/// Appends the nvim key notation for `key` to `out`.
+/// Appends the Neovim key notation for `key` to `out`.
 ///
-/// Returns `false` if the key cannot be translated (modifier-only keys,
-/// media keys, lock keys, etc.); the caller should drop such events.
+/// Returns `false` for keys that have no Neovim translation such as
+/// modifier-only, media, or lock keys. The caller should drop events
+/// that return `false`.
 pub fn write_key(out: &mut String, key: &KeyEvent) -> bool {
     let mods = key.modifiers;
     let has_ctrl = mods.contains(KeyModifiers::CONTROL);
@@ -96,7 +95,13 @@ fn write_named(out: &mut String, name: &str, ctrl: bool, alt: bool, shift: bool)
 fn write_fn(out: &mut String, n: u8, ctrl: bool, alt: bool, shift: bool) -> bool {
     out.push('<');
     write_modifier_prefix(out, ctrl, alt, shift);
-    let _ = write!(out, "F{n}");
+    out.push('F');
+    // Function keys are F1..=F20 per `function_key_number`, so we only
+    // ever need one or two ASCII digits — bypass `core::fmt` entirely.
+    if n >= 10 {
+        out.push((b'0' + n / 10) as char);
+    }
+    out.push((b'0' + n % 10) as char);
     out.push('>');
     true
 }

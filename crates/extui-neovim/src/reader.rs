@@ -15,11 +15,13 @@ use extui::event::polling::Waker;
 use crate::grid::GridState;
 use crate::msgpack::{self, Reader};
 
-/// Runs the reader loop until stdout closes or an unrecoverable error occurs.
+/// Runs the reader loop until stdout closes or an unrecoverable
+/// error occurs.
 ///
-/// This is the thread entry point; it never returns until EOF. On any
-/// terminal condition it marks the shared state as dead, clears the dirty
-/// flag, and wakes the external waker so the main loop can observe it.
+/// Meant to be used as the entry point of a dedicated thread and does
+/// not return until the child stream reaches EOF. On any terminal
+/// condition the shared state is marked as dead and the waker is
+/// pulsed so the host main loop observes the change on its next poll.
 pub fn run(mut stdout: ChildStdout, state: Arc<Mutex<GridState>>, waker: &'static Waker) {
     let mut scratch: Vec<u8> = Vec::with_capacity(64 * 1024);
     let mut tmp = [0u8; 8192];

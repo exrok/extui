@@ -1,14 +1,14 @@
 //! Minimal MessagePack codec tailored to Neovim's embedded RPC protocol.
 //!
-//! The decoder is a cursor-style [`Reader`] that borrows directly from an
-//! input slice. It is *not* a generic MessagePack library — it exposes only
-//! the primitives needed by Neovim's redraw notifications and the handful
-//! of RPC replies we expect. Unknown values inside a payload can be stepped
-//! over with [`Reader::skip`].
+//! The decoder is a cursor-style [`Reader`] that borrows directly
+//! from an input slice. It is not a general-purpose MessagePack
+//! library and exposes only the primitives used by Neovim's redraw
+//! notifications and the RPC replies this crate expects. Unknown
+//! values inside a payload can be stepped over with [`Reader::skip`].
 //!
-//! The encoder is a matching [`Writer`] providing only the primitives used
-//! by the five outbound RPC calls (`nvim_ui_attach`, `nvim_ui_try_resize`,
-//! `nvim_ui_detach`, `nvim_input`, `nvim_input_mouse`).
+//! The encoder is a matching [`Writer`] providing the primitives used
+//! by the outbound RPC calls `nvim_ui_attach`, `nvim_ui_try_resize`,
+//! `nvim_ui_detach`, `nvim_input`, and `nvim_input_mouse`.
 
 use std::fmt;
 
@@ -438,17 +438,193 @@ fn kind_of(tag: u8) -> Result<Kind, Error> {
     }
 }
 
-/// Walks a single top-level value in `bytes` and returns how many bytes it
-/// consumed, or `None` if the value is truncated.
+/// Returns the byte length of the first complete MessagePack value in
+/// `bytes`, or `None` if the input is truncated or malformed.
 ///
-/// The reader thread calls this against its scratch buffer to know when it
-/// has a complete RPC frame in hand.
+/// Used by the reader thread to tell when its scratch buffer holds a
+/// full RPC frame.
 pub fn frame_len(bytes: &[u8]) -> Option<usize> {
-    let mut r = Reader::new(bytes);
-    match r.skip() {
-        Ok(()) => Some(r.position()),
-        Err(Error::UnexpectedEof) => None,
-        Err(_) => None,
+    let mut pos = 0;
+    if skip_value(bytes, &mut pos) {
+        Some(pos)
+    } else {
+        None
+    }
+}
+
+#[inline(always)]
+fn skip_n(bytes: &[u8], pos: &mut usize, n: usize) -> bool {
+    let Some(end) = pos.checked_add(n) else {
+        return false;
+    };
+    if end > bytes.len() {
+        return false;
+    }
+    *pos = end;
+    true
+}
+
+#[inline(always)]
+fn read_u8_at(bytes: &[u8], pos: &mut usize) -> Option<u8> {
+    let b = *bytes.get(*pos)?;
+    *pos += 1;
+    Some(b)
+}
+
+#[inline(always)]
+fn read_be_u16_at(bytes: &[u8], pos: &mut usize) -> Option<u16> {
+    let end = pos.checked_add(2)?;
+    if end > bytes.len() {
+        return None;
+    }
+    let v = u16::from_be_bytes([bytes[*pos], bytes[*pos + 1]]);
+    *pos = end;
+    Some(v)
+}
+
+#[inline(always)]
+fn read_be_u32_at(bytes: &[u8], pos: &mut usize) -> Option<u32> {
+    let end = pos.checked_add(4)?;
+    if end > bytes.len() {
+        return None;
+    }
+    let v = u32::from_be_bytes([
+        bytes[*pos],
+        bytes[*pos + 1],
+        bytes[*pos + 2],
+        bytes[*pos + 3],
+    ]);
+    *pos = end;
+    Some(v)
+}
+
+fn skip_value(bytes: &[u8], pos: &mut usize) -> bool {
+    let Some(tag) = read_u8_at(bytes, pos) else {
+        return false;
+    };
+    match tag {
+        // positive fixint, negative fixint, nil, false, true
+        0x00..=0x7f | 0xe0..=0xff | 0xc0 | 0xc2 | 0xc3 => true,
+        // fixmap: N key-value pairs (2N values).
+        0x80..=0x8f => {
+            let n = (tag & 0x0f) as usize;
+            for _ in 0..n * 2 {
+                if !skip_value(bytes, pos) {
+                    return false;
+                }
+            }
+            true
+        }
+        // fixarray: N values.
+        0x90..=0x9f => {
+            let n = (tag & 0x0f) as usize;
+            for _ in 0..n {
+                if !skip_value(bytes, pos) {
+                    return false;
+                }
+            }
+            true
+        }
+        // fixstr.
+        0xa0..=0xbf => skip_n(bytes, pos, (tag & 0x1f) as usize),
+        // bin 8, str 8.
+        0xc4 | 0xd9 => match read_u8_at(bytes, pos) {
+            Some(n) => skip_n(bytes, pos, n as usize),
+            None => false,
+        },
+        // bin 16, str 16.
+        0xc5 | 0xda => match read_be_u16_at(bytes, pos) {
+            Some(n) => skip_n(bytes, pos, n as usize),
+            None => false,
+        },
+        // bin 32, str 32.
+        0xc6 | 0xdb => match read_be_u32_at(bytes, pos) {
+            Some(n) => skip_n(bytes, pos, n as usize),
+            None => false,
+        },
+        // ext 8: size u8 + type u8 + data.
+        0xc7 => match read_u8_at(bytes, pos) {
+            Some(n) => skip_n(bytes, pos, 1 + n as usize),
+            None => false,
+        },
+        // ext 16.
+        0xc8 => match read_be_u16_at(bytes, pos) {
+            Some(n) => skip_n(bytes, pos, 1 + n as usize),
+            None => false,
+        },
+        // ext 32.
+        0xc9 => match read_be_u32_at(bytes, pos) {
+            Some(n) => skip_n(bytes, pos, 1 + n as usize),
+            None => false,
+        },
+        // float 32.
+        0xca => skip_n(bytes, pos, 4),
+        // float 64.
+        0xcb => skip_n(bytes, pos, 8),
+        // uint 8, int 8.
+        0xcc | 0xd0 => skip_n(bytes, pos, 1),
+        // uint 16, int 16.
+        0xcd | 0xd1 => skip_n(bytes, pos, 2),
+        // uint 32, int 32.
+        0xce | 0xd2 => skip_n(bytes, pos, 4),
+        // uint 64, int 64.
+        0xcf | 0xd3 => skip_n(bytes, pos, 8),
+        // fixext 1..16: type u8 + N data bytes.
+        0xd4 => skip_n(bytes, pos, 2),
+        0xd5 => skip_n(bytes, pos, 3),
+        0xd6 => skip_n(bytes, pos, 5),
+        0xd7 => skip_n(bytes, pos, 9),
+        0xd8 => skip_n(bytes, pos, 17),
+        // array 16.
+        0xdc => {
+            let Some(n) = read_be_u16_at(bytes, pos) else {
+                return false;
+            };
+            for _ in 0..n {
+                if !skip_value(bytes, pos) {
+                    return false;
+                }
+            }
+            true
+        }
+        // array 32.
+        0xdd => {
+            let Some(n) = read_be_u32_at(bytes, pos) else {
+                return false;
+            };
+            for _ in 0..n {
+                if !skip_value(bytes, pos) {
+                    return false;
+                }
+            }
+            true
+        }
+        // map 16.
+        0xde => {
+            let Some(n) = read_be_u16_at(bytes, pos) else {
+                return false;
+            };
+            for _ in 0..(n as usize) * 2 {
+                if !skip_value(bytes, pos) {
+                    return false;
+                }
+            }
+            true
+        }
+        // map 32.
+        0xdf => {
+            let Some(n) = read_be_u32_at(bytes, pos) else {
+                return false;
+            };
+            for _ in 0..(n as usize) * 2 {
+                if !skip_value(bytes, pos) {
+                    return false;
+                }
+            }
+            true
+        }
+        // 0xc1 is reserved; any other tag is malformed.
+        0xc1 => false,
     }
 }
 
