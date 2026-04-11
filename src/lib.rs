@@ -79,8 +79,13 @@ use unicode_width::UnicodeWidthStr;
 use crate::{
     display_rect::RenderProperty,
     event::KeyboardEnhancementFlags,
-    vt::{BufferWrite, Modifier, MoveCursor, MoveCursorRight, ScrollBufferDown, ScrollBufferUp},
+    vt::{
+        BufferWrite, Modifier, MoveCursor, MoveCursorRight, ScrollBufferDown, ScrollBufferUp,
+        SetCursorStyle,
+    },
 };
+
+pub use crate::vt::CursorShape;
 
 pub mod event;
 mod sys;
@@ -2286,6 +2291,31 @@ impl Drop for Terminal {
     }
 }
 
+/// Returns `true` if the environment advertises 24-bit RGB (truecolor)
+/// support via the `COLORTERM` variable.
+///
+/// Checks for the conventional values `truecolor` and `24bit`, which are
+/// set by terminals that handle the `\x1b[38;2;R;G;Bm` SGR sequence. This
+/// is the same heuristic used by most terminal libraries and is reliable
+/// in practice across modern terminal emulators, multiplexers, and SSH
+/// sessions that forward the variable.
+///
+/// This check performs no terminal I/O. Pair it with
+/// [`DoubleBuffer::set_rgb_supported`] during setup:
+///
+/// ```no_run
+/// use extui::{DoubleBuffer, rgb_supported_from_env};
+///
+/// let mut buf = DoubleBuffer::new(80, 24);
+/// buf.set_rgb_supported(rgb_supported_from_env());
+/// ```
+pub fn rgb_supported_from_env() -> bool {
+    let Ok(value) = std::env::var("COLORTERM") else {
+        return false;
+    };
+    value.eq_ignore_ascii_case("truecolor") || value.eq_ignore_ascii_case("24bit")
+}
+
 /// Double-buffered terminal output with differential rendering.
 ///
 /// Maintains two buffers to compute minimal updates between frames,
@@ -2317,6 +2347,38 @@ pub struct DoubleBuffer {
     pub y_offset: u16,
     epoch: u64,
     palette: Vec<Vec<u8>>,
+    cursor: CursorOutput,
+}
+
+#[derive(Clone, Copy)]
+struct CursorRequest {
+    x: u16,
+    y: u16,
+    shape: CursorShape,
+}
+
+#[derive(Clone, Copy, Default)]
+enum CursorMode {
+    /// The cursor API has not been touched — `render_internal` emits no
+    /// cursor bytes, preserving behaviour for callers that never opted in.
+    #[default]
+    Untouched,
+    Visible(CursorRequest),
+    Hidden,
+}
+
+#[derive(Default)]
+struct CursorOutput {
+    mode: CursorMode,
+    last_emitted_visible: Option<bool>,
+    last_emitted_shape: Option<CursorShape>,
+}
+
+impl CursorOutput {
+    fn invalidate(&mut self) {
+        self.last_emitted_visible = None;
+        self.last_emitted_shape = None;
+    }
 }
 
 impl DoubleBuffer {
@@ -2402,7 +2464,39 @@ impl DoubleBuffer {
             epoch: 0,
             y_offset: 0,
             palette: Vec::new(),
+            cursor: CursorOutput::default(),
         }
+    }
+
+    /// Requests that a visible terminal cursor be drawn at `(x, y)` with
+    /// `shape` the next time the buffer is rendered.
+    ///
+    /// The request is sticky: once set, the cursor stays at this position
+    /// and shape across renders until [`set_cursor`](Self::set_cursor) or
+    /// [`hide_cursor`](Self::hide_cursor) is called again. The position is
+    /// always re-emitted on every render because the cell diff moves the
+    /// real terminal cursor around as it paints; shape changes are diffed
+    /// so DECSCUSR is only emitted when the shape differs from the last
+    /// rendered frame.
+    ///
+    /// Calling this for the first time takes over cursor management from
+    /// [`TerminalFlags::HIDE_CURSOR`]: the initial hide-cursor escape
+    /// emitted at terminal open time is overridden by the show-cursor
+    /// escape written on the first render after `set_cursor`.
+    pub fn set_cursor(&mut self, x: u16, y: u16, shape: CursorShape) {
+        self.cursor.mode = CursorMode::Visible(CursorRequest { x, y, shape });
+    }
+
+    /// Requests that the terminal cursor be hidden from the next render
+    /// onward. Sticky; remains hidden until
+    /// [`set_cursor`](Self::set_cursor) is called again.
+    ///
+    /// Has no effect if the cursor API has never been used and the
+    /// terminal is already hidden via [`TerminalFlags::HIDE_CURSOR`] —
+    /// the hide escape is only emitted when the last rendered visibility
+    /// state disagrees with the request.
+    pub fn hide_cursor(&mut self) {
+        self.cursor.mode = CursorMode::Hidden;
     }
 
     /// Returns `true` if the output terminal is assumed to accept 24-bit
@@ -2441,6 +2535,7 @@ impl DoubleBuffer {
         self.previous.side.clear();
         self.diffable = false;
         self.epoch = self.epoch.wrapping_add(1);
+        self.cursor.invalidate();
     }
     /// Resizes the buffer if dimensions have changed.
     pub fn resize(&mut self, width: u16, height: u16) {
@@ -2452,6 +2547,7 @@ impl DoubleBuffer {
             self.previous.quantize_rgb = quantize;
             self.diffable = false;
             self.epoch = self.epoch.wrapping_add(1);
+            self.cursor.invalidate();
         }
     }
     /// Returns the size of the last rendered output in bytes.
@@ -2504,6 +2600,30 @@ impl DoubleBuffer {
         std::mem::swap(&mut self.current, &mut self.previous);
         self.current.cells.fill(Cell::EMPTY);
         self.current.side.clear();
+        self.emit_cursor();
+    }
+
+    fn emit_cursor(&mut self) {
+        match self.cursor.mode {
+            CursorMode::Untouched => {}
+            CursorMode::Visible(req) => {
+                if self.cursor.last_emitted_shape != Some(req.shape) {
+                    SetCursorStyle(req.shape).write_to_buffer(&mut self.buf);
+                    self.cursor.last_emitted_shape = Some(req.shape);
+                }
+                MoveCursor(req.x, req.y).write_to_buffer(&mut self.buf);
+                if self.cursor.last_emitted_visible != Some(true) {
+                    self.buf.extend_from_slice(vt::SHOW_CURSOR);
+                    self.cursor.last_emitted_visible = Some(true);
+                }
+            }
+            CursorMode::Hidden => {
+                if self.cursor.last_emitted_visible != Some(false) {
+                    self.buf.extend_from_slice(vt::HIDE_CURSOR);
+                    self.cursor.last_emitted_visible = Some(false);
+                }
+            }
+        }
     }
     /// Renders and writes the output to the terminal.
     pub fn render(&mut self, term: &mut Terminal) {
@@ -2728,6 +2848,84 @@ mod test {
     fn cell_size_is_16_bytes() {
         assert_eq!(std::mem::size_of::<Cell>(), 16);
         assert_eq!(std::mem::align_of::<Cell>(), 16);
+    }
+
+    #[test]
+    fn cursor_untouched_emits_no_cursor_bytes() {
+        let mut db = DoubleBuffer::new(4, 1);
+        db.set_string(0, 0, "hi", Style::DEFAULT);
+        db.render_internal();
+        let out = std::str::from_utf8(&db.buf).unwrap();
+        assert!(!out.contains("\x1b[?25"), "unexpected show/hide: {out:?}");
+        assert!(!out.contains(" q"), "unexpected DECSCUSR: {out:?}");
+    }
+
+    #[test]
+    fn cursor_set_emits_shape_move_show_then_diffs() {
+        let mut db = DoubleBuffer::new(8, 2);
+        db.set_string(0, 0, "hi", Style::DEFAULT);
+        db.set_cursor(3, 1, CursorShape::SteadyBar);
+        db.render_internal();
+        let first = std::str::from_utf8(&db.buf).unwrap().to_owned();
+        assert!(first.contains("\x1b[6 q"), "expected DECSCUSR bar: {first:?}");
+        assert!(first.contains("\x1b[2;4H"), "expected MoveCursor: {first:?}");
+        assert!(first.contains("\x1b[?25h"), "expected show: {first:?}");
+
+        db.buf.clear();
+        db.set_string(0, 0, "hi", Style::DEFAULT);
+        db.set_cursor(3, 1, CursorShape::SteadyBar);
+        db.render_internal();
+        let second = std::str::from_utf8(&db.buf).unwrap().to_owned();
+        assert!(second.contains("\x1b[2;4H"), "expected MoveCursor on frame 2: {second:?}");
+        assert!(!second.contains(" q"), "DECSCUSR should not re-emit: {second:?}");
+        assert!(!second.contains("\x1b[?25h"), "show should not re-emit: {second:?}");
+    }
+
+    #[test]
+    fn cursor_shape_change_re_emits_decscusr() {
+        let mut db = DoubleBuffer::new(4, 1);
+        db.set_cursor(0, 0, CursorShape::SteadyBlock);
+        db.render_internal();
+        db.buf.clear();
+
+        db.set_cursor(0, 0, CursorShape::SteadyBar);
+        db.render_internal();
+        let out = std::str::from_utf8(&db.buf).unwrap();
+        assert!(out.contains("\x1b[6 q"), "expected new DECSCUSR: {out:?}");
+    }
+
+    #[test]
+    fn cursor_hide_after_show_emits_hide_once() {
+        let mut db = DoubleBuffer::new(4, 1);
+        db.set_cursor(0, 0, CursorShape::SteadyBlock);
+        db.render_internal();
+        db.buf.clear();
+
+        db.hide_cursor();
+        db.render_internal();
+        let first = std::str::from_utf8(&db.buf).unwrap().to_owned();
+        assert!(first.contains("\x1b[?25l"), "expected hide: {first:?}");
+        db.buf.clear();
+
+        db.hide_cursor();
+        db.render_internal();
+        let second = std::str::from_utf8(&db.buf).unwrap().to_owned();
+        assert!(!second.contains("\x1b[?25l"), "hide should not re-emit: {second:?}");
+    }
+
+    #[test]
+    fn cursor_reset_re_emits_next_frame() {
+        let mut db = DoubleBuffer::new(4, 1);
+        db.set_cursor(0, 0, CursorShape::SteadyBlock);
+        db.render_internal();
+        db.buf.clear();
+
+        db.reset();
+        db.set_cursor(0, 0, CursorShape::SteadyBlock);
+        db.render_internal();
+        let out = std::str::from_utf8(&db.buf).unwrap();
+        assert!(out.contains("\x1b[2 q"), "expected DECSCUSR after reset: {out:?}");
+        assert!(out.contains("\x1b[?25h"), "expected show after reset: {out:?}");
     }
 
     #[test]

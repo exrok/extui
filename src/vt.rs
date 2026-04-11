@@ -30,6 +30,7 @@
 //! - [`SAVE_CURSOR`] / [`RESTORE_CURSOR`] - Save/restore cursor position (DEC)
 //! - [`SAVE_CURSOR_ANSI`] / [`RESTORE_CURSOR_ANSI`] - Save/restore cursor position (ANSI)
 //! - [`HIDE_CURSOR`] / [`SHOW_CURSOR`] - Cursor visibility
+//! - [`SetCursorStyle`] / [`CursorShape`] - Cursor shape (DECSCUSR)
 //!
 //! # Screen Control
 //!
@@ -406,6 +407,45 @@ pub const CLEAR_LINE: &[u8] = b"\x1b[2K";
 pub const CLEAR_LINE_TO_RIGHT: &[u8] = b"\x1b[K";
 /// Clears from cursor to beginning of line. VT sequence `ESC[1K`.
 pub const CLEAR_LINE_TO_LEFT: &[u8] = b"\x1b[1K";
+
+/// Cursor shape advertised by DECSCUSR.
+///
+/// Each variant maps 1:1 to the numeric argument of `ESC[<n> q`, so encoding
+/// a shape into a byte stream is just a single-digit lookup. Use
+/// [`SetCursorStyle`] to emit the escape directly, or pass a shape through
+/// [`DoubleBuffer::set_cursor`] to have it managed alongside the cell diff.
+///
+/// [`DoubleBuffer::set_cursor`]: crate::DoubleBuffer::set_cursor
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum CursorShape {
+    /// Terminal default. `ESC[0 q`.
+    #[default]
+    Default = 0,
+    /// Blinking block. `ESC[1 q`.
+    BlinkingBlock = 1,
+    /// Steady block. `ESC[2 q`.
+    SteadyBlock = 2,
+    /// Blinking underline. `ESC[3 q`.
+    BlinkingUnderline = 3,
+    /// Steady underline. `ESC[4 q`.
+    SteadyUnderline = 4,
+    /// Blinking bar. `ESC[5 q`.
+    BlinkingBar = 5,
+    /// Steady bar. `ESC[6 q`.
+    SteadyBar = 6,
+}
+
+/// Sets the terminal cursor shape (DECSCUSR). VT sequence `ESC[<n> q`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SetCursorStyle(pub CursorShape);
+
+impl BufferWrite for SetCursorStyle {
+    fn write_to_buffer(&self, buffer: &mut Vec<u8>) {
+        let n = self.0 as u8;
+        buffer.extend_from_slice(&[0x1b, b'[', b'0' + n, b' ', b'q']);
+    }
+}
 
 /// Saves the current cursor position (DEC private). VT sequence `ESC7`.
 pub const SAVE_CURSOR: &[u8] = b"\x1b7";

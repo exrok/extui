@@ -33,7 +33,7 @@ pub mod input;
 pub mod msgpack;
 pub mod reader;
 
-pub use grid::CursorShape;
+pub use extui::CursorShape;
 
 use crate::grid::GridState;
 use crate::msgpack::{self as mp, Writer};
@@ -220,15 +220,31 @@ impl NeovimEmbed {
         guard.take_dirty()
     }
 
-    /// Paints the embedded grid into `rect` of `buf`.
+    /// Paints the embedded grid into `rect` of `buf` and drives the
+    /// terminal cursor to match Neovim's state.
     ///
     /// Cells are clipped to `rect`'s dimensions if the embedded grid is
-    /// larger, and the remaining area is left untouched if smaller.
+    /// larger, and the remaining area is left untouched if smaller. The
+    /// call also forwards Neovim's cursor position, shape, and busy
+    /// state into [`DoubleBuffer::set_cursor`] / [`DoubleBuffer::hide_cursor`],
+    /// so the host does not need to emit cursor escapes by hand.
     pub fn render(&self, rect: Rect, buf: &mut DoubleBuffer) {
         let Ok(guard) = self.state.lock() else {
             return;
         };
         guard.render(rect, buf);
+
+        if guard.is_busy() {
+            buf.hide_cursor();
+            return;
+        }
+        let row = guard.cursor_row();
+        let col = guard.cursor_col();
+        if row >= rect.h || col >= rect.w {
+            buf.hide_cursor();
+            return;
+        }
+        buf.set_cursor(rect.x + col, rect.y + row, guard.cursor_shape());
     }
 
     /// Returns the cursor position translated into `buf` coordinates, or

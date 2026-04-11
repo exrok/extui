@@ -1,14 +1,17 @@
 //! Internal grid state mirroring Neovim's `ext_linegrid` protocol.
 //!
-//! The reader thread decodes each `redraw` notification and forwards
-//! it to [`GridState`]. The grid owns an [`extui::Buffer`] directly,
-//! so [`GridState::render`] paints into an [`extui::DoubleBuffer`] by
-//! copying cells in place rather than re-segmenting text on every
-//! frame. Highlight attributes are resolved once at definition time
-//! and stored as ready-to-use [`extui::Style`] values.
+//! The reader thread decodes each `redraw` notification and calls the
+//! corresponding `apply_*` method on [`GridState`]. The grid owns an
+//! [`extui::Buffer`] directly, so rendering is a raw cell-blit into the
+//! target [`extui::DoubleBuffer`] with no UTF-8 re-segmentation or
+//! highlight re-resolution per frame.
+//!
+//! Highlight attributes are flattened into pre-resolved [`extui::Style`]
+//! values at `hl_attr_define` time (one per id, cterm and rgb flavour),
+//! so the render loop never touches the raw attr map.
 
 use extui::vt::Modifier;
-use extui::{AnsiColor, Buffer, Color, DoubleBuffer, Rect, Rgb, Style};
+use extui::{AnsiColor, Buffer, Color, CursorShape, DoubleBuffer, Rect, Rgb, Style};
 
 use crate::msgpack::{Error as MsgpackError, Kind, Reader};
 
@@ -27,23 +30,6 @@ impl From<MsgpackError> for Error {
     }
 }
 
-/// Cursor shape for a given Neovim editor mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CursorShape {
-    /// Solid block (`block`).
-    Block,
-    /// Vertical bar (`vertical`).
-    Bar,
-    /// Underline (`horizontal`).
-    Underline,
-}
-
-impl Default for CursorShape {
-    fn default() -> Self {
-        CursorShape::Block
-    }
-}
-
 #[derive(Clone, Copy)]
 struct ModeInfo {
     shape: CursorShape,
@@ -52,16 +38,16 @@ struct ModeInfo {
 impl Default for ModeInfo {
     fn default() -> Self {
         ModeInfo {
-            shape: CursorShape::Block,
+            shape: CursorShape::SteadyBlock,
         }
     }
 }
 
-/// Resolved rgb and cterm flavours of a single highlight attribute.
+/// Both flavours of a resolved highlight attribute.
 ///
-/// One entry is stored per `hl_attr_define` id so the render path can
-/// pick the active [`Style`] in O(1) based on the current
-/// `termguicolors` setting.
+/// Stored once per `hl_attr_define` id so the render path can pick the
+/// right [`Style`] in O(1) based on the current `termguicolors` setting
+/// without touching the raw attr map.
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct HlEntry {
     rgb: Style,
@@ -92,7 +78,7 @@ pub struct GridState {
 }
 
 impl GridState {
-    /// Creates an empty grid of `width` columns by `height` rows.
+    /// Creates a new grid of the given dimensions filled with blank cells.
     pub fn new(width: u16, height: u16) -> Self {
         GridState {
             grid: Buffer::new(width, height),
@@ -217,16 +203,10 @@ impl GridState {
         self.hl_attrs[id] = entry;
     }
 
-    /// Applies a batch of `redraw` events decoded from `r`.
+    /// Dispatches a top-level `redraw` event batch from a [`Reader`].
     ///
-    /// The reader must be positioned at the outer array of events,
-    /// where each element takes the shape `[name, params_1, ...]`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::Msgpack`] if the payload is truncated or
-    /// malformed, or [`Error::OutOfBounds`] if an event references a
-    /// coordinate outside the grid.
+    /// Expects the reader to be positioned at the outer array of events
+    /// (each element is `[name, params_1, params_2, ...]`).
     pub fn apply_redraw(&mut self, r: &mut Reader<'_>) -> Result<(), Error> {
         let event_count = r.read_array_len()?;
         for _ in 0..event_count {
@@ -244,14 +224,17 @@ impl GridState {
         Ok(())
     }
 
-    /// Calls [`extui::Buffer::compact_side`] when the grid's handle
-    /// storage has grown past a size proportional to the grid area.
+    /// Rebuilds the grid's side arena if it has grown past a threshold
+    /// derived from the grid size.
     ///
-    /// Neovim rewrites the grid on every frame. Sessions that touch
-    /// long graphemes such as flag emoji, ZWJ sequences, or combining
-    /// marks accumulate unreferenced handle bytes over time. Running
-    /// this check after each redraw keeps the storage bounded without
-    /// triggering work in sessions made up of ordinary ASCII text.
+    /// Neovim churns the grid on every frame — each overwrite of a
+    /// handle cell leaves its bytes stranded in the side arena, since
+    /// `set_stringn` is append-only. Without periodic compaction, the
+    /// arena grows unboundedly in any session that touches wide
+    /// graphemes (flag emojis, ZWJ sequences, zalgo). The threshold is
+    /// scaled by grid area so larger grids get proportionally more
+    /// headroom; for an 80×24 grid it fires once the arena exceeds
+    /// ~64 KiB of garbage.
     fn maybe_compact_side(&mut self) {
         let area = self.grid.width() as usize * self.grid.height() as usize;
         let threshold = (area * 32).max(16 * 1024);
@@ -543,10 +526,12 @@ impl GridState {
         Ok(())
     }
 
-    /// Paints the grid into `rect` on `buf`.
+    /// Blits the grid into `rect` of `buf`, clipping to `rect`'s dimensions.
     ///
-    /// The grid is clipped to fit `rect` if its dimensions differ. The
-    /// area of `buf` outside the grid's footprint is left untouched.
+    /// Inline cells (≤ 7 UTF-8 bytes — 99.9% of real-world text) copy
+    /// as raw 16-byte structs with no UTF-8 work. Handle cells are
+    /// resolved against the grid's own side arena and re-interned into
+    /// the target buffer via `set_stringn`.
     pub fn render(&self, rect: Rect, buf: &mut DoubleBuffer) {
         let grid_w = self.grid.width();
         let grid_h = self.grid.height();
@@ -567,8 +552,7 @@ impl GridState {
                     // Handle cells only exist for graphemes that passed
                     // UTF-8 validation via `set_stringn`, so this is
                     // guaranteed valid.
-                    let text =
-                        unsafe { std::str::from_utf8_unchecked(bytes) };
+                    let text = unsafe { std::str::from_utf8_unchecked(bytes) };
                     buf.set_stringn(target_x, target_y, text, 1, cell.style());
                 }
             }
@@ -640,10 +624,10 @@ fn read_attr_map(r: &mut Reader<'_>) -> Result<AttrMap, Error> {
 
 /// Reads an `hl_attr_define` rgb-attr dict, preserving 24-bit colors.
 ///
-/// Modifier bits are collected in the same way as [`read_attr_map`]
-/// and the caller picks whichever source it prefers based on the
-/// current `termguicolors` setting. The host terminal's truecolor
-/// support is handled by [`DoubleBuffer`] during emission.
+/// Modifier bits are collected identically to [`read_attr_map`]; the
+/// caller picks whichever source it prefers based on `termguicolors`.
+/// If the host terminal does not support truecolor, the base
+/// [`DoubleBuffer`] quantizes on emission.
 fn read_rgb_attr_map(r: &mut Reader<'_>) -> Result<AttrMap, Error> {
     let n = r.read_map_len()?;
     let mut out = AttrMap {
@@ -708,8 +692,9 @@ fn read_rgb_color(r: &mut Reader<'_>) -> Result<Option<Color>, Error> {
 
 /// Unpacks a 24-bit RGB value as received on the Neovim RPC wire.
 ///
-/// Values outside `0..=0xffffff` mean "no color". ANSI fallback is
-/// handled by [`DoubleBuffer`] on terminals that lack truecolor.
+/// Any value outside `0..=0xffffff` means "no color"; the base
+/// [`DoubleBuffer`] handles any ANSI fallback when the host terminal
+/// does not support truecolor.
 fn rgb_color_from_wire(v: i64) -> Option<Color> {
     if !(0..=0xff_ff_ff).contains(&v) {
         return None;
@@ -768,10 +753,10 @@ fn read_mode_info(r: &mut Reader<'_>) -> Result<ModeInfo, Error> {
             "cursor_shape" => {
                 let shape = r.read_str()?;
                 info.shape = match shape {
-                    "block" => CursorShape::Block,
-                    "horizontal" => CursorShape::Underline,
-                    "vertical" => CursorShape::Bar,
-                    _ => CursorShape::Block,
+                    "block" => CursorShape::SteadyBlock,
+                    "horizontal" => CursorShape::SteadyUnderline,
+                    "vertical" => CursorShape::SteadyBar,
+                    _ => CursorShape::SteadyBlock,
                 };
             }
             _ => r.skip()?,
@@ -1124,7 +1109,7 @@ mod tests {
         g.apply_redraw(&mut r).unwrap();
         assert_eq!(g.cursor_row, 3);
         assert_eq!(g.cursor_col, 7);
-        assert_eq!(g.cursor_shape(), CursorShape::Bar);
+        assert_eq!(g.cursor_shape(), CursorShape::SteadyBar);
         assert!(g.take_dirty());
         assert!(!g.take_dirty());
     }
