@@ -10,8 +10,7 @@ use std::io::Read;
 use std::process::ChildStdout;
 use std::sync::{Arc, Mutex};
 
-use extui::event::polling::Waker;
-
+use crate::NeovimWaker;
 use crate::grid::GridState;
 use crate::msgpack::{self, Reader};
 
@@ -22,19 +21,19 @@ use crate::msgpack::{self, Reader};
 /// not return until the child stream reaches EOF. On any terminal
 /// condition the shared state is marked as dead and the waker is
 /// pulsed so the host main loop observes the change on its next poll.
-pub fn run(mut stdout: ChildStdout, state: Arc<Mutex<GridState>>, waker: &'static Waker) {
+pub fn run(mut stdout: ChildStdout, state: Arc<Mutex<GridState>>, waker: NeovimWaker) {
     let mut scratch: Vec<u8> = Vec::with_capacity(64 * 1024);
     let mut tmp = [0u8; 8192];
     loop {
         let n = match stdout.read(&mut tmp) {
             Ok(0) => {
-                set_dead(&state, waker);
+                set_dead(&state, &waker);
                 return;
             }
             Ok(n) => n,
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(_) => {
-                set_dead(&state, waker);
+                set_dead(&state, &waker);
                 return;
             }
         };
@@ -51,7 +50,7 @@ pub fn run(mut stdout: ChildStdout, state: Arc<Mutex<GridState>>, waker: &'stati
                 Ok(true) => made_visible = true,
                 Ok(false) => {}
                 Err(()) => {
-                    set_dead(&state, waker);
+                    set_dead(&state, &waker);
                     return;
                 }
             }
@@ -61,16 +60,16 @@ pub fn run(mut stdout: ChildStdout, state: Arc<Mutex<GridState>>, waker: &'stati
             scratch.drain(..consumed);
         }
         if made_visible {
-            let _ = waker.wake();
+            waker.wake();
         }
     }
 }
 
-fn set_dead(state: &Arc<Mutex<GridState>>, waker: &'static Waker) {
+fn set_dead(state: &Arc<Mutex<GridState>>, waker: &NeovimWaker) {
     if let Ok(mut guard) = state.lock() {
         guard.mark_dead();
     }
-    let _ = waker.wake();
+    waker.wake();
 }
 
 fn apply_frame(bytes: &[u8], state: &Arc<Mutex<GridState>>) -> Result<bool, ()> {

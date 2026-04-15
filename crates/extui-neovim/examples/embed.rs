@@ -8,7 +8,7 @@ use std::process::Command;
 use extui::event::polling::GlobalWakerConfig;
 use extui::event::{self, Event, Events, KeyCode, KeyModifiers};
 use extui::{DoubleBuffer, Rect, Terminal, TerminalFlags};
-use extui_neovim::NeovimEmbed;
+use extui_neovim::{NeovimEmbed, NeovimWaker};
 
 fn main() -> std::io::Result<()> {
     extui::event::polling::initialize_global_waker(GlobalWakerConfig {
@@ -31,7 +31,7 @@ fn main() -> std::io::Result<()> {
     for arg in std::env::args().skip(1) {
         cmd.arg(arg);
     }
-    let mut nvim = NeovimEmbed::spawn_with(cmd, w, h)?;
+    let mut nvim = NeovimEmbed::spawn_with(cmd, w, h, NeovimWaker::default())?;
     if extui::rgb_supported_from_env() {
         nvim.set_termguicolors(true)?;
     }

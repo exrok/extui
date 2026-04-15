@@ -28,7 +28,7 @@ use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor, Rgb};
 use extui::event::polling::{GlobalWakerConfig, initialize_global_waker};
 use extui::vt::{BufferWrite, HIDE_CURSOR, MoveCursor, SHOW_CURSOR};
 use extui::{DoubleBuffer, Rect, vt};
-use extui_neovim::NeovimEmbed;
+use extui_neovim::{NeovimEmbed, NeovimWaker};
 
 const DEFAULT_COLS: u16 = 80;
 const DEFAULT_ROWS: u16 = 24;
@@ -431,7 +431,7 @@ fn run_embed(cli: &Cli) -> io::Result<Capture> {
         cmd.arg(arg);
     }
 
-    let mut nvim = NeovimEmbed::spawn_with(cmd, cli.cols, cli.rows)?;
+    let mut nvim = NeovimEmbed::spawn_with(cmd, cli.cols, cli.rows, NeovimWaker::default())?;
     if colorterm_implies_rgb(cli.colorterm.as_deref()) {
         nvim.set_termguicolors(true)?;
     }

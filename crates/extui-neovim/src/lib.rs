@@ -7,16 +7,19 @@
 //! Neovim with [`NeovimEmbed::send_key`] and [`NeovimEmbed::send_mouse`].
 //!
 //! The crate does **not** depend on an async runtime. A single background
-//! thread reads Neovim's stdout, parses MessagePack-RPC frames, and wakes
-//! `extui`'s global waker each time a `flush` event is observed.
+//! thread reads Neovim's stdout, parses MessagePack-RPC frames, and
+//! notifies the host each time a `flush` event is observed.
 //!
-//! # Requirements
+//! # Waking
 //!
-//! Before calling [`NeovimEmbed::spawn`], the host must have initialised
-//! `extui`'s global waker (for example via
-//! [`extui::event::polling::initialize_global_waker`] or
-//! [`extui::event::polling::resize_waker`]). Otherwise the reader thread
-//! has no way to interrupt the main `event::poll` loop.
+//! The [`NeovimWaker`] enum controls how the background reader thread
+//! signals the host. The default ([`NeovimWaker::Global`]) wakes extui's
+//! global waker and requires
+//! [`extui::event::polling::initialize_global_waker`] to have been called
+//! first. [`NeovimWaker::custom`] accepts an arbitrary closure, making it
+//! possible to drive the embed from tokio, a channel, or any other
+//! notification mechanism without depending on extui's polling
+//! infrastructure.
 //!
 //! Embedded UIs are attached as pure RPC clients, not as terminal UIs.
 //! That means Neovim's builtin TUI startup probes for things like
@@ -47,7 +50,7 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
-use extui::event::polling::{self, Waker};
+use extui::event::polling;
 use extui::event::{KeyEvent, MouseEvent};
 use extui::{DoubleBuffer, Rect};
 
@@ -64,6 +67,56 @@ use crate::msgpack::{self as mp, Writer};
 
 const UI_ATTACH_MSGID: u32 = 0;
 
+/// Controls how the background reader thread notifies the host that new
+/// content is available.
+///
+/// The default variant ([`Global`](NeovimWaker::Global)) wakes the extui
+/// global waker and is the right choice for any host that already uses
+/// [`extui::event::poll`]. For hosts that drive their own event loop —
+/// for example through tokio or a bare `libc::poll` set — use
+/// [`NeovimWaker::custom`] to supply an arbitrary notification callback.
+#[derive(Default, Clone)]
+pub enum NeovimWaker {
+    /// Wake the extui global waker.
+    ///
+    /// Requires [`extui::event::polling::initialize_global_waker`] (or
+    /// [`extui::event::polling::resize_waker`]) to have been called
+    /// before [`NeovimEmbed::spawn_with`].
+    #[default]
+    Global,
+    /// Call a user-supplied closure.
+    Custom(Arc<dyn Fn() + Send + Sync>),
+}
+
+impl NeovimWaker {
+    /// Creates a [`Custom`](NeovimWaker::Custom) waker from a closure.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// use extui_neovim::NeovimWaker;
+    ///
+    /// // Wake a tokio Notify.
+    /// let notify = std::sync::Arc::new(tokio::sync::Notify::new());
+    /// let n = notify.clone();
+    /// let waker = NeovimWaker::custom(move || n.notify_one());
+    /// ```
+    pub fn custom(f: impl Fn() + Send + Sync + 'static) -> Self {
+        NeovimWaker::Custom(Arc::new(f))
+    }
+
+    fn wake(&self) {
+        match self {
+            NeovimWaker::Global => {
+                if let Some(waker) = polling::global_waker() {
+                    let _ = waker.wake();
+                }
+            }
+            NeovimWaker::Custom(f) => f(),
+        }
+    }
+}
+
 /// An embedded Neovim instance that renders into a sub-rect of an extui
 /// [`DoubleBuffer`].
 pub struct NeovimEmbed {
@@ -71,14 +124,15 @@ pub struct NeovimEmbed {
     stdin: Option<ChildStdin>,
     state: Arc<Mutex<GridState>>,
     reader_handle: Option<JoinHandle<()>>,
-    waker: &'static Waker,
+    waker: NeovimWaker,
     last_sent_size: (u16, u16),
     scratch_key: String,
     scratch_writer: Writer,
 }
 
 impl NeovimEmbed {
-    /// Spawns `nvim --embed` and attaches a UI of `(width, height)` cells.
+    /// Spawns `nvim --embed` with the [`Global`](NeovimWaker::Global) waker
+    /// and attaches a UI of `(width, height)` cells.
     ///
     /// # Errors
     ///
@@ -88,7 +142,7 @@ impl NeovimEmbed {
     pub fn spawn(width: u16, height: u16) -> io::Result<Self> {
         let mut cmd = Command::new("nvim");
         cmd.arg("--embed");
-        Self::spawn_with(cmd, width, height)
+        Self::spawn_with(cmd, width, height, NeovimWaker::default())
     }
 
     /// Spawns a caller-supplied command that is expected to behave like
@@ -98,19 +152,28 @@ impl NeovimEmbed {
     /// The command's stdin and stdout will be overridden with
     /// [`Stdio::piped`]. Its stderr is inherited.
     ///
+    /// The `waker` controls how the background reader thread notifies the
+    /// host when new content arrives. See [`NeovimWaker`] for options.
+    ///
     /// # Errors
     ///
-    /// Returns an error if the global waker is not initialised, if `cmd`
-    /// cannot be spawned, or if the initial `nvim_ui_attach` request
-    /// cannot be written to the child's stdin.
-    pub fn spawn_with(mut cmd: Command, width: u16, height: u16) -> io::Result<Self> {
-        let Some(waker) = polling::global_waker() else {
+    /// Returns an error if `waker` is [`NeovimWaker::Global`] and the
+    /// global waker is not initialised, if `cmd` cannot be spawned, or if
+    /// the initial `nvim_ui_attach` request cannot be written to the
+    /// child's stdin.
+    pub fn spawn_with(
+        mut cmd: Command,
+        width: u16,
+        height: u16,
+        waker: NeovimWaker,
+    ) -> io::Result<Self> {
+        if matches!(waker, NeovimWaker::Global) && polling::global_waker().is_none() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "extui global waker is not initialised; call \
                  extui::event::polling::initialize_global_waker first",
             ));
-        };
+        }
 
         cmd.stdin(Stdio::piped());
         cmd.stdout(Stdio::piped());
@@ -141,9 +204,10 @@ impl NeovimEmbed {
 
         let state = Arc::new(Mutex::new(GridState::new(width, height)));
         let reader_state = Arc::clone(&state);
+        let reader_waker = waker.clone();
         let reader_handle = std::thread::Builder::new()
             .name("extui-neovim-reader".into())
-            .spawn(move || reader::run(stdout, reader_state, waker))?;
+            .spawn(move || reader::run(stdout, reader_state, reader_waker))?;
 
         Ok(NeovimEmbed {
             child: Some(child),
@@ -415,7 +479,7 @@ impl Drop for NeovimEmbed {
             let _ = child.wait();
         }
         if let Some(handle) = self.reader_handle.take() {
-            let _ = self.waker.wake();
+            self.waker.wake();
             let _ = handle.join();
         }
     }
