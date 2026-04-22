@@ -44,9 +44,11 @@
 //! # Ok::<(), std::io::Error>(())
 //! ```
 
+use std::collections::{HashMap, VecDeque};
 use std::ffi::OsStr;
 use std::io::{self, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
@@ -66,6 +68,8 @@ pub use crate::grid::{MAX_DECORATIONS, UnderlineStyle};
 use crate::msgpack::{self as mp, Writer};
 
 const UI_ATTACH_MSGID: u32 = 0;
+type PendingRequests = Arc<Mutex<HashMap<u32, SyncSender<Vec<u8>>>>>;
+type Notifications = Arc<Mutex<VecDeque<String>>>;
 
 /// Controls how the background reader thread notifies the host that new
 /// content is available.
@@ -123,9 +127,12 @@ pub struct NeovimEmbed {
     child: Option<Child>,
     stdin: Option<ChildStdin>,
     state: Arc<Mutex<GridState>>,
+    pending_requests: PendingRequests,
+    notifications: Notifications,
     reader_handle: Option<JoinHandle<()>>,
     waker: NeovimWaker,
     last_sent_size: (u16, u16),
+    next_msgid: u32,
     scratch_key: String,
     scratch_writer: Writer,
 }
@@ -203,19 +210,34 @@ impl NeovimEmbed {
         stdin.flush()?;
 
         let state = Arc::new(Mutex::new(GridState::new(width, height)));
+        let pending_requests = Arc::new(Mutex::new(HashMap::new()));
+        let notifications: Notifications = Arc::new(Mutex::new(VecDeque::new()));
         let reader_state = Arc::clone(&state);
+        let reader_pending_requests = Arc::clone(&pending_requests);
+        let reader_notifications = Arc::clone(&notifications);
         let reader_waker = waker.clone();
         let reader_handle = std::thread::Builder::new()
             .name("extui-neovim-reader".into())
-            .spawn(move || reader::run(stdout, reader_state, reader_waker))?;
+            .spawn(move || {
+                reader::run(
+                    stdout,
+                    reader_state,
+                    reader_pending_requests,
+                    reader_notifications,
+                    reader_waker,
+                )
+            })?;
 
         Ok(NeovimEmbed {
             child: Some(child),
             stdin: Some(stdin),
             state,
+            pending_requests,
+            notifications,
             reader_handle: Some(reader_handle),
             waker,
             last_sent_size: (width, height),
+            next_msgid: 1,
             scratch_key: String::new(),
             scratch_writer: Writer::with_capacity(128),
         })
@@ -266,6 +288,76 @@ impl NeovimEmbed {
         self.scratch_writer.clear();
         mp::encode_input(&mut self.scratch_writer, keys);
         self.write_frame()
+    }
+
+    /// Executes an Ex command through `nvim_command`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if writing to the child's stdin fails.
+    pub fn command(&mut self, command: &str) -> io::Result<()> {
+        self.scratch_writer.clear();
+        mp::encode_command(&mut self.scratch_writer, command);
+        self.write_frame()
+    }
+
+    /// Returns the current buffer contents joined by `\n`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the RPC request fails, Neovim replies with an
+    /// error, or the response payload is malformed.
+    pub fn current_buffer_text(&mut self) -> io::Result<String> {
+        let response = self.request(|writer, msgid| {
+            mp::encode_current_buffer_get_lines_request(writer, msgid);
+        })?;
+        parse_current_buffer_text_response(&response)
+    }
+
+    /// Replaces the current buffer with a single blank line and returns to
+    /// insert mode.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if writing to the child's stdin fails.
+    pub fn clear_current_buffer(&mut self) -> io::Result<()> {
+        self.scratch_writer.clear();
+        mp::encode_current_buffer_set_lines(&mut self.scratch_writer, &[""]);
+        self.write_frame()?;
+        self.command("normal! gg0")?;
+        self.command("startinsert")
+    }
+
+    /// Replaces the current buffer's contents with `lines`.
+    ///
+    /// Sends a single `nvim_buf_set_lines(0, 0, -1, true, lines)` notification.
+    /// Unlike [`clear_current_buffer`](Self::clear_current_buffer) this does
+    /// not move the cursor or toggle insert mode — callers are expected to
+    /// follow up with [`command`](Self::command) as needed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if writing to the child's stdin fails.
+    pub fn set_current_buffer_lines(&mut self, lines: &[&str]) -> io::Result<()> {
+        self.scratch_writer.clear();
+        mp::encode_current_buffer_set_lines(&mut self.scratch_writer, lines);
+        self.write_frame()
+    }
+
+    /// Drains and returns every `rpcnotify` method name Neovim has sent
+    /// since the last call.
+    ///
+    /// The background reader thread captures any non-`"redraw"` notification
+    /// frame and queues the method name. Call this from the host main loop
+    /// alongside [`poll_updates`](Self::poll_updates) to react to
+    /// `rpcnotify(1, 'name', ...)` calls issued from Lua or Vimscript.
+    ///
+    /// The notification payload (arguments) is not currently exposed.
+    pub fn poll_notifications(&mut self) -> Vec<String> {
+        let Ok(mut queue) = self.notifications.lock() else {
+            return Vec::new();
+        };
+        queue.drain(..).collect()
     }
 
     /// Enables colored underlines, squiggles, and other Neovim
@@ -441,6 +533,104 @@ impl NeovimEmbed {
         stdin.write_all(self.scratch_writer.bytes())?;
         stdin.flush()
     }
+
+    fn request(&mut self, encode: impl FnOnce(&mut Writer, u32)) -> io::Result<Vec<u8>> {
+        let msgid = self.next_request_id();
+        let (tx, rx) = mpsc::sync_channel(1);
+        self.pending_requests
+            .lock()
+            .map_err(|_| io::Error::other("neovim request table is poisoned"))?
+            .insert(msgid, tx);
+
+        self.scratch_writer.clear();
+        encode(&mut self.scratch_writer, msgid);
+        if let Err(err) = self.write_frame() {
+            if let Ok(mut pending) = self.pending_requests.lock() {
+                pending.remove(&msgid);
+            }
+            return Err(err);
+        }
+
+        rx.recv()
+            .map_err(|_| io::Error::other("neovim request was interrupted"))
+    }
+
+    fn next_request_id(&mut self) -> u32 {
+        let msgid = self.next_msgid;
+        self.next_msgid = self.next_msgid.wrapping_add(1);
+        if self.next_msgid == UI_ATTACH_MSGID {
+            self.next_msgid = 1;
+        }
+        msgid
+    }
+}
+
+fn parse_current_buffer_text_response(bytes: &[u8]) -> io::Result<String> {
+    let mut response = parse_success_response(bytes)?;
+    match response.peek_kind().map_err(msgpack_io_error)? {
+        mp::Kind::Nil => {
+            response.read_nil().map_err(msgpack_io_error)?;
+            Ok(String::new())
+        }
+        mp::Kind::Array => {
+            let len = response.read_array_len().map_err(msgpack_io_error)?;
+            let mut out = String::new();
+            for idx in 0..len {
+                if idx > 0 {
+                    out.push('\n');
+                }
+                out.push_str(response.read_str().map_err(msgpack_io_error)?);
+            }
+            Ok(out)
+        }
+        _ => Err(io::Error::other("unexpected nvim response payload")),
+    }
+}
+
+fn parse_success_response(bytes: &[u8]) -> io::Result<mp::Reader<'_>> {
+    let mut r = mp::Reader::new(bytes);
+    let arr_len = r.read_array_len().map_err(msgpack_io_error)?;
+    if arr_len < 4 {
+        return Err(io::Error::other("invalid nvim response frame"));
+    }
+    if r.read_u64().map_err(msgpack_io_error)? != 1 {
+        return Err(io::Error::other("unexpected non-response frame"));
+    }
+    let _msgid = r.read_u64().map_err(msgpack_io_error)?;
+    match r.peek_kind().map_err(msgpack_io_error)? {
+        mp::Kind::Nil => {
+            r.read_nil().map_err(msgpack_io_error)?;
+            Ok(r)
+        }
+        _ => Err(io::Error::other(read_rpc_error_message(&mut r)?)),
+    }
+}
+
+fn read_rpc_error_message(r: &mut mp::Reader<'_>) -> io::Result<String> {
+    match r.peek_kind().map_err(msgpack_io_error)? {
+        mp::Kind::Str => Ok(r.read_str().map_err(msgpack_io_error)?.to_owned()),
+        mp::Kind::Array => {
+            let len = r.read_array_len().map_err(msgpack_io_error)?;
+            let mut message = None;
+            for _ in 0..len {
+                match r.peek_kind().map_err(msgpack_io_error)? {
+                    mp::Kind::Str => {
+                        message = Some(r.read_str().map_err(msgpack_io_error)?.to_owned())
+                    }
+                    _ => r.skip().map_err(msgpack_io_error)?,
+                }
+            }
+            Ok(message.unwrap_or_else(|| "neovim rpc error".to_string()))
+        }
+        _ => {
+            r.skip().map_err(msgpack_io_error)?;
+            Ok("neovim rpc error".to_string())
+        }
+    }
+}
+
+fn msgpack_io_error(err: mp::Error) -> io::Error {
+    io::Error::other(err)
 }
 
 fn command_term_name(cmd: &Command) -> Option<String> {
@@ -474,6 +664,9 @@ fn infer_term_colors(term_name: Option<&str>) -> u16 {
 impl Drop for NeovimEmbed {
     fn drop(&mut self) {
         drop(self.stdin.take());
+        if let Ok(mut pending) = self.pending_requests.lock() {
+            pending.clear();
+        }
         if let Some(mut child) = self.child.take() {
             let _ = child.kill();
             let _ = child.wait();

@@ -354,8 +354,17 @@ pub(super) fn wait_on_fd_inner(
                 return Ok(Polled::Woken);
             }
 
-            if poll_fds[0].revents != 0 {
-                return Ok(Polled::ReadReady);
+            let fd_revents = poll_fds[0].revents;
+            if fd_revents != 0 {
+                // POLLIN can be set together with POLLHUP when the peer closed
+                // but buffered data remains — drain first, surface hangup only
+                // once reads have consumed all pending input.
+                if fd_revents & POLLIN != 0 {
+                    return Ok(Polled::ReadReady);
+                }
+                if fd_revents & (POLLHUP | POLLERR) != 0 {
+                    return Err(io::Error::from(io::ErrorKind::BrokenPipe));
+                }
             }
         }
     }

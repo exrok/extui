@@ -827,6 +827,15 @@ pub fn encode_input(w: &mut Writer, keys: &str) {
     w.write_str(keys);
 }
 
+/// Encodes a `nvim_command` notification into `w`.
+pub fn encode_command(w: &mut Writer, command: &str) {
+    w.write_array_header(3);
+    w.write_u64(2);
+    w.write_str("nvim_command");
+    w.write_array_header(1);
+    w.write_str(command);
+}
+
 /// Encodes `nvim_set_option_value` for a boolean option as a notification.
 pub fn encode_set_option_value_bool(w: &mut Writer, name: &str, value: bool) {
     w.write_array_header(3);
@@ -857,6 +866,35 @@ pub fn encode_input_mouse(
     w.write_u64(0);
     w.write_u64(row as u64);
     w.write_u64(col as u64);
+}
+
+/// Encodes a `nvim_buf_get_lines(0, 0, -1, true)` request into `w`.
+pub fn encode_current_buffer_get_lines_request(w: &mut Writer, msgid: u32) {
+    w.write_array_header(4);
+    w.write_u64(0);
+    w.write_u64(msgid as u64);
+    w.write_str("nvim_buf_get_lines");
+    w.write_array_header(4);
+    w.write_u64(0);
+    w.write_i64(0);
+    w.write_i64(-1);
+    w.write_bool(true);
+}
+
+/// Encodes a `nvim_buf_set_lines(0, 0, -1, true, lines)` notification into `w`.
+pub fn encode_current_buffer_set_lines(w: &mut Writer, lines: &[&str]) {
+    w.write_array_header(3);
+    w.write_u64(2);
+    w.write_str("nvim_buf_set_lines");
+    w.write_array_header(5);
+    w.write_u64(0);
+    w.write_i64(0);
+    w.write_i64(-1);
+    w.write_bool(true);
+    w.write_array_header(lines.len());
+    for line in lines {
+        w.write_str(line);
+    }
 }
 
 #[cfg(test)]

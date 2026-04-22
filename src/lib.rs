@@ -81,7 +81,7 @@ use crate::{
     event::KeyboardEnhancementFlags,
     vt::{
         BufferWrite, Modifier, MoveCursor, MoveCursorRight, ScrollBufferDown, ScrollBufferUp,
-        SetCursorStyle,
+        ScrollRegion, SetCursorStyle,
     },
 };
 
@@ -1140,8 +1140,7 @@ impl Cell {
     #[inline]
     fn is_blank_or_empty(&self) -> bool {
         // Both constants have style == 0 and are non-handles.
-        self.style == 0
-            && (self.text == [0; 8] || self.text == [b' ', 0, 0, 0, 0, 0, 0, 1])
+        self.style == 0 && (self.text == [0; 8] || self.text == [b' ', 0, 0, 0, 0, 0, 0, 1])
     }
 }
 
@@ -1415,8 +1414,7 @@ fn write_palette_or_diff(
                 if current.bg() == target.bg() {
                     target = target.without_bg();
                 }
-                let color_only =
-                    Style(target.0 & (Style::FG_ALL_MASK | Style::BG_ALL_MASK));
+                let color_only = Style(target.0 & (Style::FG_ALL_MASK | Style::BG_ALL_MASK));
                 if color_only != Style::DEFAULT {
                     vt::style(buf, color_only, false);
                 }
@@ -1520,6 +1518,16 @@ fn cells_eq_slow(a: Cell, b: Cell, a_side: &SideBuffer, b_side: &SideBuffer) -> 
     ) {
         (Some(a_bytes), Some(b_bytes)) => a_bytes == b_bytes,
         _ => false,
+    }
+}
+
+pub fn clear_cells(cells: &mut [Cell]) {
+    // cells.fill(Cell::EMPTY), but optimizes better
+    let ptr = unsafe {
+        std::slice::from_raw_parts_mut(cells.as_mut_ptr() as *mut _ as *mut u64, cells.len() * 2)
+    };
+    for cell in ptr {
+        *cell = 0;
     }
 }
 
@@ -1751,12 +1759,21 @@ impl Buffer {
         &mut self,
         buf: &mut Vec<u8>,
         old: &Buffer,
+        x_offset: u16,
         y_offset: u16,
         blanking: bool,
         palette: &[Vec<u8>],
     ) {
         if self.cells.len() != old.cells.len() {
-            self.render(buf, y_offset, palette);
+            // Fall back to full render; use bounded=false to preserve old behavior
+            // for callers that haven't opted into sub-region rendering. Callers
+            // that use x_offset/bounded always ensure old and new have matching
+            // sizes (they're swapped in-place inside DoubleBuffer), so this path
+            // is only reached on resize, which resets diffable to false anyway.
+            self.render(buf, x_offset, y_offset, false, palette);
+            return;
+        }
+        if self.width == 0 || self.height == 0 {
             return;
         }
         let new_side = &self.side;
@@ -1796,7 +1813,7 @@ impl Buffer {
                             if cells_eq(new_k, old_k, new_side, old_side) {
                                 if !moved {
                                     moved = true;
-                                    MoveCursor(matching_count, y).write_to_buffer(buf);
+                                    MoveCursor(x_offset + matching_count, y).write_to_buffer(buf);
                                     matching_count = 0;
                                 }
                                 if matching_count > 0 {
@@ -1838,7 +1855,7 @@ impl Buffer {
 
                             if !moved {
                                 moved = true;
-                                MoveCursor(matching_count, y).write_to_buffer(buf);
+                                MoveCursor(x_offset + matching_count, y).write_to_buffer(buf);
                                 matching_count = 0;
                             }
                             if matching_count > 0 {
@@ -1877,7 +1894,7 @@ impl Buffer {
 
                         if !moved {
                             // moved = true;
-                            MoveCursor(matching_count, y).write_to_buffer(buf);
+                            MoveCursor(x_offset + matching_count, y).write_to_buffer(buf);
                             matching_count = 0;
                         }
                         if matching_count > 0 {
@@ -1892,7 +1909,7 @@ impl Buffer {
                             true,
                         );
 
-                        if blank_overwrite < 8 {
+                        if !blanking || blank_overwrite < 8 {
                             for _ in 0..blank_overwrite {
                                 buf.push(b' ');
                             }
@@ -1906,7 +1923,7 @@ impl Buffer {
 
                 if !moved {
                     moved = true;
-                    MoveCursor(matching_count, y).write_to_buffer(buf);
+                    MoveCursor(x_offset + matching_count, y).write_to_buffer(buf);
                     matching_count = 0;
                 }
                 if matching_count > 0 {
@@ -1929,14 +1946,28 @@ impl Buffer {
             }
         }
     }
-    fn render(&mut self, buf: &mut Vec<u8>, y_offset: u16, palette: &[Vec<u8>]) {
-        if y_offset == 0 {
-            vt::MOVE_CURSOR_TO_ORIGIN.write_to_buffer(buf);
-        } else {
-            MoveCursor(0, y_offset).write_to_buffer(buf);
+    fn render(
+        &mut self,
+        buf: &mut Vec<u8>,
+        x_offset: u16,
+        y_offset: u16,
+        bounded: bool,
+        palette: &[Vec<u8>],
+    ) {
+        if self.width == 0 || self.height == 0 {
+            return;
+        }
+        if !bounded {
+            if x_offset == 0 && y_offset == 0 {
+                vt::MOVE_CURSOR_TO_ORIGIN.write_to_buffer(buf);
+            } else {
+                MoveCursor(x_offset, y_offset).write_to_buffer(buf);
+            }
         }
         vt::CLEAR_STYLE.write_to_buffer(buf);
-        buf.extend_from_slice(vt::CLEAR_BELOW);
+        if !bounded {
+            buf.extend_from_slice(vt::CLEAR_BELOW);
+        }
 
         let side = &self.side;
         let mut current_style = Style::DEFAULT;
@@ -1951,7 +1982,7 @@ impl Buffer {
                 }
                 if !moved {
                     moved = true;
-                    MoveCursor(blank_extension, y).write_to_buffer(buf);
+                    MoveCursor(x_offset + blank_extension, y).write_to_buffer(buf);
                     blank_extension = 0;
                 }
                 if blank_extension > 0 {
@@ -1964,13 +1995,8 @@ impl Buffer {
                     }
                     blank_extension = 0;
                 }
-                current_style = write_palette_or_diff(
-                    current_style,
-                    cell.style(),
-                    palette,
-                    buf,
-                    false,
-                );
+                current_style =
+                    write_palette_or_diff(current_style, cell.style(), palette, buf, false);
                 let text = cell.text(side);
                 if text.is_empty() {
                     buf.push(b' ');
@@ -1979,7 +2005,9 @@ impl Buffer {
                 }
             }
         }
-        vt::MOVE_CURSOR_TO_ORIGIN.write_to_buffer(buf);
+        if !bounded {
+            vt::MOVE_CURSOR_TO_ORIGIN.write_to_buffer(buf);
+        }
     }
     /// Merges `style` into every cell inside `area`.
     ///
@@ -2055,9 +2083,27 @@ impl Buffer {
         let Some(target) = self.cells.get_mut(start..end) else {
             return (x, y);
         };
-        let side = &mut self.side;
-
         let mut target_cells = target.iter_mut();
+        if string.is_ascii() {
+            for &byte in string.as_bytes() {
+                if byte.is_ascii_control() {
+                    continue;
+                }
+                let Some(new_rem) = remaining_width.checked_sub(1) else {
+                    break;
+                };
+                remaining_width = new_rem;
+                let Some(slot) = target_cells.next() else {
+                    return (x + initial_remaining_width, y);
+                };
+                // SAFETY: `string.is_ascii()` guarantees every retained byte is
+                // valid one-byte UTF-8, and control bytes are skipped above.
+                *slot = unsafe { Cell::new_ascii(byte, style) };
+            }
+            return (x + (initial_remaining_width - remaining_width), y);
+        }
+
+        let side = &mut self.side;
         for symbol in UnicodeSegmentation::graphemes(string, true) {
             if symbol.contains(char::is_control) {
                 continue;
@@ -2343,11 +2389,31 @@ pub struct DoubleBuffer {
     blanking: bool,
     rgb_supported: bool,
     scroll: i16,
+    scroll_region: Option<QueuedScrollRegion>,
     #[doc(hidden)]
     pub y_offset: u16,
+    /// Column offset applied to every `MoveCursor` emitted during render.
+    /// Use together with [`bounded`](Self::bounded) to render a sub-region
+    /// that does not start at column zero of the terminal.
+    #[doc(hidden)]
+    pub x_offset: u16,
+    /// When `true`, this buffer is treated as a bounded sub-region of the
+    /// terminal rather than owning everything from `(0, y_offset)` downward.
+    /// The initial full render skips `CLEAR_BELOW` so existing content under
+    /// the buffer is preserved, and no final cursor-to-origin escape is
+    /// emitted. Use this for overlay widgets like command palettes.
+    #[doc(hidden)]
+    pub bounded: bool,
     epoch: u64,
     palette: Vec<Vec<u8>>,
     cursor: CursorOutput,
+}
+
+#[derive(Clone, Copy)]
+struct QueuedScrollRegion {
+    top: u16,
+    bottom: u16,
+    amount: i16,
 }
 
 #[derive(Clone, Copy)]
@@ -2461,8 +2527,11 @@ impl DoubleBuffer {
             rgb_supported: true,
             buf: Vec::with_capacity(16 * 1024),
             scroll: 0,
+            scroll_region: None,
             epoch: 0,
             y_offset: 0,
+            x_offset: 0,
+            bounded: false,
             palette: Vec::new(),
             cursor: CursorOutput::default(),
         }
@@ -2529,11 +2598,14 @@ impl DoubleBuffer {
 
     /// Clears both buffers and increments the epoch.
     pub fn reset(&mut self) {
-        self.current.cells.fill(Cell::EMPTY);
+        clear_cells(&mut self.current.cells);
         self.current.side.clear();
-        self.previous.cells.fill(Cell::EMPTY);
+        clear_cells(&mut self.previous.cells);
+        // self.previous.cells.fill(Cell::EMPTY);
         self.previous.side.clear();
         self.diffable = false;
+        self.scroll = 0;
+        self.scroll_region = None;
         self.epoch = self.epoch.wrapping_add(1);
         self.cursor.invalidate();
     }
@@ -2546,6 +2618,8 @@ impl DoubleBuffer {
             self.current.quantize_rgb = quantize;
             self.previous.quantize_rgb = quantize;
             self.diffable = false;
+            self.scroll = 0;
+            self.scroll_region = None;
             self.epoch = self.epoch.wrapping_add(1);
             self.cursor.invalidate();
         }
@@ -2565,42 +2639,118 @@ impl DoubleBuffer {
     /// Positive values scroll up, negative values scroll down.
     pub fn scroll(&mut self, amount: i16) {
         self.scroll += amount;
+        self.scroll_region = None;
     }
+
+    /// Queues a vertical scroll operation scoped to rows `top..bottom`.
+    ///
+    /// Positive values scroll up, negative values scroll down.
+    ///
+    /// This uses the terminal scroll-region escape on the next render, so
+    /// only the requested rows are shifted while content outside the region
+    /// stays visually stable.
+    pub fn scroll_region(&mut self, top: u16, bottom: u16, amount: i16) {
+        if amount == 0 {
+            return;
+        }
+        let top = top.min(self.current.height);
+        let bottom = bottom.min(self.current.height);
+        if bottom <= top {
+            return;
+        }
+        if top == 0 && bottom == self.current.height {
+            self.scroll(amount);
+            return;
+        }
+        match self.scroll_region.as_mut() {
+            Some(region) if region.top == top && region.bottom == bottom => {
+                region.amount += amount;
+                if region.amount == 0 {
+                    self.scroll_region = None;
+                }
+            }
+            _ => {
+                self.scroll = 0;
+                self.scroll_region = Some(QueuedScrollRegion {
+                    top,
+                    bottom,
+                    amount,
+                });
+            }
+        }
+    }
+
     /// Renders the current buffer to the internal byte buffer.
     ///
     /// Use [`write_buffer`](Self::write_buffer) to access the output.
     pub fn render_internal(&mut self) {
         if self.diffable {
-            if self.y_offset == 0 {
-                if self.scroll < 0 {
-                    vt::CLEAR_STYLE.write_to_buffer(&mut self.buf);
-                    ScrollBufferDown(-self.scroll as u16).write_to_buffer(&mut self.buf);
-                    // mutage prev buffer to match
-                    self.previous.scroll_down(-self.scroll as u16);
-                } else if self.scroll > 0 {
-                    vt::CLEAR_STYLE.write_to_buffer(&mut self.buf);
-                    ScrollBufferUp(self.scroll as u16).write_to_buffer(&mut self.buf);
-                    self.previous.scroll_up(self.scroll as u16);
-                }
-            }
-            self.scroll = 0;
+            self.apply_scroll_optimization();
             self.current.render_diff(
                 &mut self.buf,
                 &self.previous,
+                self.x_offset,
                 self.y_offset,
-                self.blanking,
+                self.blanking && !self.bounded,
                 &self.palette,
             );
         } else {
             self.scroll = 0;
-            self.current
-                .render(&mut self.buf, self.y_offset, &self.palette);
+            self.current.render(
+                &mut self.buf,
+                self.x_offset,
+                self.y_offset,
+                self.bounded,
+                &self.palette,
+            );
             self.diffable = true;
         }
         std::mem::swap(&mut self.current, &mut self.previous);
-        self.current.cells.fill(Cell::EMPTY);
+        // self.current.cells.fill(Cell::EMPTY);
+        clear_cells(&mut self.current.cells);
         self.current.side.clear();
         self.emit_cursor();
+    }
+
+    fn apply_scroll_optimization(&mut self) {
+        if let Some(region) = self.scroll_region.take() {
+            self.scroll = 0;
+            self.apply_scroll_region(region);
+            return;
+        }
+
+        if self.y_offset == 0 {
+            if self.scroll < 0 {
+                vt::CLEAR_STYLE.write_to_buffer(&mut self.buf);
+                ScrollBufferDown(-self.scroll as u16).write_to_buffer(&mut self.buf);
+                self.previous.scroll_down(-self.scroll as u16);
+            } else if self.scroll > 0 {
+                vt::CLEAR_STYLE.write_to_buffer(&mut self.buf);
+                ScrollBufferUp(self.scroll as u16).write_to_buffer(&mut self.buf);
+                self.previous.scroll_up(self.scroll as u16);
+            }
+        }
+        self.scroll = 0;
+    }
+
+    fn apply_scroll_region(&mut self, region: QueuedScrollRegion) {
+        let height = region.bottom - region.top;
+        let shift = region.amount.unsigned_abs();
+        if height == 0 || shift == 0 || shift >= height {
+            return;
+        }
+
+        let absolute_top = self.y_offset.saturating_add(region.top);
+        let absolute_bottom = self.y_offset.saturating_add(region.bottom);
+        vt::CLEAR_STYLE.write_to_buffer(&mut self.buf);
+        ScrollRegion(absolute_top + 1, absolute_bottom).write_to_buffer(&mut self.buf);
+        if region.amount < 0 {
+            ScrollBufferDown(shift).write_to_buffer(&mut self.buf);
+        } else {
+            ScrollBufferUp(shift).write_to_buffer(&mut self.buf);
+        }
+        ScrollRegion::RESET.write_to_buffer(&mut self.buf);
+        blank_scrolled_rows(&mut self.previous, region.top, region.bottom, region.amount);
     }
 
     fn emit_cursor(&mut self) {
@@ -2626,10 +2776,16 @@ impl DoubleBuffer {
         }
     }
     /// Renders and writes the output to the terminal.
-    pub fn render(&mut self, term: &mut Terminal) {
+    pub fn render(&mut self, term: &mut Terminal) -> usize {
         self.render_internal();
+        if self.buf == b"\x1b[0m" {
+            self.buf.clear();
+            return 0;
+        }
         term.write_all(&self.buf).unwrap();
+        let size = self.buf.len();
         self.buf.clear();
+        size
     }
     /// Sets a palette entry containing raw VT escape bytes at the given index.
     ///
@@ -2651,6 +2807,28 @@ impl DoubleBuffer {
     /// Returns a mutable reference to the current buffer.
     pub fn current(&mut self) -> &mut Buffer {
         &mut self.current
+    }
+}
+
+fn blank_scrolled_rows(buf: &mut Buffer, top: u16, bottom: u16, amount: i16) {
+    let width = buf.width as usize;
+    buf.scroll_region(top, bottom, 0, buf.width, amount as i32);
+
+    let shift = amount.unsigned_abs().min(bottom - top);
+    if shift == 0 {
+        return;
+    }
+
+    let (blank_top, blank_bottom) = if amount > 0 {
+        (bottom - shift, bottom)
+    } else {
+        (top, top + shift)
+    };
+
+    for y in blank_top as usize..blank_bottom as usize {
+        let start = y * width;
+        let end = start + width;
+        buf.cells[start..end].fill(Cell::EMPTY);
     }
 }
 
@@ -2867,8 +3045,14 @@ mod test {
         db.set_cursor(3, 1, CursorShape::SteadyBar);
         db.render_internal();
         let first = std::str::from_utf8(&db.buf).unwrap().to_owned();
-        assert!(first.contains("\x1b[6 q"), "expected DECSCUSR bar: {first:?}");
-        assert!(first.contains("\x1b[2;4H"), "expected MoveCursor: {first:?}");
+        assert!(
+            first.contains("\x1b[6 q"),
+            "expected DECSCUSR bar: {first:?}"
+        );
+        assert!(
+            first.contains("\x1b[2;4H"),
+            "expected MoveCursor: {first:?}"
+        );
         assert!(first.contains("\x1b[?25h"), "expected show: {first:?}");
 
         db.buf.clear();
@@ -2876,9 +3060,18 @@ mod test {
         db.set_cursor(3, 1, CursorShape::SteadyBar);
         db.render_internal();
         let second = std::str::from_utf8(&db.buf).unwrap().to_owned();
-        assert!(second.contains("\x1b[2;4H"), "expected MoveCursor on frame 2: {second:?}");
-        assert!(!second.contains(" q"), "DECSCUSR should not re-emit: {second:?}");
-        assert!(!second.contains("\x1b[?25h"), "show should not re-emit: {second:?}");
+        assert!(
+            second.contains("\x1b[2;4H"),
+            "expected MoveCursor on frame 2: {second:?}"
+        );
+        assert!(
+            !second.contains(" q"),
+            "DECSCUSR should not re-emit: {second:?}"
+        );
+        assert!(
+            !second.contains("\x1b[?25h"),
+            "show should not re-emit: {second:?}"
+        );
     }
 
     #[test]
@@ -2910,7 +3103,10 @@ mod test {
         db.hide_cursor();
         db.render_internal();
         let second = std::str::from_utf8(&db.buf).unwrap().to_owned();
-        assert!(!second.contains("\x1b[?25l"), "hide should not re-emit: {second:?}");
+        assert!(
+            !second.contains("\x1b[?25l"),
+            "hide should not re-emit: {second:?}"
+        );
     }
 
     #[test]
@@ -2924,8 +3120,14 @@ mod test {
         db.set_cursor(0, 0, CursorShape::SteadyBlock);
         db.render_internal();
         let out = std::str::from_utf8(&db.buf).unwrap();
-        assert!(out.contains("\x1b[2 q"), "expected DECSCUSR after reset: {out:?}");
-        assert!(out.contains("\x1b[?25h"), "expected show after reset: {out:?}");
+        assert!(
+            out.contains("\x1b[2 q"),
+            "expected DECSCUSR after reset: {out:?}"
+        );
+        assert!(
+            out.contains("\x1b[?25h"),
+            "expected show after reset: {out:?}"
+        );
     }
 
     #[test]
@@ -3123,6 +3325,36 @@ mod test {
     }
 
     #[test]
+    fn ascii_set_stringn_fast_path_respects_width() {
+        let mut buffer = Buffer::new(5, 1);
+        let end = buffer.set_stringn(1, 0, "hello", 3, Style::DEFAULT);
+
+        assert_eq!(end, (4, 0));
+        assert_eq!(buffer.side_len(), 0);
+        assert_eq!(buffer.cells[0].text_inline(), Some(""));
+        assert_eq!(buffer.cells[1].text_inline(), Some("h"));
+        assert_eq!(buffer.cells[2].text_inline(), Some("e"));
+        assert_eq!(buffer.cells[3].text_inline(), Some("l"));
+        assert_eq!(buffer.cells[4].text_inline(), Some(""));
+    }
+
+    #[test]
+    fn ascii_set_stringn_skips_control_bytes() {
+        let mut buffer = Buffer::new(5, 1);
+        buffer.set_string(0, 0, ".....", Style::DEFAULT);
+
+        let end = buffer.set_stringn(1, 0, "A\n\tB\u{7f}C", 2, Style::DEFAULT);
+
+        assert_eq!(end, (3, 0));
+        assert_eq!(buffer.side_len(), 0);
+        assert_eq!(buffer.cells[0].text_inline(), Some("."));
+        assert_eq!(buffer.cells[1].text_inline(), Some("A"));
+        assert_eq!(buffer.cells[2].text_inline(), Some("B"));
+        assert_eq!(buffer.cells[3].text_inline(), Some("."));
+        assert_eq!(buffer.cells[4].text_inline(), Some("."));
+    }
+
+    #[test]
     fn zalgo_grapheme_roundtrip() {
         // A modest zalgo cluster: base 'a' + 44 combining marks = 45
         // codepoints, 89 bytes, visual width 1. Stored as raw bytes so
@@ -3179,8 +3411,7 @@ mod test {
             stored.len(),
         );
         // Must still be valid UTF-8 — truncation is at a codepoint boundary.
-        let decoded = std::str::from_utf8(stored)
-            .expect("truncation landed off a UTF-8 boundary");
+        let decoded = std::str::from_utf8(stored).expect("truncation landed off a UTF-8 boundary");
         // Must be a non-empty prefix of the input.
         assert!(!decoded.is_empty());
         assert!(extreme.starts_with(decoded));
@@ -3462,5 +3693,240 @@ mod test {
         let output = String::from_utf8_lossy(&db.buf);
         assert!(output.contains("plain"), "normal text missing");
         db.buf.clear();
+    }
+
+    #[test]
+    fn double_buffer_scroll_region_preserves_rows_outside_region() {
+        let mut fast = DoubleBuffer::new(6, 4);
+        let mut slow = DoubleBuffer::new(6, 4);
+        let mut term_fast = vt100::Parser::new(4, 6, 0);
+        let mut term_slow = vt100::Parser::new(4, 6, 0);
+
+        let render_frame = |buf: &mut DoubleBuffer, rows: [&str; 4]| {
+            for (y, row) in rows.into_iter().enumerate() {
+                buf.set_string(0, y as u16, row, Style::DEFAULT);
+            }
+        };
+
+        render_frame(&mut fast, ["AAAAAA", "BBBBBB", "status", "input "]);
+        render_frame(&mut slow, ["AAAAAA", "BBBBBB", "status", "input "]);
+        fast.render_internal();
+        slow.render_internal();
+        term_fast.process(&fast.buf);
+        term_slow.process(&slow.buf);
+        fast.buf.clear();
+        slow.buf.clear();
+
+        render_frame(&mut fast, ["BBBBBB", "CCCCCC", "status", "input "]);
+        render_frame(&mut slow, ["BBBBBB", "CCCCCC", "status", "input "]);
+        fast.scroll_region(0, 2, 1);
+        fast.render_internal();
+        slow.render_internal();
+
+        let fast_output = String::from_utf8_lossy(&fast.buf);
+        assert!(
+            fast_output.contains("\x1b[1;2r"),
+            "expected scoped scroll region escape, got: {fast_output:?}"
+        );
+
+        term_fast.process(&fast.buf);
+        term_slow.process(&slow.buf);
+        assert_eq!(
+            term_fast.screen().contents(),
+            term_slow.screen().contents(),
+            "scoped scroll render diverged from plain diff render"
+        );
+    }
+
+    /// A bounded DoubleBuffer with `x_offset > 0` must emit `MoveCursor`
+    /// sequences targeting `(x_offset + col, y_offset + row)` on the
+    /// terminal, not `(col, y_offset + row)`.
+    #[test]
+    fn bounded_buffer_uses_x_offset() {
+        let mut db = DoubleBuffer::new(6, 3);
+        db.x_offset = 20;
+        db.y_offset = 5;
+        db.bounded = true;
+        db.set_string(0, 0, "hello", Style::DEFAULT);
+        db.render_internal();
+
+        let out = std::str::from_utf8(&db.buf).unwrap();
+        assert!(
+            out.contains("\x1b[6;21H"),
+            "expected MoveCursor to (col=21,row=6) for x_offset=20, y_offset=5, got: {:?}",
+            out
+        );
+    }
+
+    /// A bounded DoubleBuffer must not emit `CLEAR_BELOW` during its first
+    /// render — that would destroy cells under the widget managed by other
+    /// code (task trees, status bars, etc.).
+    #[test]
+    fn bounded_buffer_skips_clear_below() {
+        let mut db = DoubleBuffer::new(4, 2);
+        db.x_offset = 10;
+        db.y_offset = 3;
+        db.bounded = true;
+        db.set_string(0, 0, "AB", Style::DEFAULT);
+        db.render_internal();
+
+        let out = std::str::from_utf8(&db.buf).unwrap();
+        assert!(
+            !out.contains("\x1b[J"),
+            "bounded render must not emit CLEAR_BELOW: {:?}",
+            out
+        );
+        assert!(
+            !out.contains("\x1b[0J"),
+            "bounded render must not emit CLEAR_BELOW (0J): {:?}",
+            out
+        );
+    }
+
+    /// Bounded render_diff must not use the `\x1b[K` (EL/erase-to-end-of-line)
+    /// optimization for runs of blank cells — that clears cells to the right
+    /// of the buffer's rightmost column, destroying widgets rendered beside it.
+    #[test]
+    fn bounded_render_diff_does_not_emit_clear_line_optimization() {
+        let mut db = DoubleBuffer::new(60, 4);
+        db.x_offset = 10;
+        db.y_offset = 5;
+        db.bounded = true;
+        let fg = Style::DEFAULT;
+        let hl = AnsiColor(153).with_fg(AnsiColor::Black);
+
+        db.set_string(0, 0, "initial", fg);
+        db.render_internal();
+        db.buf.clear();
+
+        db.set_style(
+            Rect {
+                x: 0,
+                y: 1,
+                w: 60,
+                h: 1,
+            },
+            hl,
+        );
+        db.render_internal();
+
+        let out = std::str::from_utf8(&db.buf).unwrap();
+        assert!(
+            !out.contains("\x1b[K") && !out.contains("\x1b[0K"),
+            "bounded render_diff must never emit CLEAR_LINE_TO_RIGHT (EL), got: {:?}",
+            out
+        );
+    }
+
+    /// A bounded DoubleBuffer must not destroy cells outside its own column
+    /// range even when rendering a full-width styled row.
+    #[test]
+    fn bounded_buffer_preserves_cells_beside_it() {
+        let mut term = vt100::Parser::new(8, 30, 0);
+
+        let mut setup = Vec::new();
+        MoveCursor(0, 2).write_to_buffer(&mut setup);
+        setup.extend_from_slice(b"LEFT_A");
+        MoveCursor(20, 2).write_to_buffer(&mut setup);
+        setup.extend_from_slice(b"RIGHT_A");
+        MoveCursor(0, 3).write_to_buffer(&mut setup);
+        setup.extend_from_slice(b"LEFT_B");
+        MoveCursor(20, 3).write_to_buffer(&mut setup);
+        setup.extend_from_slice(b"RIGHT_B");
+        term.process(&setup);
+
+        let mut db = DoubleBuffer::new(10, 2);
+        db.x_offset = 8;
+        db.y_offset = 2;
+        db.bounded = true;
+        let hl = AnsiColor(153).with_fg(AnsiColor::Black);
+        db.set_style(
+            Rect {
+                x: 0,
+                y: 0,
+                w: 10,
+                h: 2,
+            },
+            hl,
+        );
+        db.set_string(1, 0, "palette", Style::DEFAULT);
+        db.render_internal();
+        term.process(&db.buf);
+        db.buf.clear();
+
+        let row2 = term.screen().rows(0, 30).nth(2).unwrap();
+        let row3 = term.screen().rows(0, 30).nth(3).unwrap();
+        assert!(row2.contains("LEFT_A"), "row 2 lost LEFT_A, got {:?}", row2);
+        assert!(
+            row2.contains("RIGHT_A"),
+            "row 2 lost RIGHT_A, got {:?}",
+            row2
+        );
+        assert!(row3.contains("LEFT_B"), "row 3 lost LEFT_B, got {:?}", row3);
+        assert!(
+            row3.contains("RIGHT_B"),
+            "row 3 lost RIGHT_B, got {:?}",
+            row3
+        );
+    }
+
+    /// A bounded DoubleBuffer with `y_offset > 0` must not destroy cells
+    /// BELOW its rendering area (e.g. task tree pane).
+    #[test]
+    fn bounded_buffer_preserves_cells_below() {
+        let mut term = vt100::Parser::new(12, 20, 0);
+
+        let mut setup = Vec::new();
+        MoveCursor(0, 8).write_to_buffer(&mut setup);
+        setup.extend_from_slice(b"STATUS_BAR");
+        MoveCursor(0, 9).write_to_buffer(&mut setup);
+        setup.extend_from_slice(b"TASK_TREE_A");
+        MoveCursor(0, 10).write_to_buffer(&mut setup);
+        setup.extend_from_slice(b"TASK_TREE_B");
+        term.process(&setup);
+
+        let mut db = DoubleBuffer::new(12, 3);
+        db.x_offset = 4;
+        db.y_offset = 3;
+        db.bounded = true;
+        db.set_string(1, 0, "palette", Style::DEFAULT);
+        db.set_string(1, 1, "item 1", Style::DEFAULT);
+        db.set_string(1, 2, "item 2", Style::DEFAULT);
+        db.render_internal();
+        term.process(&db.buf);
+
+        let row8 = term.screen().rows(0, 20).nth(8).unwrap();
+        let row9 = term.screen().rows(0, 20).nth(9).unwrap();
+        let row10 = term.screen().rows(0, 20).nth(10).unwrap();
+        assert!(
+            row8.contains("STATUS_BAR"),
+            "row 8 destroyed, got {:?}",
+            row8
+        );
+        assert!(
+            row9.contains("TASK_TREE_A"),
+            "row 9 destroyed, got {:?}",
+            row9
+        );
+        assert!(
+            row10.contains("TASK_TREE_B"),
+            "row 10 destroyed, got {:?}",
+            row10
+        );
+    }
+
+    /// A non-bounded DoubleBuffer at x_offset=0 must still behave exactly
+    /// like it did before the x_offset/bounded fields were introduced.
+    #[test]
+    fn non_bounded_buffer_behavior_unchanged() {
+        let mut db = DoubleBuffer::new(4, 2);
+        db.set_string(0, 0, "test", Style::DEFAULT);
+        db.render_internal();
+        let out = std::str::from_utf8(&db.buf).unwrap();
+        assert!(
+            out.contains("\x1b[J") || out.contains("\x1b[0J"),
+            "non-bounded must emit CLEAR_BELOW: {:?}",
+            out
+        );
     }
 }

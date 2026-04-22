@@ -80,9 +80,14 @@ impl Events {
             }
         }
     }
+
+    /// Returns the unread bytes currently buffered by the parser.
+    pub fn unread_bytes(&self) -> &[u8] {
+        &self.buffer[self.read..]
+    }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
 pub enum ParseError {
     /// The input buffer contains an invalid UTF-8 sequence.
     InvalidUtf8,
@@ -710,6 +715,25 @@ pub(crate) fn parse_csi_special_key_code(event_buffer: &[u8]) -> ParseResult {
                 (KeyModifiers::NONE, KeyEventKind::Press, KeyEventState::NONE)
             };
         let keycode = match first {
+            27 => {
+                let codepoint = next_parsed::<u32>(&mut split)?;
+                match codepoint {
+                    0x1B => KeyCode::Esc,
+                    0x0D => KeyCode::Enter,
+                    0x09 => {
+                        if modifiers.contains(KeyModifiers::SHIFT) {
+                            KeyCode::BackTab
+                        } else {
+                            KeyCode::Tab
+                        }
+                    }
+                    0x7F => KeyCode::Backspace,
+                    value => match char::from_u32(value) {
+                        Some(c) => KeyCode::Char(c),
+                        None => return Err(ParseError::CouldNotParse),
+                    },
+                }
+            }
             1 | 7 => KeyCode::Home,
             2 => KeyCode::Insert,
             3 => KeyCode::Delete,
@@ -1149,6 +1173,30 @@ mod tests {
                 event: InternalEvent::Event(Event::Key(KeyEvent::new(
                     KeyCode::Delete,
                     KeyModifiers::SHIFT
+                )))
+            },
+        );
+    }
+
+    #[test]
+    fn test_parse_csi_special_key_code_modify_other_keys_enter() {
+        assert_eq!(
+            parse_event(b"\x1B[27;5;13~", false),
+            ParseResult::Event {
+                consumed: 10,
+                event: InternalEvent::Event(Event::Key(KeyEvent::new(
+                    KeyCode::Enter,
+                    KeyModifiers::CONTROL,
+                )))
+            },
+        );
+        assert_eq!(
+            parse_event(b"\x1B[27;2;13~", false),
+            ParseResult::Event {
+                consumed: 10,
+                event: InternalEvent::Event(Event::Key(KeyEvent::new(
+                    KeyCode::Enter,
+                    KeyModifiers::SHIFT,
                 )))
             },
         );

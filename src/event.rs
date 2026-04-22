@@ -56,7 +56,7 @@ use std::hash::{Hash, Hasher};
 pub(crate) mod parse;
 pub mod polling;
 
-pub use parse::Events;
+pub use parse::{Events, ParseError};
 
 /// Result of a polling operation.
 #[derive(Debug, PartialEq, Eq)]
@@ -80,16 +80,28 @@ impl Polled {
 ///
 /// # Errors
 ///
-/// Returns an error if the poll system call fails.
+/// Returns an error if the poll system call fails, or
+/// [`std::io::ErrorKind::BrokenPipe`] on hangup (see
+/// [`poll_with_custom_waker`]).
 pub fn poll(fd: &impl AsFd, timeout: Option<Duration>) -> std::io::Result<Polled> {
     poll_with_custom_waker(fd, polling::global_waker(), timeout)
 }
 
 /// Polls a file descriptor for read readiness with a custom waker.
 ///
+/// Buffered data is drained before hangup is reported: if `POLLIN` and
+/// `POLLHUP` are set together, [`Polled::ReadReady`] is returned and the
+/// hangup surfaces on the next poll once reads have consumed all input.
+///
 /// # Errors
 ///
 /// Returns an error if the poll system call fails.
+///
+/// Returns [`std::io::ErrorKind::BrokenPipe`] when the fd reports `POLLHUP`
+/// or `POLLERR` without `POLLIN`. Callers that loop on the result propagate
+/// this with `?` and exit cleanly instead of spinning on sticky `POLLHUP`;
+/// callers needing a graceful-shutdown branch match on
+/// [`std::io::Error::kind`].
 pub fn poll_with_custom_waker(
     fd: &impl AsFd,
     waker: Option<&polling::Waker>,
