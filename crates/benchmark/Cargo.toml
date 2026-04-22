@@ -4,7 +4,14 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-jsony_bench.path = "/home/user/Projects/git/jsony/jsony_bench"
+jsony_bench = { git = "https://github.com/exrok/jsony" }
+
 extui.path = "../.."
+extui-bindings.path = "../extui-bindings"
+extui-editor.path = "../extui-editor"
+tinyhl.path = "../tinyhl"
 oorandom = "11.1.5"
 jsony = "0.1.9"
+
+#[profile.release]
+#debug = 1

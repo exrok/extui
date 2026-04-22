@@ -1,4 +1,10 @@
 use extui::{AnsiColor, BoxStyle, DoubleBuffer, HAlign, Rect, Style, vt::Modifier};
+use jsony_bench::{Bencher, Stat};
+use std::cell::RefCell;
+
+use crate::common::{BenchRecord, find_baseline, print_row};
+
+pub const GROUP: &str = "render";
 
 pub const SIZES: &[(&str, u16, u16)] =
     &[("80x24", 80, 24), ("120x40", 120, 40), ("200x60", 200, 60)];
@@ -292,4 +298,95 @@ fn full_repaint(db: &mut DoubleBuffer, world: &mut World, _frame: u64) {
         t.status = (t.status + 1) % STATUSES.len() as u8;
     }
     draw(db, world);
+}
+
+struct State {
+    db: DoubleBuffer,
+    world: World,
+    frame: u64,
+}
+
+fn measure_bytes(scenario: &Scenario, w: u16, h: u16) -> u64 {
+    let mut db = DoubleBuffer::new(w, h);
+    setup(&mut db);
+    let mut world = World::new(256);
+    (scenario.run)(&mut db, &mut world, 0);
+    db.render_internal();
+    db.buf.clear();
+    (scenario.run)(&mut db, &mut world, 1);
+    db.render_internal();
+    db.buf.len() as u64
+}
+
+fn run_scenario(bencher: &mut Bencher, scenario: &Scenario, w: u16, h: u16) -> Stat {
+    let mut db = DoubleBuffer::new(w, h);
+    setup(&mut db);
+    let state = RefCell::new(State {
+        db,
+        world: World::new(256),
+        frame: 0,
+    });
+    if !scenario.reset_each_frame {
+        let mut s = state.borrow_mut();
+        let s = &mut *s;
+        (scenario.run)(&mut s.db, &mut s.world, 0);
+        s.db.render_internal();
+        s.db.buf.clear();
+    }
+    bencher.bench_with_generator(
+        || {
+            let mut s = state.borrow_mut();
+            s.frame = s.frame.wrapping_add(1);
+            s.frame
+        },
+        |frame| {
+            let mut s = state.borrow_mut();
+            let s = &mut *s;
+            (scenario.run)(&mut s.db, &mut s.world, frame);
+            s.db.render_internal();
+            std::hint::black_box(&s.db.buf);
+            s.db.buf.clear();
+        },
+    )
+}
+
+pub fn list() -> Vec<(&'static str, &'static str)> {
+    SCENARIOS.iter().map(|s| (GROUP, s.name)).collect()
+}
+
+pub fn run_matching(
+    bencher: &mut Bencher,
+    matches: &dyn Fn(&str, &str) -> bool,
+    records: &mut Vec<BenchRecord>,
+    baseline: Option<&[BenchRecord]>,
+) {
+    for &(size_name, w, h) in SIZES {
+        let mut size_any = false;
+        for scenario in SCENARIOS {
+            if !matches(GROUP, scenario.name) {
+                continue;
+            }
+            let stat = run_scenario(bencher, scenario, w, h);
+            let bytes = measure_bytes(scenario, w, h);
+            let record = BenchRecord {
+                group: GROUP.to_string(),
+                size: size_name.to_string(),
+                width: w,
+                height: h,
+                scenario: scenario.name.to_string(),
+                ns: f64::from(stat.nanos),
+                cycles: f64::from(stat.cycles),
+                inst: f64::from(stat.inst),
+                branch: f64::from(stat.branch),
+                bytes,
+            };
+            let base = find_baseline(baseline, &record);
+            print_row(&record, base);
+            records.push(record);
+            size_any = true;
+        }
+        if size_any {
+            println!();
+        }
+    }
 }

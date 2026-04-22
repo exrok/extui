@@ -1,130 +1,128 @@
-mod scene;
+mod bindings;
+mod common;
+mod editor;
+mod profile;
+mod render;
 
-use extui::DoubleBuffer;
-use jsony::Jsony;
-use jsony_bench::{Bencher, Stat};
-use std::cell::RefCell;
+use jsony_bench::Bencher;
 use std::path::PathBuf;
+use std::time::Duration;
 
-use scene::{SCENARIOS, SIZES, Scenario, World, setup};
+use common::{BenchRecord, print_header};
 
-#[derive(Jsony, Clone)]
-#[jsony(Json)]
-struct BenchRecord {
-    size: String,
-    width: u16,
-    height: u16,
-    scenario: String,
-    ns: f64,
-    cycles: f64,
-    inst: f64,
-    branch: f64,
-    bytes: u64,
+enum Cmd {
+    Bench {
+        patterns: Vec<String>,
+        save: Option<PathBuf>,
+        base: Option<PathBuf>,
+    },
+    List,
+    Profile {
+        name: String,
+        budget: profile::Budget,
+    },
+    Help,
 }
 
-struct BenchState {
-    db: DoubleBuffer,
-    world: World,
-    frame: u64,
-}
-
-fn measure_bytes(scenario: &Scenario, w: u16, h: u16) -> usize {
-    let mut db = DoubleBuffer::new(w, h);
-    setup(&mut db);
-    let mut world = World::new(256);
-    (scenario.run)(&mut db, &mut world, 0);
-    db.render_internal();
-    db.buf.clear();
-    (scenario.run)(&mut db, &mut world, 1);
-    db.render_internal();
-    db.buf.len()
-}
-
-fn run_scenario(bencher: &mut Bencher, scenario: &Scenario, w: u16, h: u16) -> Stat {
-    let mut db = DoubleBuffer::new(w, h);
-    setup(&mut db);
-    let state = RefCell::new(BenchState {
-        db,
-        world: World::new(256),
-        frame: 0,
-    });
-    if !scenario.reset_each_frame {
-        let mut s = state.borrow_mut();
-        let s = &mut *s;
-        (scenario.run)(&mut s.db, &mut s.world, 0);
-        s.db.render_internal();
-        s.db.buf.clear();
-    }
-    bencher.bench_with_generator(
-        || {
-            let mut s = state.borrow_mut();
-            s.frame = s.frame.wrapping_add(1);
-            s.frame
-        },
-        |frame| {
-            let mut s = state.borrow_mut();
-            let s = &mut *s;
-            (scenario.run)(&mut s.db, &mut s.world, frame);
-            s.db.render_internal();
-            std::hint::black_box(&s.db.buf);
-            s.db.buf.clear();
-        },
-    )
-}
-
-fn pct(new: f64, old: f64) -> f64 {
-    if old == 0.0 {
-        0.0
-    } else {
-        (new - old) / old * 100.0
-    }
-}
-
-fn print_header(has_base: bool) {
-    print!(
-        "{:<8} {:<14} {:>8} {:>9} {:>10} {:>9} {:>6} {:>10}",
-        "size", "scenario", "ns", "cycles", "instr", "branch", "bytes", "cells/s"
+fn print_help() {
+    println!(
+        "usage:\n  \
+         benchmark [bench] [PATTERN...] [--save PATH] [--base PATH]\n  \
+         benchmark list\n  \
+         benchmark profile <name> [--iters N] [--duration SECS]\n  \
+         benchmark help\n\
+         \n\
+         bench     run matching benchmarks (default subcommand)\n  \
+         PATTERN   select benches. Bare token (e.g. \"render\") matches\n            \
+         a group exactly. \"group/name\" matches a group exactly and\n            \
+         does a substring match on the scenario name (e.g.\n            \
+         \"editor/insert\"). \"/name\" filters by name across all\n            \
+         groups. No patterns runs everything. Patterns are OR'd.\n  \
+         --save    write JSON records to PATH\n  \
+         --base    load JSON baseline and print percent deltas\n\
+         \n\
+         list      print every `group/name` and profile path\n\
+         \n\
+         profile   run a named workload in a tight loop (no measurement),\n            \
+         suitable for attaching perf/samply. Default iters: 1000."
     );
-    if has_base {
-        print!(
-            " {:>7} {:>7} {:>7} {:>7}",
-            "dns%", "dcyc%", "dins%", "dbyt%"
-        );
-    }
-    println!();
-    let width = if has_base { 84 + 32 } else { 84 };
-    println!("{}", "-".repeat(width));
 }
 
-fn print_row(r: &BenchRecord, base: Option<&BenchRecord>) {
-    let cells = (r.width as u64) * (r.height as u64);
-    let cells_per_sec = if r.ns > 0.0 {
-        (cells as f64) * 1e9 / r.ns
-    } else {
-        0.0
+fn parse_args() -> Result<Cmd, String> {
+    let mut args = std::env::args().skip(1).peekable();
+
+    let first = args.peek().map(String::as_str);
+    match first {
+        Some("help") | Some("-h") | Some("--help") => return Ok(Cmd::Help),
+        Some("list") => {
+            args.next();
+            if args.next().is_some() {
+                return Err("list takes no arguments".into());
+            }
+            return Ok(Cmd::List);
+        }
+        Some("profile") => {
+            args.next();
+            return parse_profile(args);
+        }
+        Some("bench") => {
+            args.next();
+        }
+        _ => {}
+    }
+
+    // Default: bench
+    let mut patterns = Vec::new();
+    let mut save: Option<PathBuf> = None;
+    let mut base: Option<PathBuf> = None;
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "--save" => {
+                save = Some(PathBuf::from(args.next().ok_or("--save requires a path")?));
+            }
+            "--base" | "--compare" => {
+                base = Some(PathBuf::from(args.next().ok_or("--base requires a path")?));
+            }
+            s if s.starts_with("--") => return Err(format!("unknown flag: {s}")),
+            _ => patterns.push(a),
+        }
+    }
+    Ok(Cmd::Bench {
+        patterns,
+        save,
+        base,
+    })
+}
+
+fn parse_profile(
+    mut args: std::iter::Peekable<impl Iterator<Item = String>>,
+) -> Result<Cmd, String> {
+    let name = args.next().ok_or("profile requires a <name> argument")?;
+    let mut iters: Option<u64> = None;
+    let mut duration: Option<Duration> = None;
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "--iters" => {
+                let v = args.next().ok_or("--iters requires a number")?;
+                iters = Some(v.parse().map_err(|e| format!("--iters: {e}"))?);
+            }
+            "--duration" => {
+                let v = args.next().ok_or("--duration requires seconds")?;
+                let secs: f64 = v.parse().map_err(|e| format!("--duration: {e}"))?;
+                duration = Some(Duration::from_secs_f64(secs));
+            }
+            other => return Err(format!("unknown arg for profile: {other}")),
+        }
+    }
+    if iters.is_some() && duration.is_some() {
+        return Err("pass only one of --iters or --duration".into());
+    }
+    let budget = match (iters, duration) {
+        (_, Some(d)) => profile::Budget::Duration(d),
+        (Some(n), _) => profile::Budget::Iters(n),
+        (None, None) => profile::Budget::Iters(1_000),
     };
-    print!(
-        "{:<8} {:<14} {:>8} {:>9} {:>10} {:>9} {:>6} {:>10.3e}",
-        r.size,
-        r.scenario,
-        r.ns.round() as u64,
-        r.cycles.round() as u64,
-        r.inst.round() as u64,
-        r.branch.round() as u64,
-        r.bytes,
-        cells_per_sec
-    );
-    if let Some(base) = base {
-        let dns = pct(r.ns, base.ns);
-        let dcyc = pct(r.cycles, base.cycles);
-        let dins = pct(r.inst, base.inst);
-        let dbyt = pct(r.bytes as f64, base.bytes as f64);
-        print!(
-            " {:>+6.1}% {:>+6.1}% {:>+6.1}% {:>+6.1}%",
-            dns, dcyc, dins, dbyt
-        );
-    }
-    println!();
+    Ok(Cmd::Profile { name, budget })
 }
 
 fn load_baseline(path: &PathBuf) -> Option<Vec<BenchRecord>> {
@@ -144,64 +142,94 @@ fn load_baseline(path: &PathBuf) -> Option<Vec<BenchRecord>> {
     }
 }
 
-fn main() {
-    let mut save_path: Option<PathBuf> = None;
-    let mut base_path: Option<PathBuf> = None;
-    let mut args = std::env::args().skip(1);
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--save" => save_path = args.next().map(PathBuf::from),
-            "--base" | "--compare" => base_path = args.next().map(PathBuf::from),
-            "--help" | "-h" => {
-                println!(
-                    "usage: benchmark [--save <path>] [--base <path>]\n\
-                     \n  --save <path>   write results as JSON to <path>\n  \
-                     --base <path>   load baseline JSON and show percent deltas"
-                );
-                return;
-            }
-            other => eprintln!("unknown arg: {}", other),
+fn matcher<'a>(patterns: &'a [String]) -> impl Fn(&str, &str) -> bool + 'a {
+    move |group: &str, name: &str| {
+        if patterns.is_empty() {
+            return true;
         }
+        patterns.iter().any(|p| match p.split_once('/') {
+            // `group/name`: exact group match, substring match on name.
+            // `group/`: all of a group. `/name`: name-substring in any group.
+            Some((g, n)) => (g.is_empty() || group == g) && (n.is_empty() || name.contains(n)),
+            // Bare token: exact group match. Use `/token` to filter on
+            // name, or `group/token` for both.
+            None => group == p.as_str(),
+        })
     }
+}
 
-    let baseline = base_path.as_ref().and_then(load_baseline);
+fn run_list() {
+    for (g, n) in render::list() {
+        println!("bench    {g}/{n}");
+    }
+    for (g, n) in editor::list() {
+        println!("bench    {g}/{n}");
+    }
+    for (g, n) in bindings::list() {
+        println!("bench    {g}/{n}");
+    }
+    for name in profile::list() {
+        println!("profile  {name}");
+    }
+}
 
+fn run_bench(patterns: Vec<String>, save: Option<PathBuf>, base: Option<PathBuf>) {
+    let baseline = base.as_ref().and_then(load_baseline);
     let mut bencher = Bencher::new();
     bencher.calibrate();
 
     print_header(baseline.is_some());
 
+    let matches = matcher(&patterns);
     let mut records: Vec<BenchRecord> = Vec::new();
-    for &(size_name, w, h) in SIZES {
-        for scenario in SCENARIOS {
-            let stat = run_scenario(&mut bencher, scenario, w, h);
-            let bytes = measure_bytes(scenario, w, h) as u64;
-            let record = BenchRecord {
-                size: size_name.to_string(),
-                width: w,
-                height: h,
-                scenario: scenario.name.to_string(),
-                ns: f64::from(stat.nanos),
-                cycles: f64::from(stat.cycles),
-                inst: f64::from(stat.inst),
-                branch: f64::from(stat.branch),
-                bytes,
-            };
-            let base = baseline.as_ref().and_then(|b| {
-                b.iter()
-                    .find(|r| r.size == record.size && r.scenario == record.scenario)
-            });
-            print_row(&record, base);
-            records.push(record);
-        }
-        println!();
+
+    render::run_matching(&mut bencher, &matches, &mut records, baseline.as_deref());
+    editor::run_matching(&mut bencher, &matches, &mut records, baseline.as_deref());
+    bindings::run_matching(&mut bencher, &matches, &mut records, baseline.as_deref());
+
+    if records.is_empty() {
+        eprintln!("no benchmarks matched patterns: {:?}", patterns);
     }
 
-    if let Some(path) = save_path {
+    if let Some(path) = save {
         let json = jsony::to_json(&records);
         match std::fs::write(&path, json) {
             Ok(()) => eprintln!("saved {} records to {}", records.len(), path.display()),
-            Err(e) => eprintln!("save failed: {}", e),
+            Err(e) => eprintln!("save failed: {e}"),
         }
+    }
+}
+
+fn run_profile(name: String, budget: profile::Budget) {
+    let Some(path) = profile::find(&name) else {
+        eprintln!("unknown profile path: {name}");
+        eprintln!("available:");
+        for n in profile::list() {
+            eprintln!("  {n}");
+        }
+        std::process::exit(1);
+    };
+    (path.run)(budget);
+}
+
+fn main() {
+    let cmd = match parse_args() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("{e}");
+            eprintln!();
+            print_help();
+            std::process::exit(2);
+        }
+    };
+    match cmd {
+        Cmd::Help => print_help(),
+        Cmd::List => run_list(),
+        Cmd::Bench {
+            patterns,
+            save,
+            base,
+        } => run_bench(patterns, save, base),
+        Cmd::Profile { name, budget } => run_profile(name, budget),
     }
 }
