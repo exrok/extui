@@ -1,0 +1,13 @@
+[package]
+name = "extui-bindings"
+version = "0.1.0"
+edition = "2024"
+authors = ["Thomas Dagenais <exrok@i64.dev>"]
+license = "MIT"
+description = "Modal, layered keybinding router for the extui terminal UI library."
+
+[dependencies]
+extui = { path = "../.." }
+foldhash = "0.2.0"
+hashbrown = "0.16"
+
