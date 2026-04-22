@@ -1,0 +1,47 @@
+# Heading 1
+
+## Heading 2
+
+### Heading 3
+
+A paragraph with *emphasis*, **strong** and `inline code` between words.
+
+Visit [example](https://example.com) and see ![pic](pic.png) inline.
+
+Stray (parens) and a > arrow stay punctuation.
+
+> A blockquote line
+> spanning two lines.
+
+- one
+- two
+- three
+
+1. first
+2. second
+3. third
+
+```rust
+fn main() {
+    let x: i32 = 42;
+    println!("hi {x}");
+}
+```
+
+```c
+int main(void) {
+    char *s = "hello";
+    return 0;
+}
+```
+
+```json
+{"a": 1, "b": [true, null]}
+```
+
+```python
+print("opaque body, no embed")
+```
+
+```text
+last fence has no closer

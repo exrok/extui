@@ -1,0 +1,37 @@
+// A tiny Rust fixture touching every major token kind.
+use std::collections::BTreeMap;
+
+/// Doc comment on a constant.
+pub const GREETING: &str = "hello, world\n";
+
+fn fib(n: u32) -> u64 {
+    match n {
+        0 => 0,
+        1 => 1,
+        _ => fib(n - 1) + fib(n - 2),
+    }
+}
+
+pub fn main() {
+    let mut m: BTreeMap<&'static str, i32> = BTreeMap::new();
+    m.insert("one", 1);
+    m.insert("two", 2);
+
+    let raw = r#"a "quoted" slice"#;
+    let bs = b"bytes";
+    let cs = c"c\0str";
+    let ch: char = '\u{2603}';
+    let hex = 0xDEAD_BEEFu32;
+    let bin = 0b1010_1010;
+    let oct = 0o755;
+    let float = 1.5e-3_f64;
+
+    /* block /* with nesting */ */
+    if hex as i32 + bin + oct == 0 {
+        println!("{raw} {bs:?} {cs:?} {ch} {float}");
+    }
+
+    for i in 0..fib(10) {
+        let _ = i;
+    }
+}

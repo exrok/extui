@@ -1,0 +1,59 @@
+/* Block comment spanning
+ * multiple lines to exercise the scanner across newlines.
+ */
+
+// Line comment with no trailing newline is intentionally at EOF of some fixtures.
+
+int integers[] = {
+    0, 42, 0777, 0xFF, 0xDEADBEEF,
+    0b1010, 0B1101,
+    1u, 2U, 3l, 4L, 5ll, 6LL,
+    7ul, 8Ul, 9uLL, 10ULL, 11Lu, 12llU,
+};
+
+double floats[] = {
+    1.0, 1., .5,
+    1e10, 1.5e-3, 2.0E+2,
+    0x1p3, 0x1.fp3, 0x.5p-2, 0x1.FFp+10,
+    1.0f, 2.5L, 3.14F,
+};
+
+const char *strings[] = {
+    "plain",
+    "with \"escape\"",
+    "path \\ segment",
+    L"wide",
+    u"utf16",
+    U"utf32",
+    u8"utf8",
+};
+
+int chars[] = {
+    'x', '\n', '\\', '\'', '\x41', '\u00AB',
+    L'w', u'c', U'C',
+};
+
+void ops(int a, int b) {
+    a <<= 1;
+    b >>= 2;
+    a += b; a -= b; a *= b; a /= b; a %= b;
+    a &= b; a |= b; a ^= b;
+    int c = a == b;
+    int d = a != b;
+    int e = a && b;
+    int f = a || b;
+    (void)(a++); (void)(++a);
+    (void)(b--); (void)(--b);
+}
+
+void variadic(int n, ...);
+
+int digraphs(void) <%
+    int arr<:3:> = <% 1, 2, 3 %>;
+    return arr<:0:> + arr<:1:> + arr<:2:>;
+%>
+
+#define CAT(a, b) a ## b
+#include "config.h"
+
+/* unterminated string on purpose: "oops */

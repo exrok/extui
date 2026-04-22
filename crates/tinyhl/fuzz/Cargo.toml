@@ -1,0 +1,34 @@
+[package]
+name = "tinyhl-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.tinyhl]
+path = ".."
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "rust_mutations"
+path = "fuzz_targets/rust_mutations.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "debug_artifact"
+path = "src/bin/debug_artifact.rs"
+test = false
+doc = false
+bench = false
+
+[profile.release]
+debug = 1

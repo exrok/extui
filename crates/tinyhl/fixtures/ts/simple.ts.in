@@ -1,0 +1,58 @@
+// A small TypeScript fixture exercising the full kind surface.
+import { readFileSync } from "node:fs";
+
+/**
+ * Block comment introducing the shape.
+ */
+interface Greeting {
+    readonly message: string;
+    count: number;
+    tags?: ReadonlyArray<string>;
+}
+
+type Result<T> = { ok: true; value: T } | { ok: false; error: string };
+
+const GREETINGS: Greeting[] = [
+    { message: "hello, world\n", count: 1, tags: ["intro"] },
+    { message: 'single-quoted', count: 0x2A, tags: null as unknown as string[] },
+];
+
+class Counter {
+    #n: bigint = 0n;
+
+    static readonly DEFAULT_STEP = 1;
+
+    public inc(by: number = Counter.DEFAULT_STEP): bigint {
+        this.#n += BigInt(by);
+        return this.#n;
+    }
+
+    get value(): bigint {
+        return this.#n;
+    }
+}
+
+function format(g: Greeting, c: Counter): string {
+    const pattern = /^(hello|hi)[,!\s]+/i;
+    const stamp = `#${c.value} @ ${Date.now()}`;
+    const prefix = pattern.test(g.message) ? "match" : "miss";
+    return `${prefix}: ${g.message.trimEnd()} x${g.count} ${stamp}`;
+}
+
+const double = (x: number) => x * 2;
+
+export async function main(): Promise<void> {
+    const c = new Counter();
+    for (const g of GREETINGS) {
+        const line = format(g, c);
+        const next = c.inc(2);
+        if (next > 10n) break;
+        console.log(line, next);
+    }
+    const data = 1_000_000 + 0b1010 - 0o755 / 2;
+    const bigger = 0x1p3 ? 1 : 2; // `0x1p3` isn't a TS numeric literal — lexes as 0x1 then p3.
+    const shifted = (data << 2) >>> 1;
+    const negated = !(shifted === 0 || shifted !== null) && (shifted ?? 0) > 0;
+    void negated ?? shifted;
+    await Promise.resolve(bigger);
+}

@@ -1,0 +1,23 @@
+#include <stdio.h>
+
+struct point {
+    int x;
+    int y;
+};
+
+// Compute the Manhattan distance between two points.
+static int distance(const struct point *a, const struct point *b) {
+    int dx = a->x - b->x;
+    int dy = a->y - b->y;
+    if (dx < 0) dx = -dx;
+    if (dy < 0) dy = -dy;
+    return dx + dy;
+}
+
+int main(int argc, char **argv) {
+    struct point origin = { 0, 0 };
+    struct point target = { 3, 4 };
+    const char *label = "distance";
+    printf("%s: %d\n", label, distance(&origin, &target));
+    return 0;
+}
