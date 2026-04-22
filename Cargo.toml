@@ -26,7 +26,13 @@ vt100 = "0.16"
 bracketed-paste = []
 
 [workspace]
-members = ["crates/extui-neovim", "crates/benchmark"]
+members = [
+    "crates/extui-neovim",
+    "crates/tinyhl",
+    "crates/benchmark",
+    "crates/extui-editor",
+    "crates/extui-bindings",
+]
 exclude = []
 
 [profile.release]

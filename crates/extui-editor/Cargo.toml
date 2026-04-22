@@ -1,0 +1,15 @@
+[package]
+name = "extui-editor"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+extui = { path = "../.." }
+extui-bindings = { path = "../extui-bindings" }
+unicode-segmentation = "1.12"
+unicode-width = { version = "0.2", default-features = false }
+
+[dev-dependencies]
+extui-neovim = { path = "../extui-neovim" }
+tinyhl = { path = "../tinyhl" }
+vimspell = "0.1"

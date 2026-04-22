@@ -165,8 +165,11 @@ version = "0.1.0"
 dependencies = [
  "extui",
  "extui-bindings",
+ "extui-neovim",
+ "tinyhl",
  "unicode-segmentation",
  "unicode-width",
+ "vimspell",
 ]
 
 [[package]]
@@ -577,6 +580,15 @@ name = "unicode-width"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4a1a07cc7db3810833284e8d372ccdc6da29741639ecc70c9ec107df0fa6154c"
+
+[[package]]
+name = "vimspell"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "12ddc4f52d5a07236be4fe468256ee5bdbe51a964683fdbca05a8593f0383919"
+dependencies = [
+ "hashbrown",
+]
 
 [[package]]
 name = "vt100"
