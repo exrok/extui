@@ -80,8 +80,8 @@ use crate::{
     display_rect::RenderProperty,
     event::KeyboardEnhancementFlags,
     vt::{
-        BufferWrite, Modifier, MoveCursor, MoveCursorRight, ScrollBufferDown, ScrollBufferUp,
-        ScrollRegion, SetCursorStyle,
+        BufferWrite, Modifier, MoveCursor, MoveCursorRight, MoveCursorUp, ScrollBufferDown,
+        ScrollBufferUp, ScrollRegion, SetCursorStyle,
     },
 };
 
@@ -1762,6 +1762,7 @@ impl Buffer {
         x_offset: u16,
         y_offset: u16,
         blanking: bool,
+        inline: bool,
         palette: &[Vec<u8>],
     ) {
         if self.cells.len() != old.cells.len() {
@@ -1770,7 +1771,7 @@ impl Buffer {
             // that use x_offset/bounded always ensure old and new have matching
             // sizes (they're swapped in-place inside DoubleBuffer), so this path
             // is only reached on resize, which resets diffable to false anyway.
-            self.render(buf, x_offset, y_offset, false, palette);
+            self.render(buf, x_offset, y_offset, false, inline, palette);
             return;
         }
         if self.width == 0 || self.height == 0 {
@@ -1781,8 +1782,37 @@ impl Buffer {
         vt::CLEAR_STYLE.write_to_buffer(buf);
         let mut current_style = Style::DEFAULT;
         let mut old_cells = old.cells.iter();
+        let mut cur_y: u16 = 0;
+        macro_rules! position_to {
+            ($col:expr, $y:expr) => {{
+                let col_v: u16 = $col;
+                let y_v: u16 = $y;
+                if inline {
+                    if y_v > cur_y {
+                        // Reset SGR before any \r\n that may scroll the screen.
+                        // BCE-enabled terminals fill the newly scrolled-in line
+                        // with the active background color, leaking the previous
+                        // row's bg into the next row.
+                        if current_style != Style::DEFAULT {
+                            vt::CLEAR_STYLE.write_to_buffer(buf);
+                            current_style = Style::DEFAULT;
+                        }
+                        for _ in 0..(y_v - cur_y) {
+                            buf.extend_from_slice(b"\r\n");
+                        }
+                        cur_y = y_v;
+                    }
+                    buf.push(b'\r');
+                    if col_v > 0 {
+                        MoveCursorRight(col_v).write_to_buffer(buf);
+                    }
+                } else {
+                    MoveCursor(col_v, y_v + y_offset).write_to_buffer(buf);
+                }
+            }};
+        }
         for (y, row) in self.cells.chunks_exact(self.width as usize).enumerate() {
-            let y = y as u16 + y_offset;
+            let y = y as u16;
             let mut moved = false;
             let mut matching_count = 0;
             let mut new_cells = row.iter();
@@ -1813,7 +1843,7 @@ impl Buffer {
                             if cells_eq(new_k, old_k, new_side, old_side) {
                                 if !moved {
                                     moved = true;
-                                    MoveCursor(x_offset + matching_count, y).write_to_buffer(buf);
+                                    position_to!(x_offset + matching_count, y);
                                     matching_count = 0;
                                 }
                                 if matching_count > 0 {
@@ -1855,7 +1885,7 @@ impl Buffer {
 
                             if !moved {
                                 moved = true;
-                                MoveCursor(x_offset + matching_count, y).write_to_buffer(buf);
+                                position_to!(x_offset + matching_count, y);
                                 matching_count = 0;
                             }
                             if matching_count > 0 {
@@ -1894,7 +1924,7 @@ impl Buffer {
 
                         if !moved {
                             // moved = true;
-                            MoveCursor(x_offset + matching_count, y).write_to_buffer(buf);
+                            position_to!(x_offset + matching_count, y);
                             matching_count = 0;
                         }
                         if matching_count > 0 {
@@ -1923,7 +1953,7 @@ impl Buffer {
 
                 if !moved {
                     moved = true;
-                    MoveCursor(x_offset + matching_count, y).write_to_buffer(buf);
+                    position_to!(x_offset + matching_count, y);
                     matching_count = 0;
                 }
                 if matching_count > 0 {
@@ -1945,6 +1975,13 @@ impl Buffer {
                 }
             }
         }
+        if inline {
+            vt::CLEAR_STYLE.write_to_buffer(buf);
+            let trailing = self.height.saturating_sub(cur_y);
+            for _ in 0..trailing {
+                buf.extend_from_slice(b"\r\n");
+            }
+        }
     }
     fn render(
         &mut self,
@@ -1952,12 +1989,13 @@ impl Buffer {
         x_offset: u16,
         y_offset: u16,
         bounded: bool,
+        inline: bool,
         palette: &[Vec<u8>],
     ) {
         if self.width == 0 || self.height == 0 {
             return;
         }
-        if !bounded {
+        if !bounded && !inline {
             if x_offset == 0 && y_offset == 0 {
                 vt::MOVE_CURSOR_TO_ORIGIN.write_to_buffer(buf);
             } else {
@@ -1965,14 +2003,15 @@ impl Buffer {
             }
         }
         vt::CLEAR_STYLE.write_to_buffer(buf);
-        if !bounded {
+        if !bounded || inline {
             buf.extend_from_slice(vt::CLEAR_BELOW);
         }
 
         let side = &self.side;
         let mut current_style = Style::DEFAULT;
+        let mut cur_y: u16 = 0;
         for (y, row) in self.cells.chunks_exact(self.width as usize).enumerate() {
-            let y = y as u16 + y_offset;
+            let y = y as u16;
             let mut moved = false;
             let mut blank_extension = 0;
             for &cell in row.iter() {
@@ -1982,7 +2021,29 @@ impl Buffer {
                 }
                 if !moved {
                     moved = true;
-                    MoveCursor(x_offset + blank_extension, y).write_to_buffer(buf);
+                    if inline {
+                        if y > cur_y {
+                            // Reset SGR before any \r\n that may scroll the screen.
+                            // BCE-enabled terminals fill the newly scrolled-in
+                            // line with the active background color, leaking the
+                            // previous row's bg into the next row.
+                            if current_style != Style::DEFAULT {
+                                vt::CLEAR_STYLE.write_to_buffer(buf);
+                                current_style = Style::DEFAULT;
+                            }
+                            for _ in 0..(y - cur_y) {
+                                buf.extend_from_slice(b"\r\n");
+                            }
+                            cur_y = y;
+                        }
+                        buf.push(b'\r');
+                        let col = x_offset + blank_extension;
+                        if col > 0 {
+                            MoveCursorRight(col).write_to_buffer(buf);
+                        }
+                    } else {
+                        MoveCursor(x_offset + blank_extension, y + y_offset).write_to_buffer(buf);
+                    }
                     blank_extension = 0;
                 }
                 if blank_extension > 0 {
@@ -2005,7 +2066,13 @@ impl Buffer {
                 }
             }
         }
-        if !bounded {
+        if inline {
+            vt::CLEAR_STYLE.write_to_buffer(buf);
+            let trailing = self.height.saturating_sub(cur_y);
+            for _ in 0..trailing {
+                buf.extend_from_slice(b"\r\n");
+            }
+        } else if !bounded {
             vt::MOVE_CURSOR_TO_ORIGIN.write_to_buffer(buf);
         }
     }
@@ -2692,6 +2759,7 @@ impl DoubleBuffer {
                 self.x_offset,
                 self.y_offset,
                 self.blanking && !self.bounded,
+                false,
                 &self.palette,
             );
         } else {
@@ -2701,6 +2769,7 @@ impl DoubleBuffer {
                 self.x_offset,
                 self.y_offset,
                 self.bounded,
+                false,
                 &self.palette,
             );
             self.diffable = true;
@@ -2787,6 +2856,70 @@ impl DoubleBuffer {
         self.buf.clear();
         size
     }
+
+    /// Renders the current buffer inline using only relative cursor moves
+    /// and writes it to the terminal. The buffer's height controls how many
+    /// rows are painted; resize the buffer between frames to grow or shrink
+    /// the region.
+    ///
+    /// `prev_height` must equal the value returned by the previous call,
+    /// or `0` for the first call. The cursor is rewound that many rows,
+    /// the current frame is painted, and the cursor is left at column 0
+    /// of the row immediately below the painted region.
+    ///
+    /// Cursor invariant: at call time the cursor must sit at column 0 of
+    /// the row immediately below the previous inline region (or at its
+    /// initial position for the first call). The relative-move encoding
+    /// survives terminal scrolling, so painted rows that scroll off the
+    /// top end up in normal terminal scrollback.
+    ///
+    /// After the final inline frame, write any further output directly to
+    /// the terminal — it lands below the painted region (or in scrollback
+    /// if the region itself scrolled).
+    ///
+    /// Mixing this with [`render`](Self::render) on the same buffer
+    /// corrupts diff state. Call [`reset`](Self::reset) before switching
+    /// modes.
+    ///
+    /// # Errors
+    ///
+    /// Propagates any I/O error from writing to the terminal.
+    pub fn render_inline(&mut self, term: &mut Terminal, prev_height: u16) -> std::io::Result<u16> {
+        if prev_height > 0 {
+            MoveCursorUp(prev_height).write_to_buffer(&mut self.buf);
+        }
+        self.buf.push(b'\r');
+
+        self.scroll = 0;
+        self.scroll_region = None;
+        if self.diffable {
+            self.current.render_diff(
+                &mut self.buf,
+                &self.previous,
+                0,
+                0,
+                false,
+                true,
+                &self.palette,
+            );
+        } else {
+            self.current
+                .render(&mut self.buf, 0, 0, false, true, &self.palette);
+            self.diffable = true;
+        }
+
+        let painted = self.current.height;
+
+        std::mem::swap(&mut self.current, &mut self.previous);
+        clear_cells(&mut self.current.cells);
+        self.current.side.clear();
+        self.cursor.invalidate();
+
+        term.write_all(&self.buf)?;
+        self.buf.clear();
+        Ok(painted)
+    }
+
     /// Sets a palette entry containing raw VT escape bytes at the given index.
     ///
     /// Gaps below `index` are filled with empty entries. Use [`Style::palette`]
@@ -3127,6 +3260,107 @@ mod test {
         assert!(
             out.contains("\x1b[?25h"),
             "expected show after reset: {out:?}"
+        );
+    }
+
+    #[test]
+    fn inline_render_emits_no_absolute_cursor_positioning() {
+        let mut db = DoubleBuffer::new(8, 3);
+        db.set_string(0, 0, "row0", Style::DEFAULT);
+        db.set_string(2, 1, "row1", Style::DEFAULT);
+        db.set_string(0, 2, "row2", Style::DEFAULT);
+
+        let mut buf = Vec::new();
+        db.current.render(&mut buf, 0, 0, false, true, &[]);
+        let s = std::str::from_utf8(&buf).unwrap();
+        assert!(
+            !s.contains("\x1b[H"),
+            "inline render must not emit MOVE_CURSOR_TO_ORIGIN: {s:?}"
+        );
+        assert!(
+            !s.contains(";1H") && !s.contains(";2H") && !s.contains(";3H"),
+            "inline render must not emit absolute MoveCursor: {s:?}"
+        );
+        assert!(s.contains("row0"));
+        assert!(s.contains("row1"));
+        assert!(s.contains("row2"));
+        assert!(s.contains("\r\n"), "expected row separator: {s:?}");
+    }
+
+    #[test]
+    fn inline_render_advances_cursor_past_blank_trailing_rows() {
+        let mut db = DoubleBuffer::new(4, 4);
+        db.set_string(0, 0, "hi", Style::DEFAULT);
+
+        let mut buf = Vec::new();
+        db.current.render(&mut buf, 0, 0, false, true, &[]);
+        let nl_count = buf.iter().filter(|&&b| b == b'\n').count();
+        assert_eq!(
+            nl_count, 4,
+            "inline render must end cursor below the region: {buf:?}"
+        );
+    }
+
+    #[test]
+    fn inline_render_diff_skips_unchanged_rows() {
+        let mut db = DoubleBuffer::new(8, 3);
+        db.set_string(0, 0, "row0", Style::DEFAULT);
+        db.set_string(0, 1, "row1", Style::DEFAULT);
+        db.set_string(0, 2, "row2", Style::DEFAULT);
+        let mut buf = Vec::new();
+        db.current.render(&mut buf, 0, 0, false, true, &[]);
+        std::mem::swap(&mut db.current, &mut db.previous);
+        clear_cells(&mut db.current.cells);
+        db.current.side.clear();
+
+        db.set_string(0, 0, "row0", Style::DEFAULT);
+        db.set_string(0, 1, "row1", Style::DEFAULT);
+        db.set_string(0, 2, "row2", Style::DEFAULT);
+        let mut diff_buf = Vec::new();
+        db.current
+            .render_diff(&mut diff_buf, &db.previous, 0, 0, false, true, &[]);
+        let s = std::str::from_utf8(&diff_buf).unwrap();
+        assert!(
+            !s.contains("\x1b[H") && !s.contains(";1H") && !s.contains(";2H"),
+            "inline diff must not emit absolute MoveCursor: {s:?}"
+        );
+        assert!(
+            !s.contains("row0") && !s.contains("row1") && !s.contains("row2"),
+            "inline diff must skip unchanged content: {s:?}"
+        );
+    }
+
+    #[test]
+    fn inline_render_diff_emits_only_changed_cell() {
+        let mut db = DoubleBuffer::new(8, 3);
+        db.set_string(0, 0, "row0", Style::DEFAULT);
+        db.set_string(0, 1, "row1", Style::DEFAULT);
+        db.set_string(0, 2, "row2", Style::DEFAULT);
+        let mut buf = Vec::new();
+        db.current.render(&mut buf, 0, 0, false, true, &[]);
+        std::mem::swap(&mut db.current, &mut db.previous);
+        clear_cells(&mut db.current.cells);
+        db.current.side.clear();
+
+        db.set_string(0, 0, "row0", Style::DEFAULT);
+        db.set_string(0, 1, "ROWX", Style::DEFAULT);
+        db.set_string(0, 2, "row2", Style::DEFAULT);
+        let mut diff_buf = Vec::new();
+        db.current
+            .render_diff(&mut diff_buf, &db.previous, 0, 0, false, true, &[]);
+        let s = std::str::from_utf8(&diff_buf).unwrap();
+        assert!(s.contains("ROWX"), "expected new content: {s:?}");
+        assert!(
+            !s.contains("row0"),
+            "row 0 unchanged, must not appear: {s:?}"
+        );
+        assert!(
+            !s.contains("row2"),
+            "row 2 unchanged, must not appear: {s:?}"
+        );
+        assert!(
+            !s.contains("\x1b[H") && !s.contains(";1H") && !s.contains(";2H") && !s.contains(";3H"),
+            "inline diff must not emit absolute MoveCursor: {s:?}"
         );
     }
 
