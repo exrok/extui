@@ -593,6 +593,32 @@ impl Editor {
         self.dirty = true;
     }
 
+    /// Replaces the bytes in `span` with `text`, leaving the cursor at the
+    /// end of the inserted text.
+    ///
+    /// `span` is interpreted in current buffer coordinates and clamped to the
+    /// buffer length. The edit records an undo checkpoint so it reverts as a
+    /// single unit, and (with tracking enabled) surfaces through
+    /// [`Self::take_tracked_change`] like any other edit. In single-line mode
+    /// line breaks in `text` are stripped.
+    ///
+    /// Intended for host-driven edits outside the key-binding flow, such as
+    /// spell correction or snippet expansion.
+    pub fn replace_range(&mut self, span: Span, text: &str) {
+        let len = self.buf.len() as u32;
+        let offset = span.offset.min(len);
+        let old_len = span.len.min(len - offset);
+        let new = self.normalize_text_for_mode(text).into_owned();
+        let new_end = offset + new.len() as u32;
+        self.checkpoint();
+        self.commit(Edit::replace(offset, old_len, new));
+        let (row, col) = self.buf.offset_to_rowcol(new_end);
+        self.cursor = Cursor { row, col };
+        self.fixup_cursor();
+        self.update_desired_display_col();
+        self.dirty = true;
+    }
+
     /// Maps a buffer byte range to screen rectangles inside `rect`.
     ///
     /// The produced rectangles match the layout used by
@@ -862,20 +888,33 @@ impl Editor {
         }
         if self.effective_wrap() {
             self.horizontal_scroll = 0;
-            let width = rect.w.max(1) as u32;
+            let width = rect.w.max(1);
             let cursor_col = self.cursor_display().1 as u32;
-            let mut visual_row = cursor_col / width;
-            for row in 0..self.cursor.row {
-                visual_row += render::wrapped_line_rows(
+            let mut visual_row = cursor_col / width as u32;
+            let mut total_rows = 0u32;
+            for row in 0..self.buf.line_count() {
+                let rows = render::wrapped_line_rows(
                     self.buf.line(row).as_ref(),
-                    rect.w.max(1),
+                    width,
                     self.tab_settings.tabstop,
                 ) as u32;
+                if row < self.cursor.row {
+                    visual_row += rows;
+                }
+                total_rows += rows;
             }
+            let h = rect.h as u32;
             if visual_row < self.scroll_offset as u32 {
                 self.scroll_offset = visual_row as u16;
-            } else if visual_row >= self.scroll_offset as u32 + rect.h as u32 {
-                self.scroll_offset = (visual_row + 1 - rect.h as u32) as u16;
+            } else if visual_row >= self.scroll_offset as u32 + h {
+                self.scroll_offset = (visual_row + 1 - h) as u16;
+            }
+            // Never leave blank rows below the content while rows are hidden
+            // above. When the viewport has grown (or content shrunk) enough to
+            // show more, pull the scroll back down to the last needed row.
+            let max_scroll = total_rows.saturating_sub(h);
+            if self.scroll_offset as u32 > max_scroll {
+                self.scroll_offset = max_scroll as u16;
             }
             return;
         }
@@ -889,6 +928,10 @@ impl Editor {
                 self.scroll_offset = row as u16;
             } else if row >= scroll + h {
                 self.scroll_offset = (row + 1 - h) as u16;
+            }
+            let max_scroll = self.buf.line_count().saturating_sub(h);
+            if self.scroll_offset as usize > max_scroll {
+                self.scroll_offset = max_scroll as u16;
             }
         }
         let cursor_col = self.cursor_display().1 as u32;
@@ -3211,6 +3254,39 @@ mod tests {
     }
 
     #[test]
+    fn replace_range_swaps_word_and_moves_cursor() {
+        let mut ed = Editor::new();
+        ed.set_lines("teh cat");
+        ed.replace_range(Span::new(0, 3), "the");
+        assert_eq!(ed.text(), "the cat");
+        // Cursor lands one past the inserted text.
+        assert_eq!(ed.cursor_offset(), 3);
+    }
+
+    #[test]
+    fn replace_range_grows_and_reverts_via_undo() {
+        let mut ed = Editor::new();
+        ed.set_lines("teh");
+        // Insert mode lets the cursor rest one past the inserted text, as it
+        // does during host-driven spell correction.
+        feed(&mut ed, &[key_char('i')]);
+        ed.replace_range(Span::new(0, 3), "thumb");
+        assert_eq!(ed.text(), "thumb");
+        assert_eq!(ed.cursor_offset(), 5);
+        feed(&mut ed, &[key_esc()]);
+        feed(&mut ed, &[key_char('u')]);
+        assert_eq!(ed.text(), "teh");
+    }
+
+    #[test]
+    fn replace_range_clamps_out_of_bounds_span() {
+        let mut ed = Editor::new();
+        ed.set_lines("hi");
+        ed.replace_range(Span::new(1, 99), "ello there");
+        assert_eq!(ed.text(), "hello there");
+    }
+
+    #[test]
     fn tab_in_insert_mode_defaults_to_four_spaces() {
         let mut ed = Editor::new();
         feed(
@@ -3548,6 +3624,69 @@ mod tests {
             ed.scroll_offset
         );
         assert_eq!(ed.scroll_offset, 1);
+    }
+
+    #[test]
+    fn grown_viewport_clears_stale_scroll_wrap() {
+        let mut ed = Editor::new();
+        ed.set_wrap(true);
+        ed.resize(4);
+        ed.set_height_bounds(1, 8);
+        // 12 chars over width 4 = 3 visual rows.
+        ed.set_lines("abcdefghijkl");
+        feed(&mut ed, &[key_char('G'), key_char('$')]);
+
+        // A 2-row viewport forces a scroll to keep the cursor visible.
+        let small = Rect {
+            x: 0,
+            y: 0,
+            w: 4,
+            h: 2,
+        };
+        render_rows(&mut ed, small);
+        assert!(ed.scroll_offset > 0, "small viewport should scroll");
+
+        // The host grows the editor to its desired height; all rows now fit, so
+        // the scroll must reset to keep the top row visible.
+        let grown = Rect {
+            x: 0,
+            y: 0,
+            w: 4,
+            h: ed.desired_height(),
+        };
+        let rows = render_rows(&mut ed, grown);
+        assert_eq!(ed.scroll_offset, 0, "grown viewport should reset scroll");
+        assert_eq!(
+            rows,
+            vec!["abcd".to_string(), "efgh".to_string(), "ijkl".to_string()]
+        );
+    }
+
+    #[test]
+    fn grown_viewport_clears_stale_scroll_nowrap() {
+        let mut ed = Editor::new();
+        ed.set_height_bounds(1, 8);
+        ed.set_lines("l0\nl1\nl2\nl3\nl4");
+        feed(&mut ed, &[key_char('G')]);
+
+        let small = Rect {
+            x: 0,
+            y: 0,
+            w: 10,
+            h: 2,
+        };
+        render_rows(&mut ed, small);
+        assert!(ed.scroll_offset > 0, "small viewport should scroll");
+
+        let grown = Rect {
+            x: 0,
+            y: 0,
+            w: 10,
+            h: ed.desired_height(),
+        };
+        let rows = render_rows(&mut ed, grown);
+        assert_eq!(ed.scroll_offset, 0, "grown viewport should reset scroll");
+        assert_eq!(&rows[0], "l0        ");
     }
 
     #[test]

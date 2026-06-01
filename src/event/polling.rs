@@ -345,6 +345,16 @@ pub(super) fn wait_on_fd_inner(
         } else if ret == 0 {
             return Ok(Polled::TimedOut);
         } else {
+            let fd_revents = poll_fds[0].revents;
+            // Stdin readiness is checked before the waker so a steadily-fired
+            // waker cannot starve input. The waker stays pending across a
+            // ReadReady return and surfaces on a subsequent poll.
+            // POLLIN can also be set together with POLLHUP when the peer
+            // closed but buffered data remains — drain first, surface hangup
+            // only once reads have consumed all pending input.
+            if fd_revents & POLLIN != 0 {
+                return Ok(Polled::ReadReady);
+            }
             if let Some(idx) = waker_index
                 && poll_fds[idx].revents != 0
             {
@@ -353,19 +363,60 @@ pub(super) fn wait_on_fd_inner(
                 }
                 return Ok(Polled::Woken);
             }
-
-            let fd_revents = poll_fds[0].revents;
-            if fd_revents != 0 {
-                // POLLIN can be set together with POLLHUP when the peer closed
-                // but buffered data remains — drain first, surface hangup only
-                // once reads have consumed all pending input.
-                if fd_revents & POLLIN != 0 {
-                    return Ok(Polled::ReadReady);
-                }
-                if fd_revents & (POLLHUP | POLLERR) != 0 {
-                    return Err(io::Error::from(io::ErrorKind::BrokenPipe));
-                }
+            if fd_revents & (POLLHUP | POLLERR) != 0 {
+                return Err(io::Error::from(io::ErrorKind::BrokenPipe));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::os::fd::AsFd;
+
+    fn poll_now(reader: &std::io::PipeReader, waker: &Waker) -> Polled {
+        wait_on_fd_inner(
+            Some(reader.as_fd()),
+            Some(waker),
+            Some(Duration::from_millis(50)),
+        )
+        .expect("poll failed")
+    }
+
+    #[test]
+    fn read_ready_takes_priority_over_waker() {
+        let (mut reader, mut writer) = std::io::pipe().unwrap();
+        let waker = Waker::new().unwrap();
+        waker.wake().unwrap();
+        writer.write_all(b"x").unwrap();
+
+        assert_eq!(poll_now(&reader, &waker), Polled::ReadReady);
+        let mut buf = [0u8; 1];
+        reader.read_exact(&mut buf).unwrap();
+
+        assert_eq!(poll_now(&reader, &waker), Polled::Woken);
+
+        assert_eq!(poll_now(&reader, &waker), Polled::TimedOut);
+    }
+
+    #[test]
+    fn waker_returned_when_fd_idle() {
+        let (reader, _writer) = std::io::pipe().unwrap();
+        let waker = Waker::new().unwrap();
+        waker.wake().unwrap();
+
+        assert_eq!(poll_now(&reader, &waker), Polled::Woken);
+        assert_eq!(poll_now(&reader, &waker), Polled::TimedOut);
+    }
+
+    #[test]
+    fn read_ready_returned_when_waker_idle() {
+        let (reader, mut writer) = std::io::pipe().unwrap();
+        let waker = Waker::new().unwrap();
+        writer.write_all(b"x").unwrap();
+
+        assert_eq!(poll_now(&reader, &waker), Polled::ReadReady);
     }
 }

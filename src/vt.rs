@@ -66,7 +66,7 @@
 //!
 //! - [`BELL`] - Ring the terminal bell
 
-use crate::{Color, Rgb, Style, StyleDelta, event::KeyboardEnhancementFlags};
+use crate::{Color, Rgb, Style, StyleDelta, base64, event::KeyboardEnhancementFlags};
 
 // # Safety Rationale for Unsafe Blocks
 //
@@ -465,6 +465,100 @@ pub const DISABLE_LINE_WRAP: &[u8] = b"\x1b[?7l";
 /// Rings the terminal bell. VT sequence `BEL` (0x07).
 pub const BELL: &[u8] = b"\x07";
 
+/// Queries primary device attributes (DA1). VT sequence `ESC[c`.
+pub const QUERY_PRIMARY_DEVICE_ATTRIBUTES: &[u8] = b"\x1b[c";
+
+/// Enables bracketed paste mode. VT sequence `ESC[?2004h`.
+pub const ENABLE_BRACKETED_PASTE: &[u8] = b"\x1b[?2004h";
+/// Disables bracketed paste mode. VT sequence `ESC[?2004l`.
+pub const DISABLE_BRACKETED_PASTE: &[u8] = b"\x1b[?2004l";
+
+/// OSC 52 clipboard selection target.
+#[derive(Clone, Copy, Debug, PartialOrd, Ord, PartialEq, Eq, Hash)]
+pub enum ClipboardSelection {
+    /// The system clipboard (`c`).
+    Clipboard,
+    /// The primary selection (`p`) used by many Unix desktops.
+    Primary,
+}
+
+impl ClipboardSelection {
+    pub(crate) fn osc52_byte(self) -> u8 {
+        match self {
+            ClipboardSelection::Clipboard => b'c',
+            ClipboardSelection::Primary => b'p',
+        }
+    }
+
+    pub(crate) fn from_osc52_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.contains(&b'c') {
+            Some(ClipboardSelection::Clipboard)
+        } else if bytes.contains(&b'p') {
+            Some(ClipboardSelection::Primary)
+        } else {
+            None
+        }
+    }
+}
+
+/// Queries the terminal for clipboard contents using OSC 52.
+///
+/// Most terminals disable clipboard reads by default for security reasons.
+/// Use [`Terminal::osc52_clipboard_read_supported`](crate::Terminal::osc52_clipboard_read_supported)
+/// if you only need to detect whether reads are currently permitted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct QueryClipboard(pub ClipboardSelection);
+
+impl BufferWrite for QueryClipboard {
+    fn write_to_buffer(&self, buffer: &mut Vec<u8>) {
+        buffer.extend_from_slice(b"\x1b]52;");
+        buffer.push(self.0.osc52_byte());
+        buffer.extend_from_slice(b";?\x07");
+    }
+}
+
+/// Writes text to the terminal clipboard using OSC 52.
+///
+/// The text is base64-encoded before being written to the terminal stream.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SetClipboard<'a> {
+    /// Clipboard selection to update.
+    pub selection: ClipboardSelection,
+    /// Text to place on the clipboard.
+    pub text: &'a str,
+}
+
+impl BufferWrite for SetClipboard<'_> {
+    fn write_to_buffer(&self, buffer: &mut Vec<u8>) {
+        buffer.reserve(7 + base64::encoded_len(self.text.len()) + 1);
+        buffer.extend_from_slice(b"\x1b]52;");
+        buffer.push(self.selection.osc52_byte());
+        buffer.push(b';');
+        base64::encode_to_buffer(self.text.as_bytes(), buffer);
+        buffer.push(0x07);
+    }
+}
+
+/// Queries a terminal terminfo capability using XTGETTCAP.
+///
+/// `QueryTerminfoCapability("Ms")` asks the terminal for the clipboard
+/// capability commonly used to advertise OSC 52 support.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct QueryTerminfoCapability<'a>(pub &'a str);
+
+impl BufferWrite for QueryTerminfoCapability<'_> {
+    fn write_to_buffer(&self, buffer: &mut Vec<u8>) {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        buffer.reserve(4 + self.0.len() * 2 + 2);
+        buffer.extend_from_slice(b"\x1bP+q");
+        for &byte in self.0.as_bytes() {
+            buffer.push(HEX[(byte >> 4) as usize]);
+            buffer.push(HEX[(byte & 0x0f) as usize]);
+        }
+        buffer.extend_from_slice(b"\x1b\\");
+    }
+}
+
 /// Inserts `n` blank lines at the cursor position.
 ///
 /// Lines below are shifted down. Uses the VT sequence `ESC[nL`.
@@ -741,6 +835,14 @@ impl BufferWrite for StyleDelta {
 mod tests {
     use super::*;
 
+    struct Bytes(&'static [u8]);
+
+    impl BufferWrite for Bytes {
+        fn write_to_buffer(&self, buffer: &mut Vec<u8>) {
+            buffer.extend_from_slice(self.0);
+        }
+    }
+
     fn run_buffer_write_tests(cases: &[(&dyn BufferWrite, &[u8], &str)]) {
         for (writer, expected, desc) in cases {
             // Test from empty buffer (zero allocation)
@@ -819,6 +921,36 @@ mod tests {
             // ScrollRegion
             (&ScrollRegion(1, 24), b"\x1b[1;24r", "ScrollRegion(1, 24)"),
             (&ScrollRegion::RESET, b"\x1b[r", "ScrollRegion::RESET"),
+            // Queries
+            (
+                &Bytes(QUERY_PRIMARY_DEVICE_ATTRIBUTES),
+                b"\x1b[c",
+                "QUERY_PRIMARY_DEVICE_ATTRIBUTES",
+            ),
+            (
+                &QueryTerminfoCapability("Ms"),
+                b"\x1bP+q4d73\x1b\\",
+                "QueryTerminfoCapability Ms",
+            ),
+            // Clipboard
+            (
+                &QueryClipboard(ClipboardSelection::Clipboard),
+                b"\x1b]52;c;?\x07",
+                "QueryClipboard clipboard",
+            ),
+            (
+                &QueryClipboard(ClipboardSelection::Primary),
+                b"\x1b]52;p;?\x07",
+                "QueryClipboard primary",
+            ),
+            (
+                &SetClipboard {
+                    selection: ClipboardSelection::Clipboard,
+                    text: "Hello World",
+                },
+                b"\x1b]52;c;SGVsbG8gV29ybGQ=\x07",
+                "SetClipboard clipboard",
+            ),
             // Style with fg
             (
                 &Style::DEFAULT.with_fg(crate::AnsiColor(196)),

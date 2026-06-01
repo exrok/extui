@@ -53,6 +53,8 @@ use std::{
 use bitflags::bitflags;
 use std::hash::{Hash, Hasher};
 
+use crate::vt::ClipboardSelection;
+
 pub(crate) mod parse;
 pub mod polling;
 
@@ -89,6 +91,11 @@ pub fn poll(fd: &impl AsFd, timeout: Option<Duration>) -> std::io::Result<Polled
 
 /// Polls a file descriptor for read readiness with a custom waker.
 ///
+/// Read readiness on `fd` is reported in preference to the waker. When both
+/// fire on the same poll, [`Polled::ReadReady`] is returned and the waker
+/// stays pending so it surfaces as [`Polled::Woken`] on the next call. This
+/// prevents a steadily-fired waker from starving reads on `fd`.
+///
 /// Buffered data is drained before hangup is reported: if `POLLIN` and
 /// `POLLHUP` are set together, [`Polled::ReadReady`] is returned and the
 /// hangup surfaces on the next poll once reads have consumed all input.
@@ -99,8 +106,8 @@ pub fn poll(fd: &impl AsFd, timeout: Option<Duration>) -> std::io::Result<Polled
 ///
 /// Returns [`std::io::ErrorKind::BrokenPipe`] when the fd reports `POLLHUP`
 /// or `POLLERR` without `POLLIN`. Callers that loop on the result propagate
-/// this with `?` and exit cleanly instead of spinning on sticky `POLLHUP`;
-/// callers needing a graceful-shutdown branch match on
+/// this with `?` and exit cleanly instead of spinning on sticky `POLLHUP`.
+/// Callers needing a graceful-shutdown branch match on
 /// [`std::io::Error::kind`].
 pub fn poll_with_custom_waker(
     fd: &impl AsFd,
@@ -126,7 +133,39 @@ pub(crate) enum InternalEvent {
     KeyboardEnhancementFlags(KeyboardEnhancementFlags),
     /// Attributes and architectural class of the terminal.
     #[cfg(unix)]
-    PrimaryDeviceAttributes,
+    PrimaryDeviceAttributes(PrimaryDeviceAttributes),
+    /// Terminfo capability returned by XTGETTCAP.
+    TerminfoResponse(TerminfoResponse),
+    /// OSC 52 clipboard contents returned by the terminal.
+    Clipboard(ClipboardContent),
+}
+
+/// Primary device attributes returned by a DA1 terminal response.
+#[derive(Debug, PartialOrd, PartialEq, Hash, Clone, Eq)]
+pub struct PrimaryDeviceAttributes {
+    /// Numeric DA1 parameters from `CSI ? ... c`.
+    pub params: Vec<u16>,
+}
+
+/// Terminfo capability returned by an XTGETTCAP terminal response.
+#[derive(Debug, PartialOrd, PartialEq, Hash, Clone, Eq)]
+pub struct TerminfoResponse {
+    /// Capability name, such as `Ms`.
+    pub capability: String,
+    /// Whether the terminal reported the capability as present.
+    pub found: bool,
+    /// The decoded capability value when present.
+    pub value: Option<String>,
+}
+
+/// Clipboard contents returned by an OSC 52 terminal response.
+#[derive(Debug, PartialOrd, PartialEq, Hash, Clone, Eq)]
+pub struct ClipboardContent {
+    /// The clipboard selection reported by the terminal.
+    pub selection: ClipboardSelection,
+    /// Decoded clipboard text. Invalid UTF-8 is replaced with the Unicode
+    /// replacement character.
+    pub text: String,
 }
 
 bitflags! {

@@ -1,8 +1,13 @@
-use std::os::fd::AsRawFd;
+use std::{collections::VecDeque, os::fd::AsRawFd};
 
-use crate::event::{
-    Event, InternalEvent, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers,
-    KeyboardEnhancementFlags, MouseButton, MouseEvent, MouseEventKind, polling::resize_count,
+use crate::{
+    base64,
+    event::{
+        ClipboardContent, Event, InternalEvent, KeyCode, KeyEvent, KeyEventKind, KeyEventState,
+        KeyModifiers, KeyboardEnhancementFlags, MouseButton, MouseEvent, MouseEventKind,
+        PrimaryDeviceAttributes, TerminfoResponse, polling::resize_count,
+    },
+    vt::ClipboardSelection,
 };
 
 /// Buffered terminal event reader and parser.
@@ -12,6 +17,9 @@ pub struct Events {
     buffer: Vec<u8>,
     read: usize,
     resize_count: u64,
+    clipboard_responses: VecDeque<ClipboardContent>,
+    primary_device_attributes: VecDeque<PrimaryDeviceAttributes>,
+    terminfo_responses: VecDeque<TerminfoResponse>,
 }
 
 impl Default for Events {
@@ -20,6 +28,9 @@ impl Default for Events {
             buffer: Default::default(),
             read: Default::default(),
             resize_count: resize_count(),
+            clipboard_responses: Default::default(),
+            primary_device_attributes: Default::default(),
+            terminfo_responses: Default::default(),
         }
     }
 }
@@ -62,8 +73,18 @@ impl Events {
             match parse_event(remaining, in_raw_mode) {
                 ParseResult::Event { consumed, event } => {
                     self.read += consumed as usize;
-                    if let InternalEvent::Event(event) = event {
-                        return Some(event);
+                    match event {
+                        InternalEvent::Event(event) => return Some(event),
+                        InternalEvent::Clipboard(response) => {
+                            self.clipboard_responses.push_back(response);
+                        }
+                        InternalEvent::PrimaryDeviceAttributes(response) => {
+                            self.primary_device_attributes.push_back(response);
+                        }
+                        InternalEvent::TerminfoResponse(response) => {
+                            self.terminfo_responses.push_back(response);
+                        }
+                        _ => {}
                     }
                 }
                 ParseResult::Incomplete => {
@@ -85,6 +106,138 @@ impl Events {
     pub fn unread_bytes(&self) -> &[u8] {
         &self.buffer[self.read..]
     }
+
+    /// Takes the next buffered OSC 52 clipboard response for `selection`.
+    ///
+    /// This is intended for callers that sent [`QueryClipboard`](crate::vt::QueryClipboard)
+    /// directly. It removes only the matching OSC 52 response from the input
+    /// buffer; unrelated key or mouse input remains available to
+    /// [`Events::next`].
+    pub fn take_clipboard_response(
+        &mut self,
+        selection: ClipboardSelection,
+    ) -> Option<ClipboardContent> {
+        if let Some(index) = self
+            .clipboard_responses
+            .iter()
+            .position(|response| response.selection == selection)
+        {
+            return self.clipboard_responses.remove(index);
+        }
+        self.take_clipboard_response_from_unread(selection)
+    }
+
+    /// Takes the next buffered DA1 response.
+    pub fn take_primary_device_attributes(&mut self) -> Option<PrimaryDeviceAttributes> {
+        if let Some(response) = self.primary_device_attributes.pop_front() {
+            return Some(response);
+        }
+        self.take_primary_device_attributes_from_unread()
+    }
+
+    /// Takes the next buffered XTGETTCAP response for `capability`.
+    pub fn take_terminfo_response(&mut self, capability: &str) -> Option<TerminfoResponse> {
+        if let Some(index) = self
+            .terminfo_responses
+            .iter()
+            .position(|response| response.capability == capability)
+        {
+            return self.terminfo_responses.remove(index);
+        }
+        self.take_terminfo_response_from_unread(capability)
+    }
+
+    fn take_clipboard_response_from_unread(
+        &mut self,
+        selection: ClipboardSelection,
+    ) -> Option<ClipboardContent> {
+        let mut offset = 0usize;
+        loop {
+            let unread = &self.buffer[self.read + offset..];
+            let pos = find_bytes(unread, b"\x1b]52;")?;
+            let start = self.read + offset + pos;
+
+            let parsed = parse_event(&self.buffer[start..], true);
+            match parsed {
+                ParseResult::Event {
+                    consumed,
+                    event: InternalEvent::Clipboard(response),
+                } => {
+                    let consumed = consumed as usize;
+                    if response.selection == selection {
+                        self.buffer.drain(start..start + consumed);
+                        return Some(response);
+                    }
+                    offset = start + consumed - self.read;
+                }
+                ParseResult::Incomplete => return None,
+                ParseResult::Event { consumed, .. } | ParseResult::Error { consumed, .. } => {
+                    offset = start + consumed.max(1) as usize - self.read;
+                }
+            }
+        }
+    }
+
+    fn take_primary_device_attributes_from_unread(&mut self) -> Option<PrimaryDeviceAttributes> {
+        let mut offset = 0usize;
+        loop {
+            let unread = &self.buffer[self.read + offset..];
+            let pos = find_bytes(unread, b"\x1b[?")?;
+            let start = self.read + offset + pos;
+
+            let parsed = parse_event(&self.buffer[start..], true);
+            match parsed {
+                ParseResult::Event {
+                    consumed,
+                    event: InternalEvent::PrimaryDeviceAttributes(response),
+                } => {
+                    self.buffer.drain(start..start + consumed as usize);
+                    return Some(response);
+                }
+                ParseResult::Incomplete => return None,
+                ParseResult::Event { consumed, .. } | ParseResult::Error { consumed, .. } => {
+                    offset = start + consumed.max(1) as usize - self.read;
+                }
+            }
+        }
+    }
+
+    fn take_terminfo_response_from_unread(&mut self, capability: &str) -> Option<TerminfoResponse> {
+        let mut offset = 0usize;
+        loop {
+            let unread = &self.buffer[self.read + offset..];
+            let pos = find_bytes(unread, b"\x1bP")?;
+            let start = self.read + offset + pos;
+
+            let parsed = parse_dcs(&self.buffer[start..]);
+            match parsed {
+                ParseResult::Event {
+                    consumed,
+                    event: InternalEvent::TerminfoResponse(response),
+                } => {
+                    let consumed = consumed as usize;
+                    if response.capability == capability {
+                        self.buffer.drain(start..start + consumed);
+                        return Some(response);
+                    }
+                    offset = start + consumed - self.read;
+                }
+                ParseResult::Incomplete => return None,
+                ParseResult::Event { consumed, .. } | ParseResult::Error { consumed, .. } => {
+                    offset = start + consumed.max(1) as usize - self.read;
+                }
+            }
+        }
+    }
+}
+
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() {
+        return Some(0);
+    }
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
@@ -162,6 +315,8 @@ pub fn parse_event(buffer: &[u8], is_raw: bool) -> ParseResult {
                     }
                 }
                 b'[' => parse_csi(buffer, is_raw),
+                b']' => parse_osc(buffer),
+                b'P' if is_xtgettcap_response_prefix(buffer) => parse_dcs(buffer),
                 b'\x1B' => ParseResult::Event {
                     consumed: 2,
                     event: pressed(KeyCode::Esc),
@@ -342,6 +497,200 @@ pub(crate) fn parse_csi(buffer: &[u8], is_raw: bool) -> ParseResult {
     ParseResult::Event { consumed, event }
 }
 
+fn is_xtgettcap_response_prefix(buffer: &[u8]) -> bool {
+    buffer.starts_with(b"\x1bP1+r") || buffer.starts_with(b"\x1bP0+r")
+}
+
+pub(crate) fn parse_osc(buffer: &[u8]) -> ParseResult {
+    assert!(buffer.starts_with(b"\x1B]")); // ESC ]
+
+    let Some((end, terminator_len)) = find_osc_terminator(buffer) else {
+        return ParseResult::Incomplete;
+    };
+
+    let consumed = (end + terminator_len) as u32;
+    let event_buffer = &buffer[2..end];
+
+    if event_buffer.starts_with(b"52;") {
+        return parse_osc52_clipboard(event_buffer, consumed);
+    }
+
+    ParseResult::Error {
+        consumed,
+        error: ParseError::CouldNotParse,
+    }
+}
+
+pub(crate) fn parse_dcs(buffer: &[u8]) -> ParseResult {
+    assert!(buffer.starts_with(b"\x1B")); // ESC
+    assert!(buffer.get(1) == Some(&b'P'));
+
+    let Some(end) = find_st_terminator(buffer, 2) else {
+        return ParseResult::Incomplete;
+    };
+
+    let consumed = (end + 2) as u32;
+    let event_buffer = &buffer[2..end];
+
+    if event_buffer.starts_with(b"1+r") || event_buffer.starts_with(b"0+r") {
+        return parse_xtgettcap_response(event_buffer, consumed);
+    }
+
+    ParseResult::Error {
+        consumed,
+        error: ParseError::CouldNotParse,
+    }
+}
+
+fn find_osc_terminator(buffer: &[u8]) -> Option<(usize, usize)> {
+    let mut index = 2;
+    while index < buffer.len() {
+        match buffer[index] {
+            b'\x07' => return Some((index, 1)),
+            b'\x1b' if buffer.get(index + 1) == Some(&b'\\') => return Some((index, 2)),
+            _ => index += 1,
+        }
+    }
+    None
+}
+
+fn find_st_terminator(buffer: &[u8], mut index: usize) -> Option<usize> {
+    while index + 1 < buffer.len() {
+        if buffer[index] == b'\x1b' && buffer[index + 1] == b'\\' {
+            return Some(index);
+        }
+        index += 1;
+    }
+    None
+}
+
+fn parse_osc52_clipboard(event_buffer: &[u8], consumed: u32) -> ParseResult {
+    let result: Result<InternalEvent, ParseError> = (|| {
+        let mut split = event_buffer.splitn(3, |byte| *byte == b';');
+        if split.next() != Some(b"52".as_slice()) {
+            return Err(ParseError::CouldNotParse);
+        }
+
+        let selection = split
+            .next()
+            .and_then(ClipboardSelection::from_osc52_bytes)
+            .ok_or(ParseError::CouldNotParse)?;
+        let encoded = split.next().ok_or(ParseError::CouldNotParse)?;
+        let decoded = base64::decode(encoded).map_err(|_| ParseError::CouldNotParse)?;
+        let text = String::from_utf8_lossy(&decoded).to_string();
+
+        Ok(InternalEvent::Clipboard(ClipboardContent {
+            selection,
+            text,
+        }))
+    })();
+
+    match result {
+        Ok(event) => ParseResult::Event { consumed, event },
+        Err(error) => ParseResult::Error { consumed, error },
+    }
+}
+
+fn parse_xtgettcap_response(event_buffer: &[u8], consumed: u32) -> ParseResult {
+    let result: Result<InternalEvent, ParseError> = (|| {
+        let found = match event_buffer.get(..3) {
+            Some(b"1+r") => true,
+            Some(b"0+r") => false,
+            _ => return Err(ParseError::CouldNotParse),
+        };
+        let body = &event_buffer[3..];
+        let (capability_hex, value_hex) = if let Some(eq) = body.iter().position(|b| *b == b'=') {
+            (&body[..eq], Some(&body[eq + 1..]))
+        } else {
+            (body, None)
+        };
+
+        let capability = hex_decode(capability_hex).ok_or(ParseError::CouldNotParse)?;
+        let capability = String::from_utf8_lossy(&capability).to_string();
+        let value = if found {
+            value_hex
+                .map(|hex| hex_decode(hex).ok_or(ParseError::CouldNotParse))
+                .transpose()?
+                .map(|bytes| normalize_terminfo_sequence(&bytes))
+        } else {
+            None
+        };
+
+        Ok(InternalEvent::TerminfoResponse(TerminfoResponse {
+            capability,
+            found,
+            value,
+        }))
+    })();
+
+    match result {
+        Ok(event) => ParseResult::Event { consumed, event },
+        Err(error) => ParseResult::Error { consumed, error },
+    }
+}
+
+fn normalize_terminfo_sequence(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\\' => match chars.peek().copied() {
+                Some('E') => {
+                    chars.next();
+                    out.push('\x1b');
+                }
+                Some('0'..='9') => {
+                    let mut value = 0u32;
+                    for _ in 0..3 {
+                        let Some(digit) = chars.peek().and_then(|c| c.to_digit(10)) else {
+                            break;
+                        };
+                        chars.next();
+                        value = value * 10 + digit;
+                    }
+                    if let Some(ch) = char::from_u32(value) {
+                        out.push(ch);
+                    }
+                }
+                _ => out.push(ch),
+            },
+            '%' if chars.peek().is_some_and(|c| *c == 'p') => {
+                chars.next();
+                if chars.peek().is_some_and(|c| c.is_ascii_digit()) {
+                    chars.next();
+                }
+            }
+            _ => out.push(ch),
+        }
+    }
+
+    out
+}
+
+fn hex_decode(input: &[u8]) -> Option<Vec<u8>> {
+    if !input.len().is_multiple_of(2) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(input.len() / 2);
+    for pair in input.chunks_exact(2) {
+        let hi = hex_value(pair[0])?;
+        let lo = hex_value(pair[1])?;
+        out.push((hi << 4) | lo);
+    }
+    Some(out)
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
 pub(crate) fn next_parsed<T>(iter: &mut dyn Iterator<Item = &str>) -> Result<T, ParseError>
 where
     T: std::str::FromStr,
@@ -410,9 +759,29 @@ fn parse_csi_keyboard_enhancement_flags(event_buffer: &[u8]) -> ParseResult {
 fn parse_csi_primary_device_attributes(event_buffer: &[u8]) -> ParseResult {
     assert!(event_buffer.starts_with(b"\x1B[?"));
     assert!(event_buffer.ends_with(b"c"));
-    ParseResult::Event {
-        consumed: event_buffer.len() as u32,
-        event: InternalEvent::PrimaryDeviceAttributes,
+
+    let consumed = event_buffer.len() as u32;
+    let result: Result<InternalEvent, ParseError> = (|| {
+        let body = std::str::from_utf8(&event_buffer[3..event_buffer.len() - 1])
+            .map_err(|_| ParseError::InvalidUtf8)?;
+        let mut params = Vec::new();
+        if !body.is_empty() {
+            for param in body.split(';') {
+                params.push(
+                    param
+                        .parse::<u16>()
+                        .map_err(|_| ParseError::InvalidNumber)?,
+                );
+            }
+        }
+        Ok(InternalEvent::PrimaryDeviceAttributes(
+            PrimaryDeviceAttributes { params },
+        ))
+    })();
+
+    match result {
+        Ok(event) => ParseResult::Event { consumed, event },
+        Err(error) => ParseResult::Error { consumed, error },
     }
 }
 
@@ -1129,6 +1498,19 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_csi_primary_device_attributes() {
+        assert_eq!(
+            parse_event(b"\x1B[?61;22;52c", false),
+            ParseResult::Event {
+                consumed: 12,
+                event: InternalEvent::PrimaryDeviceAttributes(PrimaryDeviceAttributes {
+                    params: vec![61, 22, 52],
+                })
+            },
+        );
+    }
+
+    #[test]
     fn test_parse_csi() {
         assert_eq!(
             parse_csi(b"\x1B[D", false),
@@ -1223,6 +1605,105 @@ mod tests {
                 event: InternalEvent::Event(Event::Paste("o\x1B[2D".to_string()))
             }
         );
+    }
+
+    #[test]
+    fn test_parse_osc52_clipboard_response() {
+        let input = b"\x1B]52;c;SGVsbG8gV29ybGQ=\x07";
+        assert_eq!(
+            parse_event(input, false),
+            ParseResult::Event {
+                consumed: input.len() as u32,
+                event: InternalEvent::Clipboard(ClipboardContent {
+                    selection: ClipboardSelection::Clipboard,
+                    text: "Hello World".to_string(),
+                })
+            }
+        );
+
+        let input = b"\x1B]52;p;SGk=\x1B\\";
+        assert_eq!(
+            parse_event(input, false),
+            ParseResult::Event {
+                consumed: input.len() as u32,
+                event: InternalEvent::Clipboard(ClipboardContent {
+                    selection: ClipboardSelection::Primary,
+                    text: "Hi".to_string(),
+                })
+            }
+        );
+
+        assert_eq!(
+            parse_event(b"\x1B]52;c;SGk=", false),
+            ParseResult::Incomplete
+        );
+    }
+
+    #[test]
+    fn take_clipboard_response_preserves_other_input() {
+        let mut events = Events::default();
+        events.buffer = b"a\x1B]52;c;SGk=\x07b".to_vec();
+
+        let response = events
+            .take_clipboard_response(ClipboardSelection::Clipboard)
+            .expect("clipboard response");
+        assert_eq!(
+            response,
+            ClipboardContent {
+                selection: ClipboardSelection::Clipboard,
+                text: "Hi".to_string(),
+            }
+        );
+        assert_eq!(events.unread_bytes(), b"ab");
+    }
+
+    #[test]
+    fn test_parse_xtgettcap_response() {
+        let input = b"\x1BP1+r4d73=1b5d35323b3b1b5c\x1B\\";
+        assert_eq!(
+            parse_dcs(input),
+            ParseResult::Event {
+                consumed: input.len() as u32,
+                event: InternalEvent::TerminfoResponse(TerminfoResponse {
+                    capability: "Ms".to_string(),
+                    found: true,
+                    value: Some("\x1b]52;;\x1b\\".to_string()),
+                })
+            }
+        );
+
+        let input = b"\x1BP0+r4d73\x1B\\";
+        assert_eq!(
+            parse_dcs(input),
+            ParseResult::Event {
+                consumed: input.len() as u32,
+                event: InternalEvent::TerminfoResponse(TerminfoResponse {
+                    capability: "Ms".to_string(),
+                    found: false,
+                    value: None,
+                })
+            }
+        );
+    }
+
+    #[test]
+    fn take_terminal_probe_responses_preserves_other_input() {
+        let mut events = Events::default();
+        events.buffer = b"a\x1B[?61;22;52cb\x1BP1+r4d73=1b5d35323b3b1b5c\x1B\\c".to_vec();
+
+        let attrs = events
+            .take_primary_device_attributes()
+            .expect("primary device attributes");
+        assert_eq!(attrs.params, vec![61, 22, 52]);
+        assert_eq!(
+            events.take_terminfo_response("Ms"),
+            Some(TerminfoResponse {
+                capability: "Ms".to_string(),
+                found: true,
+                value: Some("\x1b]52;;\x1b\\".to_string()),
+            })
+        );
+        assert_eq!(events.unread_bytes(), b"abc");
     }
 
     #[test]

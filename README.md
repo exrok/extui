@@ -67,6 +67,8 @@ fn main() -> std::io::Result<()> {
                     last_key = Some(key);
                 }
                 Event::Mouse(_mouse_event) => {}
+                #[cfg(feature = "bracketed-paste")]
+                Event::Paste(_) => {}
                 Event::Resized => {
                     let (new_w, new_h) = term.size()?;
                     buf.resize(new_w, new_h);

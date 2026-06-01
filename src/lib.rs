@@ -66,7 +66,9 @@
 //! # Ok::<(), std::io::Error>(())
 //! ```
 
+mod base64;
 mod display_rect;
+mod features;
 use std::{
     io::{IsTerminal, Write},
     mem::ManuallyDrop,
@@ -92,6 +94,7 @@ mod sys;
 pub mod vt;
 pub mod widget;
 pub use display_rect::{Ellipsis, HAlign, RenderProperties, VAlign};
+pub use features::{DEFAULT_TERMINAL_FEATURE_QUERY_TIMEOUT, TerminalFeatures};
 
 /// Writes multiple VT escape sequences to a byte buffer.
 ///
@@ -2226,7 +2229,7 @@ bitflags::bitflags! {
     /// Configuration flags for terminal mode and capabilities.
     ///
     /// Controls raw mode, alternate screen, mouse capture, cursor visibility,
-    /// and extended keyboard input.
+    /// extended keyboard input, and bracketed paste mode.
     #[derive(Debug, PartialOrd, PartialEq, Eq, Clone, Copy, Hash)]
     pub struct TerminalFlags: u8 {
         /// Enables raw mode (disables line buffering and echo).
@@ -2239,6 +2242,12 @@ bitflags::bitflags! {
         const HIDE_CURSOR = 0b0000_1000;
         /// Enables extended keyboard input (Kitty protocol).
         const EXTENDED_KEYBOARD_INPUTS = 0b0001_0000;
+        /// Enables bracketed paste mode.
+        ///
+        /// Pasted text is wrapped in `ESC[200~` and `ESC[201~`. The
+        /// corresponding [`Event::Paste`](crate::event::Event::Paste) is only
+        /// available when the `bracketed-paste` crate feature is enabled.
+        const BRACKETED_PASTE = 0b0010_0000;
     }
 }
 
@@ -2282,6 +2291,9 @@ fn write_enable_terminal_flags(
     if flags.contains(TerminalFlags::ALT_SCREEN) {
         buffer.extend_from_slice(vt::ENABLE_ALT_SCREEN);
     }
+    if flags.contains(TerminalFlags::BRACKETED_PASTE) {
+        buffer.extend_from_slice(vt::ENABLE_BRACKETED_PASTE);
+    }
     if flags.contains(TerminalFlags::EXTENDED_KEYBOARD_INPUTS) {
         (KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
             | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS)
@@ -2306,6 +2318,9 @@ fn write_disable_terminal_flags(
     }
     if flags.contains(TerminalFlags::ALT_SCREEN) {
         buffer.extend_from_slice(vt::DISABLE_ALT_SCREEN);
+    }
+    if flags.contains(TerminalFlags::BRACKETED_PASTE) {
+        buffer.extend_from_slice(vt::DISABLE_BRACKETED_PASTE);
     }
     if flags.contains(TerminalFlags::EXTENDED_KEYBOARD_INPUTS) {
         buffer.extend_from_slice(vt::POP_KEYBOARD_ENABLEMENT);
