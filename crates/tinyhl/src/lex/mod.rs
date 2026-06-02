@@ -6,6 +6,7 @@
 
 pub(crate) mod byteclass;
 pub(crate) mod c;
+pub(crate) mod cpp;
 pub(crate) mod css;
 pub(crate) mod csv;
 pub(crate) mod go;

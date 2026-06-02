@@ -15,6 +15,11 @@ fn load_c(name: &str) -> String {
     std::fs::read_to_string(path).unwrap_or_else(|e| panic!("fixture {name}: {e}"))
 }
 
+fn load_cpp(name: &str) -> String {
+    let path = format!("{}/fixtures/cpp/{name}", env!("CARGO_MANIFEST_DIR"));
+    std::fs::read_to_string(path).unwrap_or_else(|e| panic!("fixture {name}: {e}"))
+}
+
 fn load_go(name: &str) -> String {
     let path = format!("{}/fixtures/go/{name}", env!("CARGO_MANIFEST_DIR"));
     std::fs::read_to_string(path).unwrap_or_else(|e| panic!("fixture {name}: {e}"))
@@ -226,6 +231,57 @@ fn c_fixtures_exercise_expected_kinds() {
         assert!(
             seen.contains(&required),
             "c fixtures should exercise kind {required}"
+        );
+    }
+}
+
+#[test]
+fn simple_cpp_coverage_and_tags() {
+    let input = load_cpp("simple.cpp.in");
+    let tokens = tokens_of(Language::Cpp, &input);
+
+    let mut pos = 0u32;
+    for t in &tokens {
+        assert_eq!(t.span.offset, pos, "gap before {pos}");
+        pos += t.span.len;
+        assert_eq!(t.lang_tag(), Language::Cpp.tag());
+    }
+    assert_eq!(pos as usize, input.len());
+}
+
+#[test]
+fn cpp_fixture_exercises_expected_kinds() {
+    use tinyhl::kind as kinds;
+
+    let input = load_cpp("simple.cpp.in");
+    let mut seen = std::collections::HashSet::new();
+    for t in tokens_of(Language::Cpp, &input) {
+        seen.insert(t.local_kind());
+    }
+    for required in [
+        kinds::WHITESPACE,
+        kinds::OPEN_BRACE,
+        kinds::CLOSE_BRACE,
+        kinds::OPEN_PAREN,
+        kinds::CLOSE_PAREN,
+        kinds::OPEN_BRACKET,
+        kinds::CLOSE_BRACKET,
+        kinds::SEMI,
+        kinds::COLON,
+        kinds::STRING,
+        kinds::CHAR,
+        kinds::NUMBER,
+        kinds::KEYWORD,
+        kinds::IDENT,
+        kinds::COMMENT,
+        kinds::COLON_COLON,
+        kinds::DOT_STAR,
+        kinds::ARROW_STAR,
+        kinds::SPACESHIP,
+    ] {
+        assert!(
+            seen.contains(&required),
+            "cpp fixture should exercise kind {required}"
         );
     }
 }
@@ -498,6 +554,18 @@ fn markdown_embed_dispatches_to_inner_languages() {
     assert!(
         nested_langs.contains(&Language::Go.tag()),
         "go fence should embed"
+    );
+}
+
+#[test]
+fn markdown_cpp_fence_embeds() {
+    let source = "```cpp\nnamespace demo { auto n = 1'000; }\n```\n";
+    let tokens = tokens_of(Language::Markdown, source);
+    assert!(
+        tokens
+            .iter()
+            .any(|t| t.nest == 1 && t.lang_tag() == Language::Cpp.tag()),
+        "cpp fence should embed"
     );
 }
 

@@ -6,8 +6,8 @@
 //! just like [`TokenTable`].
 //!
 //! Classification is a "good enough" local analysis. It does not parse,
-//! resolve names, or consult types. Rust, TypeScript, and C have tailored
-//! analyzers. Other languages emit no semantic tokens.
+//! resolve names, or consult types. Rust, TypeScript, C/C++, and Python have
+//! tailored analyzers. Other languages emit no semantic tokens.
 
 use crate::kind;
 use crate::source::Source;
@@ -87,7 +87,7 @@ impl StateSnapshot {
         match lang {
             Language::Rust => Self::Rust(RustState::default()),
             Language::Ts | Language::Tsx => Self::Ts(TsState::default()),
-            Language::C => Self::C(CState::default()),
+            Language::C | Language::Cpp => Self::C(CState::default()),
             Language::Python => Self::Py(PyState::default()),
             _ => Self::None,
         }
@@ -554,7 +554,7 @@ fn is_ident(token: Token, language: Language) -> bool {
     match language {
         Language::Rust => kind_local(token.kind) == kind::IDENT,
         Language::Ts | Language::Tsx => kind_local(token.kind) == kind::IDENT,
-        Language::C => kind_local(token.kind) == kind::IDENT,
+        Language::C | Language::Cpp => kind_local(token.kind) == kind::IDENT,
         Language::Python => kind_local(token.kind) == kind::IDENT,
         _ => false,
     }
@@ -569,7 +569,9 @@ fn is_trivia(token: Token) -> bool {
         Language::Ts | Language::Tsx => {
             matches!(kind_local(token.kind), kind::WHITESPACE | kind::COMMENT)
         }
-        Language::C => matches!(kind_local(token.kind), kind::WHITESPACE | kind::COMMENT),
+        Language::C | Language::Cpp => {
+            matches!(kind_local(token.kind), kind::WHITESPACE | kind::COMMENT)
+        }
         Language::Python => matches!(kind_local(token.kind), kind::WHITESPACE | kind::COMMENT),
         _ => false,
     }

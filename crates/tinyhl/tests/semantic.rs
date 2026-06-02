@@ -149,6 +149,28 @@ int main(void) {
 }
 
 #[test]
+fn cpp_reuses_c_semantic_categories() {
+    let src = r#"
+namespace demo {
+struct point {
+    int x;
+    int y;
+};
+
+static int distance(struct point *a, struct point *b) {
+    return a->x + b->y;
+}
+}
+"#;
+    let pairs = semantic_pairs(Language::Cpp, src);
+    assert_has(&pairs, "point", SemanticKind::TypeDefinition);
+    assert_has(&pairs, "x", SemanticKind::FieldDefinition);
+    assert_has(&pairs, "distance", SemanticKind::FunctionDefinition);
+    assert_has(&pairs, "a", SemanticKind::Parameter);
+    assert_has(&pairs, "x", SemanticKind::Field);
+}
+
+#[test]
 fn python_semantic_categories() {
     let src = r#"
 import os as system

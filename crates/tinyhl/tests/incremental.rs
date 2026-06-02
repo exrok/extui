@@ -301,6 +301,61 @@ fn c_kr_fixture_sweep() {
 }
 
 #[test]
+fn cpp_insert_sweep() {
+    let source = "namespace n { struct P { int x; }; auto s = R\"tag(a)tag\"; auto n = 1'000; }";
+    for off in 0..=source.len() {
+        for ins in [
+            "x", "9", "\"", " ", "{", "/", "*", "'", "#", "\\", "0x", "R", ":", "<",
+        ] {
+            assert_mutate_matches_lang(Language::Cpp, source, Span::new(off as u32, 0), ins);
+        }
+    }
+}
+
+#[test]
+fn cpp_delete_sweep() {
+    let source = "namespace n { struct P { int x; }; auto s = R\"tag(a)tag\"; auto n = 1'000; }";
+    for off in 0..source.len() {
+        assert_mutate_matches_lang(Language::Cpp, source, Span::new(off as u32, 1), "");
+    }
+}
+
+#[test]
+fn cpp_replace_sweep() {
+    let source = "auto n = 0xFF'AAu; auto cmp = a <=> b; auto m = obj.*ptr + p->*q;";
+    for off in 0..source.len() {
+        for rep in ["x", "/", "*", "\"", "'", "#", "0", ".", ":", "<", "R"] {
+            assert_mutate_matches_lang(Language::Cpp, source, Span::new(off as u32, 1), rep);
+        }
+    }
+}
+
+#[test]
+fn cpp_raw_string_sweep() {
+    let source = "auto s = R\"tag(line 1\nline \"/* two */\"\n)tag\";\nauto t = 42;\n";
+    for off in 0..=source.len() {
+        for ins in ["x", "\n", "\\", "\"", " ", "/*", ")", "tag"] {
+            assert_mutate_matches_lang(Language::Cpp, source, Span::new(off as u32, 0), ins);
+        }
+    }
+    for off in 0..source.len() {
+        assert_mutate_matches_lang(Language::Cpp, source, Span::new(off as u32, 1), "");
+    }
+}
+
+#[test]
+fn cpp_fixture_sweep_over_chunks() {
+    let path = format!("{}/fixtures/cpp/simple.cpp.in", env!("CARGO_MANIFEST_DIR"));
+    let source = std::fs::read_to_string(&path).unwrap();
+    let step = (source.len() / 96).max(1);
+    for off in (0..source.len()).step_by(step) {
+        for rep in ["x", " ", "\"", "/*", "//", "0x", "R\"", "::", "<=>"] {
+            assert_mutate_matches_lang(Language::Cpp, &source, Span::new(off as u32, 0), rep);
+        }
+    }
+}
+
+#[test]
 fn go_insert_sweep() {
     let source =
         "package main\nfunc main() { ch := make(chan int); go func(){ ch <- 1 }(); _ = <-ch }\n";

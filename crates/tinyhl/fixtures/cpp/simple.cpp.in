@@ -1,0 +1,34 @@
+#include <compare>
+#include <string>
+
+namespace demo {
+struct Point {
+    int x;
+    int y;
+
+    auto distance(const Point& other) const -> int {
+        auto delta = [this, &other](int Point::* member) {
+            return this->*member - other.*member;
+        };
+        return delta(&Point::x) + delta(&Point::y);
+    }
+};
+
+template <typename T>
+concept Sized = requires(T value) { value.size(); };
+
+class Label final {
+public:
+    explicit Label(std::string text) : text_(std::move(text)) {}
+    std::strong_ordering operator<=>(const Label&) const = default;
+
+private:
+    std::string text_;
+};
+
+const char *raw = R"cpp(line "one"
+line /* two */)cpp";
+auto escaped = u8"caf\xC3\xA9";
+char newline = '\n';
+auto count = 1'000 + 0xFF'AAu;
+} // namespace demo

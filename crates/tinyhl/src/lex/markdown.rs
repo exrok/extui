@@ -577,6 +577,7 @@ fn info_to_language(
     match &buf[..len] {
         b"rust" | b"rs" => Some(Language::Rust),
         b"c" => Some(Language::C),
+        b"cpp" | b"c++" | b"cc" | b"cxx" | b"hpp" | b"hxx" => Some(Language::Cpp),
         b"csv" => Some(Language::Csv),
         b"json" => Some(Language::Json),
         b"xml" => Some(Language::Xml),

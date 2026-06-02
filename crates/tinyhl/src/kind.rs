@@ -195,7 +195,7 @@ pub const AT_EQ: u16 = 146;
 /// `&^=` (Go bit-clear assignment).
 pub const AMP_CARET_EQ: u16 = 147;
 
-// C-specific punctuation / digraphs.
+// C-family punctuation / digraphs.
 
 /// `##` preprocessor token-paste.
 pub const HASH_HASH: u16 = 160;
@@ -207,6 +207,14 @@ pub const COLON_GT: u16 = 162;
 pub const LT_PERCENT: u16 = 163;
 /// `%>` digraph for `}`.
 pub const PERCENT_GT: u16 = 164;
+/// `::` C++ scope-resolution operator.
+pub const COLON_COLON: u16 = 165;
+/// `.*` C++ pointer-to-member operator.
+pub const DOT_STAR: u16 = 166;
+/// `->*` C++ pointer-to-member operator.
+pub const ARROW_STAR: u16 = 167;
+/// `<=>` C++ three-way comparison operator.
+pub const SPACESHIP: u16 = 168;
 
 // Plain text / Markdown-specific structure.
 

@@ -114,6 +114,29 @@ fn c_semantic_incremental_matches_fresh() {
 }
 
 #[test]
+fn cpp_semantic_incremental_matches_fresh() {
+    let source = "namespace demo { struct point { int x; int y; }; static int distance(struct point *a, struct point *b) { return a->x + b->y; } }";
+    for (off, len, rep) in [
+        (0usize, 0usize, "inline "),
+        (24, 5, "coord"),
+        (59, 8, "metric"),
+        (85, 1, "lhs"),
+        (
+            source.len(),
+            0,
+            " int main() { struct point p; return distance(&p, &p); }",
+        ),
+    ] {
+        assert_incremental_semantics(
+            Language::Cpp,
+            source,
+            Span::new(off as u32, len as u32),
+            rep,
+        );
+    }
+}
+
+#[test]
 fn python_semantic_incremental_matches_fresh() {
     let source = "class Point:\n    def __init__(self, x):\n        self.x = x\n\n    def norm(self) -> float:\n        return self.x\n\ndef make(scale):\n    p = Point(1)\n    return p.norm()\n\nresult = make(2)\nprint(result)\n";
     let init = source.find("__init__").unwrap();

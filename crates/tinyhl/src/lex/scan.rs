@@ -207,6 +207,61 @@ pub fn scan_c_char(view: &mut SourceView<'_>, cursor: u32) -> ScanResult {
     scan_c_quoted(view, cursor, b'\'')
 }
 
+/// Scans a C++ raw string literal starting at `cursor`, which must point at
+/// the `R` in `R"delimiter(raw)delimiter"`.
+///
+/// The delimiter is stored in a fixed 16-byte buffer, matching the language
+/// limit. Delimiter validation is intentionally simple: whitespace, parens,
+/// backslash, and control bytes terminate with an error. The scanner returns
+/// an error at end-of-source if no matching `)delimiter"` is found.
+pub fn scan_cxx_raw_string(view: &mut SourceView<'_>, cursor: u32) -> ScanResult {
+    if view.byte_at(cursor) != Some(b'R') || view.byte_at(cursor + 1) != Some(b'"') {
+        return ScanResult::err(cursor + 1);
+    }
+
+    let mut delim = [0u8; 16];
+    let mut delim_len = 0usize;
+    let mut p = cursor + 2;
+    loop {
+        match view.byte_at(p) {
+            Some(b'(') => {
+                p += 1;
+                break;
+            }
+            Some(b) if is_raw_delim_byte(b) && delim_len < delim.len() => {
+                delim[delim_len] = b;
+                delim_len += 1;
+                p += 1;
+            }
+            Some(_) => return ScanResult::err(p + 1),
+            None => return ScanResult::err(p),
+        }
+    }
+
+    loop {
+        match view.byte_at(p) {
+            Some(b')') if raw_close_matches(view, p + 1, &delim[..delim_len]) => {
+                return ScanResult::ok(p + 1 + delim_len as u32 + 1);
+            }
+            Some(_) => p += 1,
+            None => return ScanResult::err(p),
+        }
+    }
+}
+
+fn is_raw_delim_byte(b: u8) -> bool {
+    b > b' ' && b != b'(' && b != b')' && b != b'\\'
+}
+
+fn raw_close_matches(view: &mut SourceView<'_>, cursor: u32, delim: &[u8]) -> bool {
+    for (i, &b) in delim.iter().enumerate() {
+        if view.byte_at(cursor + i as u32) != Some(b) {
+            return false;
+        }
+    }
+    view.byte_at(cursor + delim.len() as u32) == Some(b'"')
+}
+
 fn scan_c_quoted(view: &mut SourceView<'_>, cursor: u32, quote: u8) -> ScanResult {
     let mut cursor = cursor + 1;
     loop {
@@ -335,24 +390,39 @@ pub fn scan_block_comment(view: &mut SourceView<'_>, cursor: u32) -> ScanResult 
 /// The caller must dispatch here only when the first byte is an ASCII digit,
 /// or a `.` followed by an ASCII digit (for `.5`-style decimals).
 pub fn scan_c_number(view: &mut SourceView<'_>, cursor: u32) -> ScanResult {
+    scan_c_family_number(view, cursor, false)
+}
+
+/// Scans a C++ numeric literal starting at `cursor`.
+///
+/// This is the C scanner plus C++ digit separators (`'`) in the digit runs.
+/// Separator placement is accepted leniently so malformed literals still stay
+/// local to one numeric token instead of turning the separator into a broken
+/// character literal.
+pub fn scan_cxx_number(view: &mut SourceView<'_>, cursor: u32) -> ScanResult {
+    scan_c_family_number(view, cursor, true)
+}
+
+fn scan_c_family_number(view: &mut SourceView<'_>, cursor: u32, allow_sep: bool) -> ScanResult {
     if view.byte_at(cursor) == Some(b'0') {
         match view.byte_at(cursor + 1) {
-            Some(b'x') | Some(b'X') => return scan_c_hex_number(view, cursor + 2),
-            Some(b'b') | Some(b'B') => return scan_c_binary_number(view, cursor + 2),
+            Some(b'x') | Some(b'X') => return scan_c_hex_number(view, cursor + 2, allow_sep),
+            Some(b'b') | Some(b'B') => return scan_c_binary_number(view, cursor + 2, allow_sep),
             _ => {}
         }
     }
-    scan_c_decimal_number(view, cursor)
+    scan_c_decimal_number(view, cursor, allow_sep)
 }
 
-fn scan_c_hex_number(view: &mut SourceView<'_>, after_prefix: u32) -> ScanResult {
-    let end_int = scan_hex_digits(view, after_prefix);
-    let had_int_digits = end_int > after_prefix;
+fn scan_c_hex_number(view: &mut SourceView<'_>, after_prefix: u32, allow_sep: bool) -> ScanResult {
+    let (end_int, had_int_digits) =
+        scan_radix_digits_with_sep(view, after_prefix, byteclass::is_hex_digit, allow_sep);
 
     let (body_end, saw_dot, had_frac_digits) = if view.byte_at(end_int) == Some(b'.') {
         let frac_start = end_int + 1;
-        let end_frac = scan_hex_digits(view, frac_start);
-        (end_frac, true, end_frac > frac_start)
+        let (end_frac, had_frac_digits) =
+            scan_radix_digits_with_sep(view, frac_start, byteclass::is_hex_digit, allow_sep);
+        (end_frac, true, had_frac_digits)
     } else {
         (end_int, false, false)
     };
@@ -367,9 +437,10 @@ fn scan_c_hex_number(view: &mut SourceView<'_>, after_prefix: u32) -> ScanResult
             if matches!(view.byte_at(end), Some(b'+') | Some(b'-')) {
                 end += 1;
             }
-            let after_exp = end;
-            end = scan_digits(view, end);
-            if end == after_exp {
+            let (exp_end, had_exp_digits) =
+                scan_radix_digits_with_sep(view, end, byteclass::is_digit, allow_sep);
+            end = exp_end;
+            if !had_exp_digits {
                 return ScanResult::err(end);
             }
             ScanResult::ok(scan_float_suffix(view, end))
@@ -383,26 +454,32 @@ fn scan_c_hex_number(view: &mut SourceView<'_>, after_prefix: u32) -> ScanResult
     }
 }
 
-fn scan_c_binary_number(view: &mut SourceView<'_>, after_prefix: u32) -> ScanResult {
-    let end_digits = scan_binary_digits(view, after_prefix);
-    if end_digits == after_prefix {
+fn scan_c_binary_number(
+    view: &mut SourceView<'_>,
+    after_prefix: u32,
+    allow_sep: bool,
+) -> ScanResult {
+    let (end_digits, had_digits) =
+        scan_radix_digits_with_sep(view, after_prefix, is_binary_digit, allow_sep);
+    if !had_digits {
         return ScanResult::err(end_digits);
     }
     ScanResult::ok(scan_int_suffix(view, end_digits))
 }
 
-fn scan_c_decimal_number(view: &mut SourceView<'_>, cursor: u32) -> ScanResult {
-    let mut end = scan_digits(view, cursor);
-    let had_int_digits = end > cursor;
+fn scan_c_decimal_number(view: &mut SourceView<'_>, cursor: u32, allow_sep: bool) -> ScanResult {
+    let (mut end, had_int_digits) =
+        scan_radix_digits_with_sep(view, cursor, byteclass::is_digit, allow_sep);
     let mut is_float = false;
     let mut had_frac_digits = false;
 
     if view.byte_at(end) == Some(b'.') {
         end += 1;
         is_float = true;
-        let before_frac = end;
-        end = scan_digits(view, end);
-        had_frac_digits = end > before_frac;
+        let (frac_end, had_frac) =
+            scan_radix_digits_with_sep(view, end, byteclass::is_digit, allow_sep);
+        end = frac_end;
+        had_frac_digits = had_frac;
     }
 
     if !had_int_digits && !had_frac_digits {
@@ -415,9 +492,10 @@ fn scan_c_decimal_number(view: &mut SourceView<'_>, cursor: u32) -> ScanResult {
         if matches!(view.byte_at(end), Some(b'+') | Some(b'-')) {
             end += 1;
         }
-        let after_exp = end;
-        end = scan_digits(view, end);
-        if end == after_exp {
+        let (exp_end, had_exp_digits) =
+            scan_radix_digits_with_sep(view, end, byteclass::is_digit, allow_sep);
+        end = exp_end;
+        if !had_exp_digits {
             return ScanResult::err(end);
         }
     }
@@ -430,42 +508,41 @@ fn scan_c_decimal_number(view: &mut SourceView<'_>, cursor: u32) -> ScanResult {
     ScanResult::ok(end)
 }
 
-fn scan_hex_digits(view: &mut SourceView<'_>, cursor: u32) -> u32 {
+fn scan_radix_digits_with_sep(
+    view: &mut SourceView<'_>,
+    cursor: u32,
+    pred: fn(u8) -> bool,
+    allow_sep: bool,
+) -> (u32, bool) {
     let mut cursor = cursor;
+    let mut saw_digit = false;
     loop {
         let (base, page) = view.window_at(cursor);
         if page.is_empty() {
-            return cursor;
+            return (cursor, saw_digit);
         }
         let mut i = (cursor - base) as usize;
-        while i < page.len() && byteclass::is_hex_digit(page[i]) {
-            i += 1;
+        while i < page.len() {
+            let b = page[i];
+            if pred(b) {
+                saw_digit = true;
+                i += 1;
+            } else if allow_sep && b == b'\'' {
+                i += 1;
+            } else {
+                break;
+            }
         }
         let consumed = i - (cursor - base) as usize;
         cursor += consumed as u32;
         if i < page.len() {
-            return cursor;
+            return (cursor, saw_digit);
         }
     }
 }
 
-fn scan_binary_digits(view: &mut SourceView<'_>, cursor: u32) -> u32 {
-    let mut cursor = cursor;
-    loop {
-        let (base, page) = view.window_at(cursor);
-        if page.is_empty() {
-            return cursor;
-        }
-        let mut i = (cursor - base) as usize;
-        while i < page.len() && (page[i] == b'0' || page[i] == b'1') {
-            i += 1;
-        }
-        let consumed = i - (cursor - base) as usize;
-        cursor += consumed as u32;
-        if i < page.len() {
-            return cursor;
-        }
-    }
+fn is_binary_digit(b: u8) -> bool {
+    b == b'0' || b == b'1'
 }
 
 fn scan_int_suffix(view: &mut SourceView<'_>, cursor: u32) -> u32 {
@@ -802,6 +879,29 @@ mod tests {
     }
 
     #[test]
+    fn cxx_raw_string_basics() {
+        for input in [
+            r#"R"(plain " text)""#,
+            "R\"tag(line 1\nline ) not close\n)tag\"",
+            r#"R"tag()tag""#,
+        ] {
+            let mut v = view(&input);
+            let r = scan_cxx_raw_string(&mut v, 0);
+            assert!(!r.is_error, "unexpected error for {input:?}");
+            assert_eq!(r.end as usize, input.len(), "wrong end for {input:?}");
+        }
+    }
+
+    #[test]
+    fn cxx_raw_string_errors() {
+        for input in [r#"R"unterminated("#, r#"R"too_long_delimiter()"#] {
+            let mut v = view(&input);
+            let r = scan_cxx_raw_string(&mut v, 0);
+            assert!(r.is_error, "expected error for {input:?}");
+        }
+    }
+
+    #[test]
     fn c_char_basics() {
         for (input, expected) in [
             (r#"'x'"#, 3),
@@ -866,6 +966,16 @@ mod tests {
             let mut v = view(&input);
             let r = scan_block_comment(&mut v, 0);
             assert!(r.is_error, "expected error for {input:?}");
+        }
+    }
+
+    #[test]
+    fn cxx_number_digit_separators() {
+        for input in ["1'000", "0xFF'AAu", "0b1010'0101", "1.5e+1'2"] {
+            let mut v = view(&input);
+            let r = scan_cxx_number(&mut v, 0);
+            assert!(!r.is_error, "unexpected error for {input:?}");
+            assert_eq!(r.end as usize, input.len(), "wrong end for {input:?}");
         }
     }
 
