@@ -15,6 +15,11 @@ fn load_c(name: &str) -> String {
     std::fs::read_to_string(path).unwrap_or_else(|e| panic!("fixture {name}: {e}"))
 }
 
+fn load_go(name: &str) -> String {
+    let path = format!("{}/fixtures/go/{name}", env!("CARGO_MANIFEST_DIR"));
+    std::fs::read_to_string(path).unwrap_or_else(|e| panic!("fixture {name}: {e}"))
+}
+
 fn load_markdown(name: &str) -> String {
     let path = format!("{}/fixtures/markdown/{name}", env!("CARGO_MANIFEST_DIR"));
     std::fs::read_to_string(path).unwrap_or_else(|e| panic!("fixture {name}: {e}"))
@@ -221,6 +226,60 @@ fn c_fixtures_exercise_expected_kinds() {
 }
 
 #[test]
+fn simple_go_coverage_and_tags() {
+    let input = load_go("simple.go.in");
+    let tokens = tokens_of(Language::Go, &input);
+
+    let mut pos = 0u32;
+    for t in &tokens {
+        assert_eq!(t.span.offset, pos, "gap before {pos}");
+        pos += t.span.len;
+        assert_eq!(t.lang_tag(), Language::Go.tag());
+    }
+    assert_eq!(pos as usize, input.len());
+}
+
+#[test]
+fn go_fixture_exercises_expected_kinds() {
+    use tinyhl::kind as kinds;
+
+    let mut seen = std::collections::HashSet::new();
+    let input = load_go("simple.go.in");
+    for t in tokens_of(Language::Go, &input) {
+        seen.insert(t.local_kind());
+    }
+    for required in [
+        kinds::WHITESPACE,
+        kinds::COMMENT,
+        kinds::STRING,
+        kinds::CHAR,
+        kinds::NUMBER,
+        kinds::KEYWORD,
+        kinds::IDENT,
+        kinds::OPEN_BRACE,
+        kinds::CLOSE_BRACE,
+        kinds::OPEN_PAREN,
+        kinds::CLOSE_PAREN,
+        kinds::OPEN_BRACKET,
+        kinds::CLOSE_BRACKET,
+        kinds::COMMA,
+        kinds::DOT,
+        kinds::SEMI,
+        kinds::COLON,
+        kinds::COLON_EQ,
+        kinds::ELLIPSIS,
+        kinds::LEFT_ARROW,
+        kinds::AMP_CARET,
+        kinds::AMP_CARET_EQ,
+    ] {
+        assert!(
+            seen.contains(&required),
+            "go fixture should exercise kind {required}"
+        );
+    }
+}
+
+#[test]
 fn simple_ts_coverage_and_tags() {
     let input = load_ts("simple.ts.in");
     let tokens = tokens_of(Language::Ts, &input);
@@ -370,6 +429,10 @@ fn markdown_embed_dispatches_to_inner_languages() {
     assert!(
         nested_langs.contains(&Language::Css.tag()),
         "css fence should embed"
+    );
+    assert!(
+        nested_langs.contains(&Language::Go.tag()),
+        "go fence should embed"
     );
 }
 
@@ -895,6 +958,21 @@ fn markdown_sql_fence_embeds_sql() {
     assert!(
         embedded.contains(&Language::Sql.tag()),
         "`sql` fence should embed SQL"
+    );
+}
+
+#[test]
+fn markdown_go_fence_embeds_go() {
+    let source = "intro\n\n```go\npackage main\n```\n\n```golang\nfunc main() {}\n```\n";
+    let tokens = tokens_of(Language::Markdown, source);
+    let embedded: std::collections::HashSet<u8> = tokens
+        .iter()
+        .filter(|t| t.nest >= 1)
+        .map(|t| t.lang_tag())
+        .collect();
+    assert!(
+        embedded.contains(&Language::Go.tag()),
+        "both `go` and `golang` fences should embed Go"
     );
 }
 

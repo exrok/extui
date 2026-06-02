@@ -79,6 +79,7 @@ pub enum Language {
     InternalSingleJsxElement = 11,
     Python = 12,
     Sql = 13,
+    Go = 14,
 }
 
 impl Language {
@@ -110,6 +111,7 @@ impl Language {
             11 => Self::InternalSingleJsxElement,
             12 => Self::Python,
             13 => Self::Sql,
+            14 => Self::Go,
             _ => panic!("unknown language tag"),
         }
     }

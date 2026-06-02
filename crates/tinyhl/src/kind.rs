@@ -151,6 +151,10 @@ pub const STAR_STAR: u16 = 118;
 pub const SLASH_SLASH: u16 = 119;
 /// `:=` (Python walrus / named-expression operator).
 pub const COLON_EQ: u16 = 120;
+/// `<-` (Go channel send / receive arrow).
+pub const LEFT_ARROW: u16 = 121;
+/// `&^` (Go bit clear).
+pub const AMP_CARET: u16 = 122;
 
 // Compound assignment.
 
@@ -188,6 +192,8 @@ pub const QUESTION_QUESTION_EQ: u16 = 144;
 pub const SLASH_SLASH_EQ: u16 = 145;
 /// `@=` (Python matrix-multiplication assignment).
 pub const AT_EQ: u16 = 146;
+/// `&^=` (Go bit-clear assignment).
+pub const AMP_CARET_EQ: u16 = 147;
 
 // C-specific punctuation / digraphs.
 

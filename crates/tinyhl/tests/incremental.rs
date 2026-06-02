@@ -301,6 +301,74 @@ fn c_kr_fixture_sweep() {
 }
 
 #[test]
+fn go_insert_sweep() {
+    let source =
+        "package main\nfunc main() { ch := make(chan int); go func(){ ch <- 1 }(); _ = <-ch }\n";
+    for off in 0..=source.len() {
+        for ins in ["x", "9", "\"", "`", "'", " ", "{", "/", "*", "<", "&", "0x"] {
+            assert_mutate_matches_lang(Language::Go, source, Span::new(off as u32, 0), ins);
+        }
+    }
+}
+
+#[test]
+fn go_delete_sweep() {
+    let source =
+        "package main\nfunc main() { ch := make(chan int); go func(){ ch <- 1 }(); _ = <-ch }\n";
+    for off in 0..source.len() {
+        assert_mutate_matches_lang(Language::Go, source, Span::new(off as u32, 1), "");
+    }
+}
+
+#[test]
+fn go_replace_sweep() {
+    let source = "n := 0xFF; f := 1.5e-3i; r := 'x'; s := `raw`; n &^= 1; xs := []int{1,2,3}";
+    for off in 0..source.len() {
+        for rep in ["x", "/", "*", "\"", "'", "`", "&", "<", ".", "0", "e"] {
+            assert_mutate_matches_lang(Language::Go, source, Span::new(off as u32, 1), rep);
+        }
+    }
+}
+
+#[test]
+fn go_raw_string_sweep() {
+    let source = "package main\nvar s = `line 1\nline 2\nline 3`\nvar t = 42\n";
+    for off in 0..=source.len() {
+        for ins in ["x", "\n", "\\", "`", "\"", " ", "/*"] {
+            assert_mutate_matches_lang(Language::Go, source, Span::new(off as u32, 0), ins);
+        }
+    }
+    for off in 0..source.len() {
+        assert_mutate_matches_lang(Language::Go, source, Span::new(off as u32, 1), "");
+    }
+}
+
+#[test]
+fn go_unicode_ident_sweep() {
+    let source = "var caf\u{00e9} = 1\nfunc \u{03c0}() int { return caf\u{00e9} }\n";
+    for off in 0..=source.len() {
+        if !source.is_char_boundary(off) {
+            continue;
+        }
+        for ins in ["x", "\u{03b1}", "\"", "`", " "] {
+            assert_mutate_matches_lang(Language::Go, source, Span::new(off as u32, 0), ins);
+        }
+    }
+}
+
+#[test]
+fn go_fixture_sweep_over_chunks() {
+    let path = format!("{}/fixtures/go/simple.go.in", env!("CARGO_MANIFEST_DIR"));
+    let source = std::fs::read_to_string(&path).unwrap();
+    let step = (source.len() / 96).max(1);
+    for off in (0..source.len()).step_by(step) {
+        for rep in ["x", " ", "\"", "`", "'", "/*", "//", "0x", "<-", "&^"] {
+            assert_mutate_matches_lang(Language::Go, &source, Span::new(off as u32, 0), rep);
+        }
+    }
+}
+
+#[test]
 fn ts_insert_sweep() {
     let source = "const x: number = 42; let s = `hi ${x}`; // ok\n";
     for off in 0..=source.len() {
@@ -974,6 +1042,19 @@ fn markdown_sql_embed_sweep() {
     let source = "# T\n\n```sql\nSELECT id FROM users WHERE active = TRUE;\n```\n\nend\n";
     for off in 0..=source.len() {
         for ins in ["x", "`", "\n", " ", "'", "-", "/", "$"] {
+            assert_mutate_matches_lang(Language::Markdown, source, Span::new(off as u32, 0), ins);
+        }
+    }
+    for off in 0..source.len() {
+        assert_mutate_matches_lang(Language::Markdown, source, Span::new(off as u32, 1), "");
+    }
+}
+
+#[test]
+fn markdown_go_embed_sweep() {
+    let source = "# T\n\n```go\npackage main\nfunc main() { println(\"hi\") }\n```\n\nend\n";
+    for off in 0..=source.len() {
+        for ins in ["x", "`", "\n", " ", "\"", "'", "/", "<", "&"] {
             assert_mutate_matches_lang(Language::Markdown, source, Span::new(off as u32, 0), ins);
         }
     }

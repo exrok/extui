@@ -1,0 +1,43 @@
+package main
+
+import "fmt"
+
+// Point is a small struct used by the fixture.
+type Point struct {
+    X, Y int
+}
+
+const mask = 0xFF &^ 0b1010
+
+var values = []int{1, 2, 3}
+
+func sum(xs ...int) int {
+    total := 0
+    for _, x := range xs {
+        total += x
+    }
+    return total
+}
+
+func distance(a, b Point) int {
+    dx := a.X - b.X
+    dy := a.Y - b.Y
+    if dx < 0 {
+        dx = -dx
+    }
+    if dy < 0 {
+        dy = -dy
+    }
+    return dx + dy
+}
+
+func main() {
+    ch := make(chan int, 1)
+    v := mask
+    v &^= 1
+    go func() {
+        ch <- distance(Point{X: 0, Y: 0}, Point{3, 4}) + sum(values...)
+    }()
+    fmt.Println("distance", <-ch, `raw
+string`, 'x', 1.5e2i, v);
+}

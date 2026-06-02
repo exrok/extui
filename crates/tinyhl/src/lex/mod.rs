@@ -8,6 +8,7 @@ pub(crate) mod byteclass;
 pub(crate) mod c;
 pub(crate) mod css;
 pub(crate) mod csv;
+pub(crate) mod go;
 pub(crate) mod html;
 pub(crate) mod json;
 pub(crate) mod jsx;

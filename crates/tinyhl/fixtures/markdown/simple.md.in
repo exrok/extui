@@ -52,6 +52,14 @@ Alice,42
 .banner { color: #fff; padding: 10px 0; }
 ```
 
+```go
+package main
+
+func main() {
+    println("hello")
+}
+```
+
 ```python
 print("opaque body, no embed")
 ```
