@@ -80,6 +80,7 @@ pub enum Language {
     Python = 12,
     Sql = 13,
     Go = 14,
+    Sh = 15,
 }
 
 impl Language {
@@ -112,6 +113,7 @@ impl Language {
             12 => Self::Python,
             13 => Self::Sql,
             14 => Self::Go,
+            15 => Self::Sh,
             _ => panic!("unknown language tag"),
         }
     }

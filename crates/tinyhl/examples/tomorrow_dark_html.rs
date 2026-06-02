@@ -408,6 +408,7 @@ fn parse_language(arg: &str) -> Result<Language, String> {
         "css" => Ok(Language::Css),
         "html" | "htm" => Ok(Language::Html),
         "go" | "golang" => Ok(Language::Go),
+        "sh" | "shell" | "bash" => Ok(Language::Sh),
         other => Err(format!("unsupported language: {other}")),
     }
 }

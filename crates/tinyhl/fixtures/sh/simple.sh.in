@@ -1,0 +1,24 @@
+#!/bin/sh
+# TinyHL shell fixture
+
+set -eu
+count=3
+name=${USER:-guest}
+
+run() {
+    printf '%s\n' "$name" >>out.log
+    echo `date`
+    touch foo#bar
+}
+
+if [ "$count" -gt 0 ] && test "$name" != ""; then
+    cat <<EOF
+hello $name # not a comment
+EOF
+    run < /dev/null || echo fallback
+fi
+
+case "$1" in
+    start) echo "start";;
+    *) cd ~ ;;
+esac

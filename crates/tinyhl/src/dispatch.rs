@@ -2,7 +2,7 @@
 
 use crate::lex::{
     Lexer, StepBuf, c::C, css::Css, csv::Csv, go::Go, html::Html, json::Json, jsx::Jsx,
-    markdown::Markdown, python::Python, rust::Rust, sql::Sql, toml::Toml, ts::Ts, tsx::Tsx,
+    markdown::Markdown, python::Python, rust::Rust, sh::Sh, sql::Sql, toml::Toml, ts::Ts, tsx::Tsx,
     xml::Xml,
 };
 use crate::{Language, LexState, SourceView};
@@ -30,5 +30,6 @@ pub(crate) fn step_batch(
         Language::Python => Python::step_batch(view, cursor, state, out),
         Language::Sql => Sql::step_batch(view, cursor, state, out),
         Language::Go => Go::step_batch(view, cursor, state, out),
+        Language::Sh => Sh::step_batch(view, cursor, state, out),
     }
 }

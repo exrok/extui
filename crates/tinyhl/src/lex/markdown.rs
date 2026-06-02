@@ -13,8 +13,8 @@
 //! - List markers (`-` / `*` / `+` / digits-then-`.`/`)`) at column 0.
 //! - Fenced code blocks with backtick or tilde fences of length at least
 //!   three. Info strings `rust`/`rs`, `c`, `csv`, `json`, `xml`, `css`,
-//!   `ts`/`typescript`, `tsx`/`jsx`, `html`/`htm`, `python`/`py`, and
-//!   `go`/`golang`
+//!   `ts`/`typescript`, `tsx`/`jsx`, `html`/`htm`, `python`/`py`,
+//!   `sql`, `go`/`golang`, and `sh`/`shell`/`bash`
 //!   (case-insensitive ASCII) dispatch to the corresponding language. An
 //!   embedded `html` block in turn
 //!   embeds CSS and TypeScript for its `<style>` and `<script>` content; a
@@ -587,6 +587,7 @@ fn info_to_language(
         b"python" | b"py" => Some(Language::Python),
         b"sql" => Some(Language::Sql),
         b"go" | b"golang" => Some(Language::Go),
+        b"sh" | b"shell" | b"bash" => Some(Language::Sh),
         _ => None,
     }
 }

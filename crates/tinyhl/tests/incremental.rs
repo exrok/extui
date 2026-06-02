@@ -369,6 +369,74 @@ fn go_fixture_sweep_over_chunks() {
 }
 
 #[test]
+fn sh_insert_sweep() {
+    let source = "if [ \"$x\" = yes ]; then echo \"$x\" # ok\nfi\n";
+    for off in 0..=source.len() {
+        for ins in ["x", "9", "\"", "'", "`", " ", "#", "$", "{", "<", "&", "\\"] {
+            assert_mutate_matches_lang(Language::Sh, source, Span::new(off as u32, 0), ins);
+        }
+    }
+}
+
+#[test]
+fn sh_delete_sweep() {
+    let source = "if [ \"$x\" = yes ]; then echo \"$x\" # ok\nfi\n";
+    for off in 0..source.len() {
+        assert_mutate_matches_lang(Language::Sh, source, Span::new(off as u32, 1), "");
+    }
+}
+
+#[test]
+fn sh_replace_sweep() {
+    let source = "name=${USER:-guest}; printf '%s\\n' \"$name\" >>out.log || echo fail";
+    for off in 0..source.len() {
+        for rep in [
+            "x", "0", "'", "\"", "`", "#", "$", "{", "}", "<", ">", "&", "|",
+        ] {
+            assert_mutate_matches_lang(Language::Sh, source, Span::new(off as u32, 1), rep);
+        }
+    }
+}
+
+#[test]
+fn sh_quote_sweep() {
+    let source = "name='a b'\nmsg=\"line $name\"\ncmd=`printf %s \"$msg\"`\n";
+    for off in 0..=source.len() {
+        for ins in ["x", "\n", "\\", "'", "\"", "`", "$", "#", " "] {
+            assert_mutate_matches_lang(Language::Sh, source, Span::new(off as u32, 0), ins);
+        }
+    }
+    for off in 0..source.len() {
+        assert_mutate_matches_lang(Language::Sh, source, Span::new(off as u32, 1), "");
+    }
+}
+
+#[test]
+fn sh_heredoc_sweep() {
+    let source = "cat <<EOF\nhello $USER\n# not comment\nEOF\necho done\n";
+    for off in 0..=source.len() {
+        for ins in ["x", "\n", "\\", "'", "\"", "#", "$", "<", "-"] {
+            assert_mutate_matches_lang(Language::Sh, source, Span::new(off as u32, 0), ins);
+        }
+    }
+    for off in 0..source.len() {
+        assert_mutate_matches_lang(Language::Sh, source, Span::new(off as u32, 1), "");
+    }
+}
+
+#[test]
+fn sh_fixture_sweep_over_chunks() {
+    let path = format!("{}/fixtures/sh/simple.sh.in", env!("CARGO_MANIFEST_DIR"));
+    let source = std::fs::read_to_string(&path).unwrap();
+    let step = (source.len() / 96).max(1);
+    for off in (0..source.len()).step_by(step) {
+        for rep in ["x", " ", "'", "\"", "`", "#", "$", "<<", "&&", "||"] {
+            assert_mutate_matches_lang(Language::Sh, &source, Span::new(off as u32, 0), rep);
+        }
+    }
+}
+
+#[test]
 fn ts_insert_sweep() {
     let source = "const x: number = 42; let s = `hi ${x}`; // ok\n";
     for off in 0..=source.len() {

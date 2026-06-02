@@ -17,6 +17,7 @@ pub(crate) mod markdown;
 pub(crate) mod python;
 pub(crate) mod rust;
 pub(crate) mod scan;
+pub(crate) mod sh;
 pub(crate) mod sql;
 pub(crate) mod toml;
 pub(crate) mod ts;

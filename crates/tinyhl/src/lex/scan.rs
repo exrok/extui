@@ -277,6 +277,28 @@ pub fn scan_line_comment(view: &mut SourceView<'_>, cursor: u32) -> u32 {
     }
 }
 
+/// Consumes a `#` line comment starting at `cursor` (which must point at
+/// the leading `#`). Returns the cursor at the terminating `\n` or at
+/// end-of-source. The newline itself is not consumed.
+pub fn scan_hash_comment(view: &mut SourceView<'_>, cursor: u32) -> u32 {
+    let mut cursor = cursor + 1;
+    loop {
+        let (base, page) = view.window_at(cursor);
+        if page.is_empty() {
+            return cursor;
+        }
+        let rel = (cursor - base) as usize;
+        let mut i = rel;
+        while i < page.len() && page[i] != b'\n' {
+            i += 1;
+        }
+        cursor = base + i as u32;
+        if i < page.len() {
+            return cursor;
+        }
+    }
+}
+
 /// Scans a `/* ... */` block comment starting at `cursor` (which must point
 /// at the leading `/`). Returns the cursor just past the closing `*/`, or an
 /// error if end-of-source is reached first. C block comments don't nest.

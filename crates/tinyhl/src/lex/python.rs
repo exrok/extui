@@ -119,7 +119,7 @@ fn classify(view: &mut SourceView<'_>, cursor: u32, first: u8) -> (u16, u32, boo
             scan::scan_whitespace(view, cursor),
             false,
         ),
-        b'#' => (kinds::COMMENT, scan_hash_comment(view, cursor), false),
+        b'#' => (kinds::COMMENT, scan::scan_hash_comment(view, cursor), false),
         b'\'' | b'"' => scan_string_at(view, cursor, 0),
         // Explicit line continuation (`\` at end of line) is trivia; a stray
         // backslash anywhere else is an error.
@@ -299,24 +299,6 @@ fn scan_triple_string(view: &mut SourceView<'_>, cursor: u32, quote: u8) -> Scan
                 end += 1;
             }
             Some(_) => end += 1,
-        }
-    }
-}
-
-fn scan_hash_comment(view: &mut SourceView<'_>, cursor: u32) -> u32 {
-    let mut end = cursor + 1;
-    loop {
-        let (base, page) = view.window_at(end);
-        if page.is_empty() {
-            return end;
-        }
-        let mut i = (end - base) as usize;
-        while i < page.len() && page[i] != b'\n' {
-            i += 1;
-        }
-        end = base + i as u32;
-        if i < page.len() {
-            return end;
         }
     }
 }
