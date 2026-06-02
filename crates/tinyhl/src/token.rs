@@ -63,14 +63,16 @@ pub mod flags {
     pub const STATE_BREAKPOINT: u8 = 1 << 4;
 }
 
-const LANG_BITS: u16 = 4;
-const LOCAL_MASK: u16 = (1 << (16 - LANG_BITS)) - 1;
+const LANG_BITS: u16 = 6;
+const LOCAL_BITS: u16 = 16 - LANG_BITS;
+const LANG_LIMIT: u16 = 1 << LANG_BITS;
+const LOCAL_MASK: u16 = (1 << LOCAL_BITS) - 1;
 
 #[inline]
 pub(crate) const fn pack_kind(lang_tag: u8, local: u16) -> u16 {
-    debug_assert!(lang_tag < 16);
+    debug_assert!((lang_tag as u16) < LANG_LIMIT);
     debug_assert!(local <= LOCAL_MASK);
-    ((lang_tag as u16) << 12) | (local & LOCAL_MASK)
+    ((lang_tag as u16) << LOCAL_BITS) | (local & LOCAL_MASK)
 }
 
 /// Returns `(language_tag, local_kind)` for a [`Token::kind`] value.
@@ -79,12 +81,12 @@ pub(crate) const fn pack_kind(lang_tag: u8, local: u16) -> u16 {
 /// the constants in [`crate::kind`].
 #[inline]
 pub const fn unpack_kind(kind: u16) -> (u8, u16) {
-    ((kind >> 12) as u8, kind & LOCAL_MASK)
+    ((kind >> LOCAL_BITS) as u8, kind & LOCAL_MASK)
 }
 
 #[inline]
 pub(crate) const fn kind_lang_tag(kind: u16) -> u8 {
-    (kind >> 12) as u8
+    (kind >> LOCAL_BITS) as u8
 }
 
 #[inline]
@@ -163,8 +165,8 @@ mod tests {
 
     #[test]
     fn kind_roundtrip() {
-        for lang in 0..16u8 {
-            for local in [0u16, 1, 0x0FFF, 0x0AAA] {
+        for lang in 0..64u8 {
+            for local in [0u16, 1, 0x03FF, 0x02AA] {
                 let k = pack_kind(lang, local);
                 assert_eq!(unpack_kind(k), (lang, local));
             }

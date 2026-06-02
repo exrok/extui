@@ -23,7 +23,7 @@
 //!
 //! # Concepts
 //!
-//! - [`Token`] — 16 bytes: a [`Span`] plus a packed `language:4 | local:12`
+//! - [`Token`] — 16 bytes: a [`Span`] plus a packed `language:6 | local:10`
 //!   kind and per-language lexer state.
 //! - [`Source`] — paged byte access. A single contiguous buffer is never
 //!   required.
