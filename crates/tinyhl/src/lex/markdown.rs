@@ -584,6 +584,7 @@ fn info_to_language(
         b"tsx" | b"jsx" => Some(Language::Tsx),
         b"html" | b"htm" => Some(Language::Html),
         b"python" | b"py" => Some(Language::Python),
+        b"sql" => Some(Language::Sql),
         _ => None,
     }
 }

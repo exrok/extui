@@ -55,6 +55,11 @@ fn load_python(name: &str) -> String {
     std::fs::read_to_string(path).unwrap_or_else(|e| panic!("fixture {name}: {e}"))
 }
 
+fn load_sql(name: &str) -> String {
+    let path = format!("{}/fixtures/sql/{name}", env!("CARGO_MANIFEST_DIR"));
+    std::fs::read_to_string(path).unwrap_or_else(|e| panic!("fixture {name}: {e}"))
+}
+
 fn tokens_of(language: Language, s: &str) -> Vec<tinyhl::Token> {
     let src: &dyn Source = &s;
     let table = TokenTable::new(language, src);
@@ -829,6 +834,67 @@ fn markdown_python_fence_embeds_python() {
     assert!(
         embedded.contains(&Language::Python.tag()),
         "both `python` and `py` fences should embed Python"
+    );
+}
+
+#[test]
+fn simple_sql_coverage_and_tags() {
+    let input = load_sql("simple.sql.in");
+    let tokens = tokens_of(Language::Sql, &input);
+
+    let mut pos = 0u32;
+    for t in &tokens {
+        assert_eq!(t.span.offset, pos, "gap before {pos}");
+        pos += t.span.len;
+        assert_eq!(t.lang_tag(), Language::Sql.tag());
+    }
+    assert_eq!(pos as usize, input.len());
+}
+
+#[test]
+fn sql_fixture_exercises_expected_kinds() {
+    use tinyhl::kind as kinds;
+
+    let mut seen = std::collections::HashSet::new();
+    let input = load_sql("simple.sql.in");
+    for t in tokens_of(Language::Sql, &input) {
+        seen.insert(t.local_kind());
+    }
+    for required in [
+        kinds::WHITESPACE,
+        kinds::COMMENT,
+        kinds::STRING,
+        kinds::NUMBER,
+        kinds::KEYWORD,
+        kinds::IDENT,
+        kinds::OPEN_PAREN,
+        kinds::CLOSE_PAREN,
+        kinds::COMMA,
+        kinds::DOT,
+        kinds::EQ,
+        kinds::GT,
+        kinds::GT_EQ,
+        kinds::SEMI,
+    ] {
+        assert!(
+            seen.contains(&required),
+            "sql fixture should exercise kind {required}"
+        );
+    }
+}
+
+#[test]
+fn markdown_sql_fence_embeds_sql() {
+    let source = "intro\n\n```sql\nSELECT id FROM users WHERE active = TRUE;\n```\n";
+    let tokens = tokens_of(Language::Markdown, source);
+    let embedded: std::collections::HashSet<u8> = tokens
+        .iter()
+        .filter(|t| t.nest >= 1)
+        .map(|t| t.lang_tag())
+        .collect();
+    assert!(
+        embedded.contains(&Language::Sql.tag()),
+        "`sql` fence should embed SQL"
     );
 }
 

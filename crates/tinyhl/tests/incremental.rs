@@ -917,6 +917,72 @@ fn markdown_python_embed_sweep() {
 }
 
 #[test]
+fn sql_insert_sweep() {
+    let source = "SELECT id, name FROM users WHERE active = TRUE AND score >= 10;\n";
+    for off in 0..=source.len() {
+        for ins in ["x", "9", "'", "\"", " ", "-", "/", "*", "$", "[", "]", "."] {
+            assert_mutate_matches_lang(Language::Sql, source, Span::new(off as u32, 0), ins);
+        }
+    }
+}
+
+#[test]
+fn sql_delete_sweep() {
+    let source = "SELECT id, name FROM users WHERE active = TRUE AND score >= 10;\n";
+    for off in 0..source.len() {
+        assert_mutate_matches_lang(Language::Sql, source, Span::new(off as u32, 1), "");
+    }
+}
+
+#[test]
+fn sql_replace_sweep() {
+    let source = "/* c */ SELECT 'it''s', $$body$$, \"col\" FROM t WHERE x<>1 AND y::int:=.5e+2";
+    for off in 0..source.len() {
+        for rep in ["x", "0", "'", "\"", "$", "-", "/", "*", ":", "=", ".", "["] {
+            assert_mutate_matches_lang(Language::Sql, source, Span::new(off as u32, 1), rep);
+        }
+    }
+}
+
+#[test]
+fn sql_string_sweep() {
+    let source = "SELECT 'line 1\nline 2', E'a\\'b', q'[x''y]', $tag$a $ b$tag$;\n";
+    for off in 0..=source.len() {
+        for ins in ["x", "\n", "\\", "'", "$", "]", " ", "-"] {
+            assert_mutate_matches_lang(Language::Sql, source, Span::new(off as u32, 0), ins);
+        }
+    }
+    for off in 0..source.len() {
+        assert_mutate_matches_lang(Language::Sql, source, Span::new(off as u32, 1), "");
+    }
+}
+
+#[test]
+fn sql_fixture_sweep_over_chunks() {
+    let path = format!("{}/fixtures/sql/simple.sql.in", env!("CARGO_MANIFEST_DIR"));
+    let source = std::fs::read_to_string(&path).unwrap();
+    let step = (source.len() / 96).max(1);
+    for off in (0..source.len()).step_by(step) {
+        for rep in ["x", " ", "'", "\"", "--", "/*", "$$", "0x", "::"] {
+            assert_mutate_matches_lang(Language::Sql, &source, Span::new(off as u32, 0), rep);
+        }
+    }
+}
+
+#[test]
+fn markdown_sql_embed_sweep() {
+    let source = "# T\n\n```sql\nSELECT id FROM users WHERE active = TRUE;\n```\n\nend\n";
+    for off in 0..=source.len() {
+        for ins in ["x", "`", "\n", " ", "'", "-", "/", "$"] {
+            assert_mutate_matches_lang(Language::Markdown, source, Span::new(off as u32, 0), ins);
+        }
+    }
+    for off in 0..source.len() {
+        assert_mutate_matches_lang(Language::Markdown, source, Span::new(off as u32, 1), "");
+    }
+}
+
+#[test]
 fn chain_of_edits_stays_in_sync() {
     let mut current = String::from("[]");
     let src: &dyn Source = &current.as_str();

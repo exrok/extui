@@ -1,0 +1,17 @@
+-- sales rollup with common SQL token shapes
+WITH active_customers AS (
+    SELECT c.id, c."display name", SUM(o.total) AS revenue
+    FROM customers AS c
+    LEFT JOIN orders AS o ON o.customer_id = c.id
+    WHERE c.active = TRUE
+      AND o.created_at >= TIMESTAMP '2026-01-01 00:00:00'
+      AND o.status IN ('paid', 'settled')
+    GROUP BY c.id, c."display name"
+    HAVING SUM(o.total) > 100.50
+)
+INSERT INTO audit_log(event_name, payload)
+VALUES ('rollup', $$ {"source":"tinyhl"} $$);
+
+UPDATE customers
+SET last_seen = CURRENT_TIMESTAMP
+WHERE id IN (SELECT id FROM active_customers);
