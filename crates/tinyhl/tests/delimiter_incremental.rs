@@ -105,3 +105,14 @@ fn large_chunked_delimiter_incremental_matches_fresh() {
         assert_incremental(Language::Rust, &source, Span::new(off as u32, 0), "(");
     }
 }
+
+#[test]
+fn large_delimiter_insert_shifts_converged_tail() {
+    let mut source = String::from("fn main() {\n");
+    for i in 0..260 {
+        source.push_str(&format!("    let value_{i} = [foo(bar[{i}]), baz];\n"));
+    }
+    source.push_str("}\n");
+    let off = source.find("value_140").unwrap() + "value".len();
+    assert_incremental(Language::Rust, &source, Span::new(off as u32, 0), "x");
+}

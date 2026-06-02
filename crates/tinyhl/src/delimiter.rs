@@ -160,7 +160,15 @@ impl DelimiterTable {
             tokens.source_len()
         };
 
+        let num_new = new_chunks.len();
         self.chunks.splice(start_idx..old_stop_idx, new_chunks);
+        let shift_from = start_idx + num_new;
+        if delta != 0 {
+            for chunk in &mut self.chunks[shift_from..] {
+                chunk.base_offset = (chunk.base_offset as i64 + delta) as u32;
+                chunk.end_offset = (chunk.end_offset as i64 + delta) as u32;
+            }
+        }
         self.source_len = tokens.source_len();
 
         Span::new(

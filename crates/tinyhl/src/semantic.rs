@@ -208,7 +208,15 @@ impl SemanticTable {
             tokens.source_len()
         };
 
+        let num_new = new_chunks.len();
         self.chunks.splice(start_idx..old_stop_idx, new_chunks);
+        let shift_from = start_idx + num_new;
+        if delta != 0 {
+            for chunk in &mut self.chunks[shift_from..] {
+                chunk.base_offset = (chunk.base_offset as i64 + delta) as u32;
+                chunk.end_offset = (chunk.end_offset as i64 + delta) as u32;
+            }
+        }
         self.source_len = tokens.source_len();
 
         Span::new(
@@ -1467,4 +1475,56 @@ fn analyze_c(
     }
 
     state.prev_sig = Some(token);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn apply(old: &str, span: Span, new: &str) -> String {
+        let mut s = String::new();
+        s.push_str(&old[..span.offset as usize]);
+        s.push_str(new);
+        s.push_str(&old[span.offset as usize + span.len as usize..]);
+        s
+    }
+
+    #[test]
+    fn mutate_shifts_converged_tail_chunks() {
+        let mut source = String::from("[");
+        for i in 0..300 {
+            if i > 0 {
+                source.push(',');
+            }
+            source.push_str(&format!("\"value_{i}\""));
+        }
+        source.push(']');
+
+        let old_ref = source.as_str();
+        let old_src: &dyn Source = &old_ref;
+        let mut tokens = TokenTable::new(Language::Json, old_src);
+        let mut semantic = SemanticTable::new(&tokens, old_src);
+        assert!(semantic.chunk_count() > 2);
+
+        let off = source.find("value_140").unwrap() + "value".len();
+        let edit = Span::new(off as u32, 0);
+        let new = apply(&source, edit, "x");
+        let new_ref = new.as_str();
+        let new_src: &dyn Source = &new_ref;
+        let token_edit = tokens.mutate_detailed(new_src, edit, 1);
+        semantic.mutate(&tokens, new_src, &token_edit);
+
+        let fresh = SemanticTable::new(&tokens, new_src);
+        let mutated_chunks: Vec<_> = semantic
+            .chunks
+            .iter()
+            .map(|chunk| (chunk.base_offset, chunk.end_offset))
+            .collect();
+        let fresh_chunks: Vec<_> = fresh
+            .chunks
+            .iter()
+            .map(|chunk| (chunk.base_offset, chunk.end_offset))
+            .collect();
+        assert_eq!(mutated_chunks, fresh_chunks);
+    }
 }

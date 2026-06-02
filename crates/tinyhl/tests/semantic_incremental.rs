@@ -105,6 +105,18 @@ fn markdown_embed_semantic_incremental_matches_fresh() {
     }
 }
 
+#[test]
+fn large_semantic_insert_shifts_converged_tail() {
+    let mut source = String::from("fn head(arg: Type) -> Type { arg }\n");
+    for i in 0..260 {
+        source.push_str(&format!(
+            "fn item_{i}(param_{i}: Type) -> Type {{ helper_{i}(param_{i}) }}\n"
+        ));
+    }
+    let off = source.find("fn item_140").unwrap();
+    assert_incremental_semantics(Language::Rust, &source, Span::new(off as u32, 0), " ");
+}
+
 fn language() -> Language {
     Language::Rust
 }
