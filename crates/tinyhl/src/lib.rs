@@ -65,6 +65,7 @@ pub enum Language {
     Xml = 6,
     Markdown = 7,
     Css = 8,
+    Html = 9,
 }
 
 impl Language {
@@ -91,6 +92,7 @@ impl Language {
             6 => Self::Xml,
             7 => Self::Markdown,
             8 => Self::Css,
+            9 => Self::Html,
             _ => panic!("unknown language tag"),
         }
     }

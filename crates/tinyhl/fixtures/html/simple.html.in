@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Demo &amp; Test</title>
+    <!-- a greeting comment -->
+    <style>
+      :root { --accent: #3b82f6; }
+      body {
+        margin: 0 auto;
+        color: var(--accent);
+        background: url(bg.png) no-repeat;
+      }
+      .btn:hover { opacity: 50%; }
+    </style>
+  </head>
+  <body class="home" data-id="42">
+    <h1 id="main">Hello, world</h1>
+    <p>Text with &lt;entities&gt; &#169; and <a href="https://example.com">a link</a>.</p>
+    <img src="x.png" alt="pic"/>
+    <script type="module">
+      const greeting: string = "hi";
+      function greet(name: string): string {
+        return `${greeting}, ${name}!`;
+      }
+      // regex and division both appear below
+      const re = /ab+c/gi;
+      let n = 10 / 2;
+      console.log(greet("world"), re.test("abc"), n);
+    </script>
+  </body>
+</html>

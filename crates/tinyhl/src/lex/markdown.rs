@@ -12,10 +12,12 @@
 //! - Blockquote line prefix `>` at column 0.
 //! - List markers (`-` / `*` / `+` / digits-then-`.`/`)`) at column 0.
 //! - Fenced code blocks with backtick or tilde fences of length at least
-//!   three. Info strings `rust`/`rs`, `c`, `csv`, `json`, `xml`, and `css`
-//!   (case-insensitive ASCII) dispatch to the corresponding language. Other
-//!   info strings and missing closers emit the body as an opaque
-//!   [`CODE_BLOCK`] token.
+//!   three. Info strings `rust`/`rs`, `c`, `csv`, `json`, `xml`, `css`,
+//!   `ts`/`typescript`, and `html`/`htm` (case-insensitive ASCII) dispatch to
+//!   the corresponding language. An embedded `html` block in turn embeds CSS
+//!   and TypeScript for its `<style>` and `<script>` content. Other info
+//!   strings and missing closers emit the body as an opaque [`CODE_BLOCK`]
+//!   token.
 //!
 //! [`EMPHASIS`]: kinds::EMPHASIS
 //! [`CODE_BLOCK`]: kinds::CODE_BLOCK
@@ -576,6 +578,8 @@ fn info_to_language(
         b"json" => Some(Language::Json),
         b"xml" => Some(Language::Xml),
         b"css" => Some(Language::Css),
+        b"ts" | b"typescript" => Some(Language::Ts),
+        b"html" | b"htm" => Some(Language::Html),
         _ => None,
     }
 }

@@ -404,6 +404,8 @@ fn parse_language(arg: &str) -> Result<Language, String> {
         "toml" => Ok(Language::Toml),
         "md" | "markdown" => Ok(Language::Markdown),
         "xml" => Ok(Language::Xml),
+        "css" => Ok(Language::Css),
+        "html" | "htm" => Ok(Language::Html),
         other => Err(format!("unsupported language: {other}")),
     }
 }

@@ -40,6 +40,11 @@ fn load_css(name: &str) -> String {
     std::fs::read_to_string(path).unwrap_or_else(|e| panic!("fixture {name}: {e}"))
 }
 
+fn load_html(name: &str) -> String {
+    let path = format!("{}/fixtures/html/{name}", env!("CARGO_MANIFEST_DIR"));
+    std::fs::read_to_string(path).unwrap_or_else(|e| panic!("fixture {name}: {e}"))
+}
+
 fn tokens_of(language: Language, s: &str) -> Vec<tinyhl::Token> {
     let src: &dyn Source = &s;
     let table = TokenTable::new(language, src);
@@ -487,4 +492,153 @@ fn css_fixture_exercises_expected_kinds() {
             "css fixture should exercise kind {required}"
         );
     }
+}
+
+#[test]
+fn simple_html_coverage_and_tags() {
+    let input = load_html("simple.html.in");
+    let tokens = tokens_of(Language::Html, &input);
+
+    let mut pos = 0u32;
+    let html_tag = Language::Html.tag();
+    for t in &tokens {
+        assert_eq!(t.span.offset, pos, "gap before {pos}");
+        pos += t.span.len;
+        if t.nest == 0 {
+            assert_eq!(
+                t.lang_tag(),
+                html_tag,
+                "outer-level token at {} should be html",
+                t.span.offset,
+            );
+        } else {
+            assert_ne!(
+                t.lang_tag(),
+                html_tag,
+                "embedded token at {} should not be html",
+                t.span.offset,
+            );
+        }
+    }
+    assert_eq!(pos as usize, input.len());
+}
+
+#[test]
+fn html_fixture_exercises_expected_kinds() {
+    use tinyhl::kind as kinds;
+
+    let mut seen = std::collections::HashSet::new();
+    let input = load_html("simple.html.in");
+    for t in tokens_of(Language::Html, &input) {
+        if t.lang_tag() == Language::Html.tag() {
+            seen.insert(t.local_kind());
+        }
+    }
+    for required in [
+        kinds::TEXT,
+        kinds::WHITESPACE,
+        kinds::LT,
+        kinds::GT,
+        kinds::SLASH,
+        kinds::EQ,
+        kinds::TAG_NAME,
+        kinds::ATTR_NAME,
+        kinds::STRING,
+        kinds::COMMENT,
+        kinds::ENTITY_REF,
+        kinds::DOCTYPE,
+    ] {
+        assert!(
+            seen.contains(&required),
+            "html fixture should exercise kind {required}"
+        );
+    }
+}
+
+#[test]
+fn markdown_ts_fence_embeds_typescript() {
+    let source =
+        "intro\n\n```ts\nconst x: number = 42;\n```\n\n```typescript\nlet y = `hi`;\n```\n";
+    let tokens = tokens_of(Language::Markdown, source);
+    let embedded: std::collections::HashSet<u8> = tokens
+        .iter()
+        .filter(|t| t.nest >= 1)
+        .map(|t| t.lang_tag())
+        .collect();
+    assert!(
+        embedded.contains(&Language::Ts.tag()),
+        "both `ts` and `typescript` fences should embed TypeScript"
+    );
+}
+
+#[test]
+fn markdown_html_embed_nests_css_and_ts() {
+    // Full embed stack: Markdown (nest 0) → HTML (nest 1) → CSS / TS (nest 2).
+    let source = "# Title\n\n```html\n<style>.a{color:red}</style>\n<p>hi &amp; bye</p>\n<script>const x = 1;</script>\n```\n\ndone\n";
+    let tokens = tokens_of(Language::Markdown, source);
+
+    // Coverage stays contiguous through two levels of embedding.
+    let mut pos = 0u32;
+    for t in &tokens {
+        assert_eq!(t.span.offset, pos, "gap before {pos}");
+        pos += t.span.len;
+    }
+    assert_eq!(pos as usize, source.len());
+
+    let mut seen = std::collections::HashSet::new();
+    for t in &tokens {
+        seen.insert((t.nest, t.lang_tag()));
+    }
+    assert!(
+        seen.contains(&(0u8, Language::Markdown.tag())),
+        "outer level should be Markdown"
+    );
+    assert!(
+        seen.contains(&(1u8, Language::Html.tag())),
+        "first embed level should be HTML"
+    );
+    assert!(
+        seen.contains(&(2u8, Language::Css.tag())),
+        "<style> should embed CSS at nest 2"
+    );
+    assert!(
+        seen.contains(&(2u8, Language::Ts.tag())),
+        "<script> should embed TypeScript at nest 2"
+    );
+
+    // Every token's language tag must agree with its nesting depth: only the
+    // outermost level is Markdown, and the deepest tokens are never HTML.
+    for t in &tokens {
+        match t.nest {
+            0 => assert_eq!(t.lang_tag(), Language::Markdown.tag()),
+            1 => assert_eq!(t.lang_tag(), Language::Html.tag()),
+            2 => assert!(
+                t.lang_tag() == Language::Css.tag() || t.lang_tag() == Language::Ts.tag(),
+                "nest-2 token at {} should be CSS or TS",
+                t.span.offset
+            ),
+            other => panic!("unexpected nest depth {other}"),
+        }
+    }
+}
+
+#[test]
+fn html_embed_dispatches_to_inner_languages() {
+    let input = load_html("simple.html.in");
+    let tokens = tokens_of(Language::Html, &input);
+
+    let mut nested_langs = std::collections::HashSet::new();
+    for t in &tokens {
+        if t.nest >= 1 {
+            nested_langs.insert(t.lang_tag());
+        }
+    }
+    assert!(
+        nested_langs.contains(&Language::Css.tag()),
+        "style block should embed CSS"
+    );
+    assert!(
+        nested_langs.contains(&Language::Ts.tag()),
+        "script block should embed TypeScript"
+    );
 }

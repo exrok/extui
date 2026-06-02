@@ -310,7 +310,7 @@ fn starts_with_ascii_case(view: &mut SourceView<'_>, cursor: u32, pattern: &[u8]
     true
 }
 
-fn starts_doctype(view: &mut SourceView<'_>, cursor: u32) -> bool {
+pub(crate) fn starts_doctype(view: &mut SourceView<'_>, cursor: u32) -> bool {
     if !starts_with_ascii_case(view, cursor, DOCTYPE) {
         return false;
     }
@@ -396,7 +396,12 @@ pub(crate) fn scan_quoted(view: &mut SourceView<'_>, cursor: u32, quote: u8) -> 
 }
 
 #[inline]
-fn is_name_start(view: &mut SourceView<'_>, cursor: u32, first: u8, allow_dollar: bool) -> bool {
+pub(crate) fn is_name_start(
+    view: &mut SourceView<'_>,
+    cursor: u32,
+    first: u8,
+    allow_dollar: bool,
+) -> bool {
     if first < 0x80 {
         is_name_start_ascii(first, allow_dollar)
     } else {
@@ -416,7 +421,7 @@ fn is_name_continue_ascii(b: u8, allow_dollar: bool) -> bool {
     is_name_start_ascii(b, allow_dollar) || byteclass::is_digit(b) || matches!(b, b'-' | b'.')
 }
 
-fn scan_text_run(view: &mut SourceView<'_>, cursor: u32) -> u32 {
+pub(crate) fn scan_text_run(view: &mut SourceView<'_>, cursor: u32) -> u32 {
     let mut end = cursor;
     loop {
         let (base, page) = view.window_at(end);
@@ -434,7 +439,7 @@ fn scan_text_run(view: &mut SourceView<'_>, cursor: u32) -> u32 {
     }
 }
 
-fn scan_entity_ref(view: &mut SourceView<'_>, cursor: u32) -> ScanResult {
+pub(crate) fn scan_entity_ref(view: &mut SourceView<'_>, cursor: u32) -> ScanResult {
     let mut end = cursor + 1;
     match view.byte_at(end) {
         Some(b'#') => {
@@ -489,11 +494,11 @@ fn scan_entity_ref(view: &mut SourceView<'_>, cursor: u32) -> ScanResult {
     }
 }
 
-fn scan_comment(view: &mut SourceView<'_>, cursor: u32) -> ScanResult {
+pub(crate) fn scan_comment(view: &mut SourceView<'_>, cursor: u32) -> ScanResult {
     scan_until_seq(view, cursor + 4, b"-->")
 }
 
-fn scan_cdata(view: &mut SourceView<'_>, cursor: u32) -> ScanResult {
+pub(crate) fn scan_cdata(view: &mut SourceView<'_>, cursor: u32) -> ScanResult {
     scan_until_seq(view, cursor + 9, b"]]>")
 }
 
@@ -515,7 +520,7 @@ fn scan_until_seq(view: &mut SourceView<'_>, mut end: u32, close: &[u8]) -> Scan
     }
 }
 
-fn scan_doctype(view: &mut SourceView<'_>, cursor: u32) -> ScanResult {
+pub(crate) fn scan_doctype(view: &mut SourceView<'_>, cursor: u32) -> ScanResult {
     let mut end = cursor + DOCTYPE.len() as u32;
     let mut bracket_depth = 0u16;
     loop {

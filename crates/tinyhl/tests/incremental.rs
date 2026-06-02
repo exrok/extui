@@ -608,6 +608,103 @@ fn css_fixture_sweep_over_chunks() {
 }
 
 #[test]
+fn html_insert_sweep() {
+    let source = "<div id=\"a\"><style>b{color:red}</style><p>hi &amp; bye</p>\
+                  <script>let x=`v`;</script></div>";
+    for off in 0..=source.len() {
+        for ins in [
+            "x", "<", ">", "/", "=", "\"", " ", "&", "{", "}", "`", ";", "#",
+        ] {
+            assert_mutate_matches_lang(Language::Html, source, Span::new(off as u32, 0), ins);
+        }
+    }
+}
+
+#[test]
+fn html_delete_sweep() {
+    let source = "<div id=\"a\"><style>b{color:red}</style><p>hi &amp; bye</p>\
+                  <script>let x=`v`;</script></div>";
+    for off in 0..source.len() {
+        assert_mutate_matches_lang(Language::Html, source, Span::new(off as u32, 1), "");
+    }
+}
+
+#[test]
+fn html_replace_sweep() {
+    let source = "<!DOCTYPE html><a href='x'>t</a><!--c-->&copy;<br/>";
+    for off in 0..source.len() {
+        for rep in ["x", "<", ">", "/", "=", "\"", "'", "&", " ", "!", "?"] {
+            assert_mutate_matches_lang(Language::Html, source, Span::new(off as u32, 1), rep);
+        }
+    }
+}
+
+#[test]
+fn html_style_embed_sweep() {
+    // Every edit in and around a `<style>` block must keep the embedded CSS
+    // tokens in sync, including edits that make or break the `</style>` closer.
+    let source =
+        "<style>\n  .x::before { content: \"\\2014\"; width: calc(1% - 2px); }\n</style>after";
+    for off in 0..=source.len() {
+        for ins in ["x", "<", ">", "/", "{", "}", "\"", " ", "\n", "%", "#"] {
+            assert_mutate_matches_lang(Language::Html, source, Span::new(off as u32, 0), ins);
+        }
+    }
+    for off in 0..source.len() {
+        assert_mutate_matches_lang(Language::Html, source, Span::new(off as u32, 1), "");
+    }
+}
+
+#[test]
+fn html_script_embed_sweep() {
+    // The `<script>` body is TypeScript: template literals, regex, and
+    // comments all carry lexer state that must survive edits at the embed
+    // boundary.
+    let source = "<script>\n  const r = /ab+c/g;\n  let s = `hi ${x}`; // ok\n</script>tail";
+    for off in 0..=source.len() {
+        for ins in ["x", "<", ">", "/", "`", "$", "{", "}", "\n", " ", "*"] {
+            assert_mutate_matches_lang(Language::Html, source, Span::new(off as u32, 0), ins);
+        }
+    }
+    for off in 0..source.len() {
+        assert_mutate_matches_lang(Language::Html, source, Span::new(off as u32, 1), "");
+    }
+}
+
+#[test]
+fn html_fixture_sweep_over_chunks() {
+    let path = format!(
+        "{}/fixtures/html/simple.html.in",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let source = std::fs::read_to_string(&path).unwrap();
+    let step = (source.len() / 64).max(1);
+    for off in (0..source.len()).step_by(step) {
+        for rep in ["x", "<", ">", "/", "\"", "&", "{", "}", "`", "<!--"] {
+            assert_mutate_matches_lang(Language::Html, &source, Span::new(off as u32, 0), rep);
+        }
+    }
+}
+
+#[test]
+fn markdown_html_nested_embed_sweep() {
+    // Two levels of embedding: Markdown → HTML → CSS / TS. Every edit, at
+    // every offset, must keep `mutate` identical to a fresh parse — including
+    // edits that make or break the Markdown fence, the HTML tags, and the
+    // inner `<style>` / `<script>` rawtext boundaries.
+    let source = "# T\n\n```html\n<style>b{color:red}</style>\n<p>hi</p>\n\
+                  <script>let x=`v`;</script>\n```\n\nend\n";
+    for off in 0..=source.len() {
+        for ins in ["x", "`", "<", ">", "/", "{", "}", " ", "\n", "&", "$"] {
+            assert_mutate_matches_lang(Language::Markdown, source, Span::new(off as u32, 0), ins);
+        }
+    }
+    for off in 0..source.len() {
+        assert_mutate_matches_lang(Language::Markdown, source, Span::new(off as u32, 1), "");
+    }
+}
+
+#[test]
 fn chain_of_edits_stays_in_sync() {
     let mut current = String::from("[]");
     let src: &dyn Source = &current.as_str();

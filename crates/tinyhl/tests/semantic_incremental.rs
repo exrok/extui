@@ -106,6 +106,29 @@ fn markdown_embed_semantic_incremental_matches_fresh() {
 }
 
 #[test]
+fn html_embed_semantic_incremental_matches_fresh() {
+    let source = "<style>.a { color: red }</style>\n<script>\nfunction make(arg: Foo): Foo { return build(arg); }\n</script>\n";
+    let make = source.find("make").unwrap();
+    let foo = source.find("Foo").unwrap();
+    let build = source.find("build").unwrap();
+    let cases: &[(usize, usize, &str)] = &[
+        (0, 0, "<!-- top -->\n"),
+        (make, 4, "create"),
+        (foo, 3, "Widget"),
+        (build, 5, "factory"),
+        (source.len(), 0, "<p>tail</p>\n"),
+    ];
+    for &(off, len, rep) in cases {
+        assert_incremental_semantics(
+            Language::Html,
+            source,
+            Span::new(off as u32, len as u32),
+            rep,
+        );
+    }
+}
+
+#[test]
 fn large_semantic_insert_shifts_converged_tail() {
     let mut source = String::from("fn head(arg: Type) -> Type { arg }\n");
     for i in 0..260 {
