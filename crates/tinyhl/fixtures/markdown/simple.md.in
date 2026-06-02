@@ -35,6 +35,11 @@ int main(void) {
 }
 ```
 
+```csv
+name,age
+Alice,42
+```
+
 ```json
 {"a": 1, "b": [true, null]}
 ```

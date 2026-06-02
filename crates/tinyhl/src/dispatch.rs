@@ -1,7 +1,8 @@
 //! Per-language lexer dispatch.
 
 use crate::lex::{
-    Lexer, StepBuf, c::C, json::Json, markdown::Markdown, rust::Rust, toml::Toml, ts::Ts, xml::Xml,
+    Lexer, StepBuf, c::C, csv::Csv, json::Json, markdown::Markdown, rust::Rust, toml::Toml, ts::Ts,
+    xml::Xml,
 };
 use crate::{Language, LexState, SourceView};
 
@@ -20,8 +21,6 @@ pub(crate) fn step_batch(
         Language::Toml => Toml::step_batch(view, cursor, state, out),
         Language::Ts => Ts::step_batch(view, cursor, state, out),
         Language::Xml => Xml::step_batch(view, cursor, state, out),
-        Language::Csv => {
-            unimplemented!("lexer not yet implemented for {language:?}")
-        }
+        Language::Csv => Csv::step_batch(view, cursor, state, out),
     }
 }

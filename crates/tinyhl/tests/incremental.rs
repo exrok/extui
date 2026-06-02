@@ -508,6 +508,48 @@ fn xml_fixture_sweep_over_chunks() {
 }
 
 #[test]
+fn csv_insert_sweep() {
+    let source = "name,age\nAlice,42\n\"a,b\",-1\n";
+    for off in 0..=source.len() {
+        for ins in ["x", ",", "\"", "\n", "\r\n", "5"] {
+            assert_mutate_matches_lang(Language::Csv, source, Span::new(off as u32, 0), ins);
+        }
+    }
+}
+
+#[test]
+fn csv_delete_sweep() {
+    let source = "name,age\nAlice,42\n\"a,b\",-1\n";
+    for off in 0..source.len() {
+        assert_mutate_matches_lang(Language::Csv, source, Span::new(off as u32, 1), "");
+    }
+}
+
+#[test]
+fn csv_multiline_quoted_sweep() {
+    let source = "id,note\r\n1,\"line 1\nline 2, with comma\nline 3\"\r\n2,\"x\"\"y\"\n";
+    for off in 0..=source.len() {
+        for ins in ["x", ",", "\"", "\n", "\r\n", "9"] {
+            assert_mutate_matches_lang(Language::Csv, source, Span::new(off as u32, 0), ins);
+        }
+    }
+    for off in 0..source.len() {
+        assert_mutate_matches_lang(Language::Csv, source, Span::new(off as u32, 1), "");
+    }
+}
+
+#[test]
+fn csv_fixture_sweep_over_chunks() {
+    let path = format!("{}/fixtures/csv/simple.csv.in", env!("CARGO_MANIFEST_DIR"));
+    let source = std::fs::read_to_string(&path).unwrap();
+    for off in 0..=source.len() {
+        for rep in ["x", ",", "\"", "\n"] {
+            assert_mutate_matches_lang(Language::Csv, &source, Span::new(off as u32, 0), rep);
+        }
+    }
+}
+
+#[test]
 fn chain_of_edits_stays_in_sync() {
     let mut current = String::from("[]");
     let src: &dyn Source = &current.as_str();

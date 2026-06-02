@@ -30,6 +30,11 @@ fn load_xml(name: &str) -> String {
     std::fs::read_to_string(path).unwrap_or_else(|e| panic!("fixture {name}: {e}"))
 }
 
+fn load_csv(name: &str) -> String {
+    let path = format!("{}/fixtures/csv/{name}", env!("CARGO_MANIFEST_DIR"));
+    std::fs::read_to_string(path).unwrap_or_else(|e| panic!("fixture {name}: {e}"))
+}
+
 fn tokens_of(language: Language, s: &str) -> Vec<tinyhl::Token> {
     let src: &dyn Source = &s;
     let table = TokenTable::new(language, src);
@@ -326,6 +331,10 @@ fn markdown_embed_dispatches_to_inner_languages() {
         "c fence should embed"
     );
     assert!(
+        nested_langs.contains(&Language::Csv.tag()),
+        "csv fence should embed"
+    );
+    assert!(
         nested_langs.contains(&Language::Json.tag()),
         "json fence should embed"
     );
@@ -377,6 +386,43 @@ fn xml_fixture_exercises_expected_kinds() {
         assert!(
             seen.contains(&required),
             "xml fixture should exercise kind {required}"
+        );
+    }
+}
+
+#[test]
+fn simple_csv_coverage_and_tags() {
+    let input = load_csv("simple.csv.in");
+    let tokens = tokens_of(Language::Csv, &input);
+
+    let mut pos = 0u32;
+    for t in &tokens {
+        assert_eq!(t.span.offset, pos, "gap before {pos}");
+        pos += t.span.len;
+        assert_eq!(t.lang_tag(), Language::Csv.tag());
+    }
+    assert_eq!(pos as usize, input.len());
+}
+
+#[test]
+fn csv_fixture_exercises_expected_kinds() {
+    use tinyhl::kind as kinds;
+
+    let mut seen = std::collections::HashSet::new();
+    let input = load_csv("simple.csv.in");
+    for t in tokens_of(Language::Csv, &input) {
+        seen.insert(t.local_kind());
+    }
+    for required in [
+        kinds::TEXT,
+        kinds::WHITESPACE,
+        kinds::COMMA,
+        kinds::STRING,
+        kinds::NUMBER,
+    ] {
+        assert!(
+            seen.contains(&required),
+            "csv fixture should exercise kind {required}"
         );
     }
 }

@@ -194,7 +194,7 @@ pub const LT_PERCENT: u16 = 163;
 /// `%>` digraph for `}`.
 pub const PERCENT_GT: u16 = 164;
 
-// Markdown-specific structure.
+// Plain text / Markdown-specific structure.
 
 /// Plain text run between meaningful syntactic bytes.
 pub const TEXT: u16 = 200;

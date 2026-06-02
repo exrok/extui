@@ -399,6 +399,7 @@ fn parse_language(arg: &str) -> Result<Language, String> {
         "json" => Ok(Language::Json),
         "rust" | "rs" => Ok(Language::Rust),
         "c" => Ok(Language::C),
+        "csv" => Ok(Language::Csv),
         "ts" | "typescript" => Ok(Language::Ts),
         "toml" => Ok(Language::Toml),
         "md" | "markdown" => Ok(Language::Markdown),

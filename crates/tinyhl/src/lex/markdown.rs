@@ -12,7 +12,7 @@
 //! - Blockquote line prefix `>` at column 0.
 //! - List markers (`-` / `*` / `+` / digits-then-`.`/`)`) at column 0.
 //! - Fenced code blocks with backtick or tilde fences of length at least
-//!   three. Info strings `rust`/`rs`, `c`, `json`, and `xml`
+//!   three. Info strings `rust`/`rs`, `c`, `csv`, `json`, and `xml`
 //!   (case-insensitive ASCII) dispatch to the corresponding language. Other
 //!   info strings and missing closers emit the body as an opaque
 //!   [`CODE_BLOCK`] token.
@@ -572,6 +572,7 @@ fn info_to_language(
     match &buf[..len] {
         b"rust" | b"rs" => Some(Language::Rust),
         b"c" => Some(Language::C),
+        b"csv" => Some(Language::Csv),
         b"json" => Some(Language::Json),
         b"xml" => Some(Language::Xml),
         _ => None,

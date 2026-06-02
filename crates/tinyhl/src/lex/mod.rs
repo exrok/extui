@@ -6,6 +6,7 @@
 
 pub(crate) mod byteclass;
 pub(crate) mod c;
+pub(crate) mod csv;
 pub(crate) mod json;
 pub mod kw;
 pub(crate) mod markdown;
