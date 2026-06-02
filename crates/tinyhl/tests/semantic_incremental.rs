@@ -70,6 +70,32 @@ fn ts_semantic_incremental_matches_fresh() {
 }
 
 #[test]
+fn tsx_semantic_incremental_matches_fresh() {
+    // The TS analyzer runs over the TSX top level and re-enters across JSX
+    // expression containers; edits that make or break JSX must keep the
+    // semantic overlay identical to a fresh build.
+    let source =
+        "const make = (name: Name) => <div title={name}>{render(name)}</div>; const z = make(x);";
+    let name = source.find("Name").unwrap();
+    let render = source.find("render").unwrap();
+    let cases: &[(usize, usize, &str)] = &[
+        (0, 0, "export "),
+        (6, 4, "build"),
+        (name, 4, "Label"),
+        (render, 6, "format"),
+        (source.len(), 0, "\nconst w = <p/>;"),
+    ];
+    for &(off, len, rep) in cases {
+        assert_incremental_semantics(
+            Language::Tsx,
+            source,
+            Span::new(off as u32, len as u32),
+            rep,
+        );
+    }
+}
+
+#[test]
 fn c_semantic_incremental_matches_fresh() {
     let source = "struct point { int x; int y; }; static int distance(struct point *a, struct point *b) { return a->x + b->y; }";
     for (off, len, rep) in [

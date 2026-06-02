@@ -8,7 +8,12 @@ use crate::lex::{LexStep, Lexer, StepBuf};
 use crate::token::flags;
 use crate::{LexState, SourceView};
 
-const STATE_EXPR_END: u16 = 1 << 0;
+/// Set in [`LexState`] when the previous token ends a primary expression
+/// (a value), so a following `/` is division and a `<` is a comparison rather
+/// than the start of a regex or JSX element. Shared with the [`Tsx`] lexer.
+///
+/// [`Tsx`]: crate::lex::tsx::Tsx
+pub(crate) const STATE_EXPR_END: u16 = 1 << 0;
 
 kw::kw_table! {
     static TS_KWS = [
@@ -138,7 +143,7 @@ impl Lexer for Ts {
     }
 }
 
-fn classify(
+pub(crate) fn classify(
     view: &mut SourceView<'_>,
     cursor: u32,
     first: u8,
@@ -356,7 +361,7 @@ fn scan_operator(view: &mut SourceView<'_>, cursor: u32, b0: u8) -> (u16, u32) {
 /// next byte (with `\r\n` treated as a single escaped line terminator) and
 /// ends on the matching quote. A bare newline or end-of-source before the
 /// closing quote terminates the scan with an error.
-fn scan_string(view: &mut SourceView<'_>, cursor: u32, quote: u8) -> ScanResult {
+pub(crate) fn scan_string(view: &mut SourceView<'_>, cursor: u32, quote: u8) -> ScanResult {
     let mut end = cursor + 1;
     loop {
         match view.byte_at(end) {
@@ -474,7 +479,7 @@ fn scan_regex(view: &mut SourceView<'_>, cursor: u32) -> ScanResult {
 /// substitution the scanner recognises nested strings, templates, and
 /// comments so that their contents (which may contain `{`/`}` or backticks)
 /// do not prematurely terminate the outer template.
-fn scan_template(view: &mut SourceView<'_>, cursor: u32) -> ScanResult {
+pub(crate) fn scan_template(view: &mut SourceView<'_>, cursor: u32) -> ScanResult {
     // `depths` tracks brace depth for each nested `${…}` expression currently
     // open. Empty ⇒ we are in the literal's body. Max nesting of 15 is
     // sufficient for any realistic template and keeps the scanner non-

@@ -85,7 +85,7 @@ impl StateSnapshot {
     fn for_lang(lang: Language) -> Self {
         match lang {
             Language::Rust => Self::Rust(RustState::default()),
-            Language::Ts => Self::Ts(TsState::default()),
+            Language::Ts | Language::Tsx => Self::Ts(TsState::default()),
             Language::C => Self::C(CState::default()),
             _ => Self::None,
         }
@@ -495,7 +495,7 @@ fn token_eq(src: &dyn Source, token: Token, expected: &[u8]) -> bool {
 fn is_ident(token: Token, language: Language) -> bool {
     match language {
         Language::Rust => kind_local(token.kind) == kind::IDENT,
-        Language::Ts => kind_local(token.kind) == kind::IDENT,
+        Language::Ts | Language::Tsx => kind_local(token.kind) == kind::IDENT,
         Language::C => kind_local(token.kind) == kind::IDENT,
         _ => false,
     }
@@ -507,7 +507,9 @@ fn is_trivia(token: Token) -> bool {
             kind_local(token.kind),
             kind::WHITESPACE | kind::COMMENT | kind::DOC_COMMENT
         ),
-        Language::Ts => matches!(kind_local(token.kind), kind::WHITESPACE | kind::COMMENT),
+        Language::Ts | Language::Tsx => {
+            matches!(kind_local(token.kind), kind::WHITESPACE | kind::COMMENT)
+        }
         Language::C => matches!(kind_local(token.kind), kind::WHITESPACE | kind::COMMENT),
         _ => false,
     }

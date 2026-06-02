@@ -66,6 +66,17 @@ pub enum Language {
     Markdown = 7,
     Css = 8,
     Html = 9,
+    /// TypeScript with embedded JSX. Use this for both `.tsx` and `.jsx`
+    /// source — it is a strict superset of [`Language::Ts`] that descends into
+    /// embedded JSX markup for elements in expression position.
+    Tsx = 10,
+    /// **Internal embed target — not a root language.** Lexes exactly one JSX
+    /// element or fragment and then stops, so passing it to
+    /// [`TokenTable::new`] would lex only the first element of a file. It
+    /// exists solely as the descend target used by [`Language::Tsx`]; to
+    /// highlight a `.tsx` or `.jsx` file use [`Language::Tsx`] instead.
+    #[doc(hidden)]
+    InternalSingleJsxElement = 11,
 }
 
 impl Language {
@@ -93,6 +104,8 @@ impl Language {
             7 => Self::Markdown,
             8 => Self::Css,
             9 => Self::Html,
+            10 => Self::Tsx,
+            11 => Self::InternalSingleJsxElement,
             _ => panic!("unknown language tag"),
         }
     }

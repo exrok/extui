@@ -401,6 +401,7 @@ fn parse_language(arg: &str) -> Result<Language, String> {
         "c" => Ok(Language::C),
         "csv" => Ok(Language::Csv),
         "ts" | "typescript" => Ok(Language::Ts),
+        "tsx" | "jsx" => Ok(Language::Tsx),
         "toml" => Ok(Language::Toml),
         "md" | "markdown" => Ok(Language::Markdown),
         "xml" => Ok(Language::Xml),

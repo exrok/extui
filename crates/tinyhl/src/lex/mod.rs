@@ -10,12 +10,14 @@ pub(crate) mod css;
 pub(crate) mod csv;
 pub(crate) mod html;
 pub(crate) mod json;
+pub(crate) mod jsx;
 pub mod kw;
 pub(crate) mod markdown;
 pub(crate) mod rust;
 pub(crate) mod scan;
 pub(crate) mod toml;
 pub(crate) mod ts;
+pub(crate) mod tsx;
 pub(crate) mod xml;
 
 use crate::{Language, LexState};

@@ -383,6 +383,107 @@ fn ts_fixture_sweep_over_chunks() {
 }
 
 #[test]
+fn tsx_insert_sweep() {
+    let source = "const e = <div id=\"a\" on={h}>hi {x + 1} <b/></div>;\n";
+    for off in 0..=source.len() {
+        for ins in [
+            "x", "<", ">", "/", "=", "\"", "'", "{", "}", "`", " ", "\n", "&", "$",
+        ] {
+            assert_mutate_matches_lang(Language::Tsx, source, Span::new(off as u32, 0), ins);
+        }
+    }
+}
+
+#[test]
+fn tsx_delete_sweep() {
+    let source = "const e = <div id=\"a\" on={h}>hi {x + 1} <b/></div>;\n";
+    for off in 0..source.len() {
+        assert_mutate_matches_lang(Language::Tsx, source, Span::new(off as u32, 1), "");
+    }
+}
+
+#[test]
+fn tsx_replace_sweep() {
+    let source = "return cond ? <a href='u'>{x}</a> : <>frag</>;";
+    for off in 0..source.len() {
+        for rep in ["x", "<", ">", "/", "{", "}", "\"", "'", "&", " ", "="] {
+            assert_mutate_matches_lang(Language::Tsx, source, Span::new(off as u32, 1), rep);
+        }
+    }
+}
+
+#[test]
+fn tsx_jsx_vs_operator_sweep() {
+    // Edits flip `<` between comparison/shift operators and JSX openers, and
+    // make or break the JSX trigger (the byte after `<`). Each must keep
+    // `mutate` identical to a fresh parse.
+    let source = "const a = b < c; const d = <e/>; let f = g << 2;\n";
+    for off in 0..=source.len() {
+        for ins in ["x", "<", ">", "/", " ", "{", "}", "=", "\n"] {
+            assert_mutate_matches_lang(Language::Tsx, source, Span::new(off as u32, 0), ins);
+        }
+    }
+    for off in 0..source.len() {
+        assert_mutate_matches_lang(Language::Tsx, source, Span::new(off as u32, 1), "");
+    }
+}
+
+#[test]
+fn tsx_nested_expr_and_template_sweep() {
+    // Deep recursion: TSX → JSX → `{…}` → TSX → template literal that itself
+    // embeds an expression. State must survive edits at every boundary.
+    let source = "const v = <p>{`a ${q}` + h(<i>{n}</i>)}</p>;\n";
+    for off in 0..=source.len() {
+        for ins in ["x", "`", "$", "{", "}", "<", ">", "/", " ", "\n"] {
+            assert_mutate_matches_lang(Language::Tsx, source, Span::new(off as u32, 0), ins);
+        }
+    }
+    for off in 0..source.len() {
+        assert_mutate_matches_lang(Language::Tsx, source, Span::new(off as u32, 1), "");
+    }
+}
+
+#[test]
+fn tsx_unicode_ident_sweep() {
+    let source = "const δ = <Δ ω={x}>{φ}</Δ>;\n";
+    for off in 0..=source.len() {
+        if !source.is_char_boundary(off) {
+            continue;
+        }
+        for ins in ["x", "α", "<", "{", "}", " "] {
+            assert_mutate_matches_lang(Language::Tsx, source, Span::new(off as u32, 0), ins);
+        }
+    }
+}
+
+#[test]
+fn tsx_fixture_sweep_over_chunks() {
+    let path = format!("{}/fixtures/tsx/simple.tsx.in", env!("CARGO_MANIFEST_DIR"));
+    let source = std::fs::read_to_string(&path).unwrap();
+    let step = (source.len() / 96).max(1);
+    for off in (0..source.len()).step_by(step) {
+        for rep in ["x", "<", ">", "/", "\"", "'", "{", "}", "`", " ", "&"] {
+            assert_mutate_matches_lang(Language::Tsx, &source, Span::new(off as u32, 0), rep);
+        }
+    }
+}
+
+#[test]
+fn markdown_tsx_nested_embed_sweep() {
+    // Markdown → TSX → JSX → `{…}` → TSX. Every edit at every offset must keep
+    // `mutate` identical to a fresh parse across all four nesting levels.
+    let source = "# T\n\n```tsx\nconst e = <p>{x + 1}</p>;\n```\n\nend\n";
+    for off in 0..=source.len() {
+        for ins in ["x", "`", "<", ">", "/", "{", "}", " ", "\n"] {
+            assert_mutate_matches_lang(Language::Markdown, source, Span::new(off as u32, 0), ins);
+        }
+    }
+    for off in 0..source.len() {
+        assert_mutate_matches_lang(Language::Markdown, source, Span::new(off as u32, 1), "");
+    }
+}
+
+#[test]
 fn markdown_insert_sweep() {
     let source = "# Hi\n\n*em* and `code` and [a](b).\n\n- one\n- two\n> quote\n";
     for off in 0..=source.len() {

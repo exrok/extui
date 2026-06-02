@@ -13,9 +13,10 @@
 //! - List markers (`-` / `*` / `+` / digits-then-`.`/`)`) at column 0.
 //! - Fenced code blocks with backtick or tilde fences of length at least
 //!   three. Info strings `rust`/`rs`, `c`, `csv`, `json`, `xml`, `css`,
-//!   `ts`/`typescript`, and `html`/`htm` (case-insensitive ASCII) dispatch to
-//!   the corresponding language. An embedded `html` block in turn embeds CSS
-//!   and TypeScript for its `<style>` and `<script>` content. Other info
+//!   `ts`/`typescript`, `tsx`/`jsx`, and `html`/`htm` (case-insensitive ASCII)
+//!   dispatch to the corresponding language. An embedded `html` block in turn
+//!   embeds CSS and TypeScript for its `<style>` and `<script>` content; a
+//!   `tsx` block embeds JSX for elements in expression position. Other info
 //!   strings and missing closers emit the body as an opaque [`CODE_BLOCK`]
 //!   token.
 //!
@@ -579,6 +580,7 @@ fn info_to_language(
         b"xml" => Some(Language::Xml),
         b"css" => Some(Language::Css),
         b"ts" | b"typescript" => Some(Language::Ts),
+        b"tsx" | b"jsx" => Some(Language::Tsx),
         b"html" | b"htm" => Some(Language::Html),
         _ => None,
     }

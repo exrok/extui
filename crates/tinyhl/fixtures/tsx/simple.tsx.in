@@ -1,0 +1,36 @@
+// A small TSX fixture exercising TypeScript with embedded JSX.
+import { useState } from "react";
+
+interface Props {
+    title: string;
+    count?: number;
+}
+
+type Item = { id: number; label: string };
+
+function Badge({ label }: { label: string }): JSX.Element {
+    return <span className="badge" data-label={label}>{label}</span>;
+}
+
+export function Panel({ title, count = 0 }: Props) {
+    const [items, setItems] = useState<Item[]>([]);
+    const total = items.length + count;
+    const heading = total > 0 ? <h1>{title}</h1> : <h1>empty</h1>;
+
+    return (
+        <section className="panel" hidden={total === 0}>
+            {heading}
+            <ul>
+                {items.map((it) => (
+                    <li key={it.id}>
+                        <Badge label={it.label} /> &mdash; #{it.id}
+                    </li>
+                ))}
+            </ul>
+            <>
+                <button onClick={() => setItems([])}>clear</button>
+                {count > 10 && <em>many!</em>}
+            </>
+        </section>
+    );
+}

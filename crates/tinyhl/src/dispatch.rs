@@ -1,8 +1,8 @@
 //! Per-language lexer dispatch.
 
 use crate::lex::{
-    Lexer, StepBuf, c::C, css::Css, csv::Csv, html::Html, json::Json, markdown::Markdown,
-    rust::Rust, toml::Toml, ts::Ts, xml::Xml,
+    Lexer, StepBuf, c::C, css::Css, csv::Csv, html::Html, json::Json, jsx::Jsx, markdown::Markdown,
+    rust::Rust, toml::Toml, ts::Ts, tsx::Tsx, xml::Xml,
 };
 use crate::{Language, LexState, SourceView};
 
@@ -24,5 +24,7 @@ pub(crate) fn step_batch(
         Language::Csv => Csv::step_batch(view, cursor, state, out),
         Language::Css => Css::step_batch(view, cursor, state, out),
         Language::Html => Html::step_batch(view, cursor, state, out),
+        Language::Tsx => Tsx::step_batch(view, cursor, state, out),
+        Language::InternalSingleJsxElement => Jsx::step_batch(view, cursor, state, out),
     }
 }

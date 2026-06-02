@@ -45,6 +45,11 @@ fn load_html(name: &str) -> String {
     std::fs::read_to_string(path).unwrap_or_else(|e| panic!("fixture {name}: {e}"))
 }
 
+fn load_tsx(name: &str) -> String {
+    let path = format!("{}/fixtures/tsx/{name}", env!("CARGO_MANIFEST_DIR"));
+    std::fs::read_to_string(path).unwrap_or_else(|e| panic!("fixture {name}: {e}"))
+}
+
 fn tokens_of(language: Language, s: &str) -> Vec<tinyhl::Token> {
     let src: &dyn Source = &s;
     let table = TokenTable::new(language, src);
@@ -620,6 +625,135 @@ fn markdown_html_embed_nests_css_and_ts() {
             other => panic!("unexpected nest depth {other}"),
         }
     }
+}
+
+#[test]
+fn simple_tsx_coverage_and_tags() {
+    let input = load_tsx("simple.tsx.in");
+    let tokens = tokens_of(Language::Tsx, &input);
+
+    let mut pos = 0u32;
+    let tsx_tag = Language::Tsx.tag();
+    for t in &tokens {
+        assert_eq!(t.span.offset, pos, "gap before {pos}");
+        pos += t.span.len;
+        if t.nest == 0 {
+            assert_eq!(
+                t.lang_tag(),
+                tsx_tag,
+                "outer-level token at {} should be tsx",
+                t.span.offset,
+            );
+        } else {
+            assert!(
+                t.lang_tag() == Language::InternalSingleJsxElement.tag() || t.lang_tag() == tsx_tag,
+                "embedded token at {} should be jsx or tsx",
+                t.span.offset,
+            );
+        }
+    }
+    assert_eq!(pos as usize, input.len());
+}
+
+#[test]
+fn tsx_fixture_exercises_expected_kinds() {
+    use tinyhl::kind as kinds;
+
+    let input = load_tsx("simple.tsx.in");
+    let tokens = tokens_of(Language::Tsx, &input);
+
+    let mut tsx_seen = std::collections::HashSet::new();
+    let mut jsx_seen = std::collections::HashSet::new();
+    for t in &tokens {
+        if t.lang_tag() == Language::Tsx.tag() {
+            tsx_seen.insert(t.local_kind());
+        } else if t.lang_tag() == Language::InternalSingleJsxElement.tag() {
+            jsx_seen.insert(t.local_kind());
+        }
+    }
+    for required in [
+        kinds::WHITESPACE,
+        kinds::KEYWORD,
+        kinds::IDENT,
+        kinds::STRING,
+        kinds::COMMENT,
+        kinds::NUMBER,
+        kinds::FAT_ARROW,
+    ] {
+        assert!(
+            tsx_seen.contains(&required),
+            "tsx fixture should exercise TS kind {required}"
+        );
+    }
+    for required in [
+        kinds::LT,
+        kinds::GT,
+        kinds::SLASH,
+        kinds::TAG_NAME,
+        kinds::ATTR_NAME,
+        kinds::STRING,
+        kinds::TEXT,
+        kinds::ENTITY_REF,
+        kinds::OPEN_BRACE,
+        kinds::CLOSE_BRACE,
+    ] {
+        assert!(
+            jsx_seen.contains(&required),
+            "tsx fixture should exercise JSX kind {required}"
+        );
+    }
+}
+
+#[test]
+fn tsx_embed_nests_jsx_and_reenters_tsx() {
+    // Embed stack: TSX (nest 0) → JSX (nest 1) → `{…}` re-enters TSX (nest 2),
+    // and a nested element inside that expression is JSX again (nest 3).
+    let source = "const v = <p>{cond ? <b>{n}</b> : null}</p>;";
+    let tokens = tokens_of(Language::Tsx, source);
+
+    let mut pos = 0u32;
+    for t in &tokens {
+        assert_eq!(t.span.offset, pos, "gap before {pos}");
+        pos += t.span.len;
+    }
+    assert_eq!(pos as usize, source.len());
+
+    let mut seen = std::collections::HashSet::new();
+    for t in &tokens {
+        seen.insert((t.nest, t.lang_tag()));
+    }
+    assert!(seen.contains(&(0u8, Language::Tsx.tag())), "outer is TSX");
+    assert!(
+        seen.contains(&(1u8, Language::InternalSingleJsxElement.tag())),
+        "element is JSX"
+    );
+    assert!(
+        seen.contains(&(2u8, Language::Tsx.tag())),
+        "`{{…}}` re-enters TSX"
+    );
+    assert!(
+        seen.contains(&(3u8, Language::InternalSingleJsxElement.tag())),
+        "nested element inside the expression is JSX again"
+    );
+}
+
+#[test]
+fn markdown_tsx_fence_embeds_jsx() {
+    let source = "intro\n\n```tsx\nconst e = <div>{x}</div>;\n```\n";
+    let tokens = tokens_of(Language::Markdown, source);
+    let nested: std::collections::HashSet<u8> = tokens
+        .iter()
+        .filter(|t| t.nest >= 1)
+        .map(|t| t.lang_tag())
+        .collect();
+    assert!(
+        nested.contains(&Language::Tsx.tag()),
+        "`tsx` fence should embed TSX"
+    );
+    assert!(
+        nested.contains(&Language::InternalSingleJsxElement.tag()),
+        "JSX inside the `tsx` fence should embed JSX"
+    );
 }
 
 #[test]
