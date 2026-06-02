@@ -84,6 +84,8 @@ pub enum Language {
     Cpp = 16,
     Yaml = 17,
     Lua = 18,
+    Make = 19,
+    Cmake = 20,
 }
 
 impl Language {
@@ -120,6 +122,8 @@ impl Language {
             16 => Self::Cpp,
             17 => Self::Yaml,
             18 => Self::Lua,
+            19 => Self::Make,
+            20 => Self::Cmake,
             _ => panic!("unknown language tag"),
         }
     }

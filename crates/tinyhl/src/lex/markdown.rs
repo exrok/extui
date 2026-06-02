@@ -14,7 +14,8 @@
 //! - Fenced code blocks with backtick or tilde fences of length at least
 //!   three. Info strings `rust`/`rs`, `c`, `csv`, `json`, `xml`, `css`,
 //!   `ts`/`typescript`, `tsx`/`jsx`, `html`/`htm`, `python`/`py`,
-//!   `sql`, `go`/`golang`, `sh`/`shell`/`bash`, and `lua`
+//!   `sql`, `go`/`golang`, `sh`/`shell`/`bash`, `yaml`/`yml`, `lua`,
+//!   `make`/`makefile`/`mk`, and `cmake`
 //!   (case-insensitive ASCII) dispatch to the corresponding language. An
 //!   embedded `html` block in turn
 //!   embeds CSS and TypeScript for its `<style>` and `<script>` content; a
@@ -591,6 +592,8 @@ fn info_to_language(
         b"sh" | b"shell" | b"bash" => Some(Language::Sh),
         b"yaml" | b"yml" => Some(Language::Yaml),
         b"lua" => Some(Language::Lua),
+        b"make" | b"makefile" | b"mk" => Some(Language::Make),
+        b"cmake" => Some(Language::Cmake),
         _ => None,
     }
 }

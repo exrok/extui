@@ -1,0 +1,24 @@
+# TinyHL Make fixture
+.PHONY: all clean
+
+CC := cc
+CFLAGS += -O2 -Wall
+NAME ?= tinyhl
+JOBS = 4
+
+ifeq ($(OS),Linux)
+PLATFORM = linux
+else
+PLATFORM = generic
+endif
+
+all: build/$(NAME)
+	@echo "building $(NAME)"
+	$(CC) $(CFLAGS) -o $@ src/main.c # recipe comment
+
+build/$(NAME): src/main.c include/config.h
+	@mkdir -p build
+	$(CC) $(CFLAGS) $< -o $@
+
+clean:
+	rm -f build/$(NAME)

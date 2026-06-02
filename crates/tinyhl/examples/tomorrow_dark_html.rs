@@ -409,6 +409,8 @@ fn parse_language(arg: &str) -> Result<Language, String> {
         "html" | "htm" => Ok(Language::Html),
         "go" | "golang" => Ok(Language::Go),
         "sh" | "shell" | "bash" => Ok(Language::Sh),
+        "make" | "makefile" | "mk" => Ok(Language::Make),
+        "cmake" => Ok(Language::Cmake),
         other => Err(format!("unsupported language: {other}")),
     }
 }

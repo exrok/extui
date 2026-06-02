@@ -1,0 +1,21 @@
+# TinyHL CMake fixture
+cmake_minimum_required(VERSION 3.24)
+project(tinyhl LANGUAGES C)
+
+set(SRC src/main.c include/config.h)
+option(TINYHL_BUILD_TESTS "build tests" ON)
+add_executable(tinyhl ${SRC})
+
+if(TINYHL_BUILD_TESTS AND NOT WIN32)
+    message(STATUS "tests enabled for ${PROJECT_NAME}")
+else()
+    message(STATUS [=[tests disabled
+for this build]=])
+endif()
+
+#[=[
+bracket comment
+]=]
+set(GENEX $<TARGET_FILE:tinyhl>)
+set(ENV_HOME $ENV{HOME})
+set(PAIR NAME=value)

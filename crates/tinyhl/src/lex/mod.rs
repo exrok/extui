@@ -6,6 +6,7 @@
 
 pub(crate) mod byteclass;
 pub(crate) mod c;
+pub(crate) mod cmake;
 pub(crate) mod cpp;
 pub(crate) mod css;
 pub(crate) mod csv;
@@ -15,6 +16,7 @@ pub(crate) mod json;
 pub(crate) mod jsx;
 pub mod kw;
 pub(crate) mod lua;
+pub(crate) mod make;
 pub(crate) mod markdown;
 pub(crate) mod python;
 pub(crate) mod rust;

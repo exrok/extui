@@ -1319,6 +1319,121 @@ fn markdown_lua_embed_sweep() {
 }
 
 #[test]
+fn make_insert_sweep() {
+    let source = ".PHONY: all\nCC := cc\nall: main.o\n\t$(CC) -o $@ main.o # build\n";
+    for off in 0..=source.len() {
+        for ins in [
+            "x", "9", "$", "(", ")", "\"", "'", "#", ":", "=", "+", "?", "\n",
+        ] {
+            assert_mutate_matches_lang(Language::Make, source, Span::new(off as u32, 0), ins);
+        }
+    }
+}
+
+#[test]
+fn make_delete_sweep() {
+    let source = ".PHONY: all\nCC := cc\nall: main.o\n\t$(CC) -o $@ main.o # build\n";
+    for off in 0..source.len() {
+        assert_mutate_matches_lang(Language::Make, source, Span::new(off as u32, 1), "");
+    }
+}
+
+#[test]
+fn make_replace_sweep() {
+    let source = "ifeq ($(OS),Linux)\nNAME ?= tinyhl\nCFLAGS += -O2\nmsg = \"hi\"\nendif\n";
+    for off in 0..source.len() {
+        for rep in [
+            "x", "0", "$(", "${", ")", "}", "'", "\"", "#", ":", "::", ":=",
+        ] {
+            assert_mutate_matches_lang(Language::Make, source, Span::new(off as u32, 1), rep);
+        }
+    }
+}
+
+#[test]
+fn make_fixture_sweep_over_chunks() {
+    let path = format!("{}/fixtures/make/simple.mk.in", env!("CARGO_MANIFEST_DIR"));
+    let source = std::fs::read_to_string(&path).unwrap();
+    let step = (source.len() / 64).max(1);
+    for off in (0..source.len()).step_by(step) {
+        for rep in ["x", " ", "$@", "$(", "\"", "#", ":=", "\n"] {
+            assert_mutate_matches_lang(Language::Make, &source, Span::new(off as u32, 0), rep);
+        }
+    }
+}
+
+#[test]
+fn markdown_make_embed_sweep() {
+    let source = "# T\n\n```make\n.PHONY: all\nall:\n\t@echo ok\n```\n\nend\n";
+    for off in 0..=source.len() {
+        for ins in ["x", "`", "\n", " ", "$", "#", ":", "="] {
+            assert_mutate_matches_lang(Language::Markdown, source, Span::new(off as u32, 0), ins);
+        }
+    }
+    for off in 0..source.len() {
+        assert_mutate_matches_lang(Language::Markdown, source, Span::new(off as u32, 1), "");
+    }
+}
+
+#[test]
+fn cmake_insert_sweep() {
+    let source = "project(tinyhl)\nset(NAME \"tinyhl\")\nif(ON AND NOT OFF)\nendif()\n";
+    for off in 0..=source.len() {
+        for ins in [
+            "x", "9", "$", "{", "}", "\"", "#", "(", ")", "[", "]", "=", "\n",
+        ] {
+            assert_mutate_matches_lang(Language::Cmake, source, Span::new(off as u32, 0), ins);
+        }
+    }
+}
+
+#[test]
+fn cmake_delete_sweep() {
+    let source = "project(tinyhl)\nset(NAME \"tinyhl\")\nif(ON AND NOT OFF)\nendif()\n";
+    for off in 0..source.len() {
+        assert_mutate_matches_lang(Language::Cmake, source, Span::new(off as u32, 1), "");
+    }
+}
+
+#[test]
+fn cmake_replace_sweep() {
+    let source = "set(TEXT [=[hello\nworld]=])\nmessage(${TEXT})\n#[=[comment]=]\n";
+    for off in 0..source.len() {
+        for rep in ["x", "0", "$", "${", "}", "\"", "#", "[", "]", "=", "(", ")"] {
+            assert_mutate_matches_lang(Language::Cmake, source, Span::new(off as u32, 1), rep);
+        }
+    }
+}
+
+#[test]
+fn cmake_fixture_sweep_over_chunks() {
+    let path = format!(
+        "{}/fixtures/cmake/simple.cmake.in",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let source = std::fs::read_to_string(&path).unwrap();
+    let step = (source.len() / 64).max(1);
+    for off in (0..source.len()).step_by(step) {
+        for rep in ["x", " ", "${VAR}", "$<A:B>", "\"", "#", "[=[", "]", "\n"] {
+            assert_mutate_matches_lang(Language::Cmake, &source, Span::new(off as u32, 0), rep);
+        }
+    }
+}
+
+#[test]
+fn markdown_cmake_embed_sweep() {
+    let source = "# T\n\n```cmake\nproject(tinyhl)\nset(TEXT [=[ok]=])\n```\n\nend\n";
+    for off in 0..=source.len() {
+        for ins in ["x", "`", "\n", " ", "$", "#", "[", "]", "(", ")"] {
+            assert_mutate_matches_lang(Language::Markdown, source, Span::new(off as u32, 0), ins);
+        }
+    }
+    for off in 0..source.len() {
+        assert_mutate_matches_lang(Language::Markdown, source, Span::new(off as u32, 1), "");
+    }
+}
+
+#[test]
 fn chain_of_edits_stays_in_sync() {
     let mut current = String::from("[]");
     let src: &dyn Source = &current.as_str();
