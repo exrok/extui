@@ -149,6 +149,111 @@ int main(void) {
 }
 
 #[test]
+fn python_semantic_categories() {
+    let src = r#"
+import os as system
+
+class Point(Base):
+    def __init__(self, x, y=0):
+        self.x = x
+        self.y = y
+
+    def norm(self) -> float:
+        return self.x
+
+
+@staticmethod
+def make(scale: float) -> Point:
+    p = Point(1, 2)
+    total = p.norm()
+    for item in values:
+        total += item
+    return total
+
+
+result = make(2.0)
+print(result, system)
+"#;
+    let pairs = semantic_pairs(Language::Python, src);
+    // Definitions.
+    assert_has(&pairs, "Point", SemanticKind::TypeDefinition);
+    assert_has(&pairs, "__init__", SemanticKind::MethodDefinition);
+    assert_has(&pairs, "norm", SemanticKind::MethodDefinition);
+    assert_has(&pairs, "make", SemanticKind::FunctionDefinition);
+    // Parameters and their annotations.
+    assert_has(&pairs, "self", SemanticKind::Parameter);
+    assert_has(&pairs, "x", SemanticKind::Parameter);
+    assert_has(&pairs, "scale", SemanticKind::Parameter);
+    assert_has(&pairs, "float", SemanticKind::TypeName);
+    assert_has(&pairs, "Point", SemanticKind::TypeName);
+    assert_has(&pairs, "Base", SemanticKind::TypeName);
+    // Fields through member access.
+    assert_has(&pairs, "x", SemanticKind::FieldDefinition);
+    assert_has(&pairs, "x", SemanticKind::Field);
+    // Calls.
+    assert_has(&pairs, "Point", SemanticKind::FunctionCall);
+    assert_has(&pairs, "make", SemanticKind::FunctionCall);
+    assert_has(&pairs, "norm", SemanticKind::MethodCall);
+    assert_has(&pairs, "print", SemanticKind::FunctionCall);
+    // Variables, arguments, loop targets, aliases.
+    assert_has(&pairs, "p", SemanticKind::VariableDefinition);
+    assert_has(&pairs, "result", SemanticKind::VariableDefinition);
+    assert_has(&pairs, "item", SemanticKind::VariableDefinition);
+    assert_has(&pairs, "system", SemanticKind::VariableDefinition);
+    assert_has(&pairs, "result", SemanticKind::Argument);
+    // A plain method receiver stays a variable, not a field.
+    assert_has(&pairs, "p", SemanticKind::Variable);
+    // The decorator name is highlighted as a call, not a bare variable.
+    assert_has(&pairs, "staticmethod", SemanticKind::FunctionCall);
+    assert_lacks(&pairs, "x", SemanticKind::TypeName);
+}
+
+#[test]
+fn python_walrus_is_a_binding() {
+    let pairs = semantic_pairs(
+        Language::Python,
+        "if (n := compute(data)) > 0:\n    use(n)\n",
+    );
+    assert_has(&pairs, "n", SemanticKind::VariableDefinition);
+    assert_has(&pairs, "compute", SemanticKind::FunctionCall);
+    assert_has(&pairs, "use", SemanticKind::FunctionCall);
+}
+
+#[test]
+fn markdown_python_fence_gets_semantics() {
+    let src = "```python\nclass Widget:\n    def run(self):\n        return self.size\n```\n";
+    let source: &dyn Source = &src;
+    let tokens = TokenTable::new(Language::Markdown, source);
+    let semantic = SemanticTable::new(&tokens, source);
+    let pairs: Vec<_> = semantic
+        .query(Span::new(0, semantic.source_len()))
+        .map(|token| {
+            (
+                src[token.span.offset as usize..token.span.end() as usize].to_string(),
+                token.kind,
+                token.lang_tag,
+            )
+        })
+        .collect();
+    assert!(
+        pairs.iter().any(|(text, kind, lang)| {
+            text == "Widget"
+                && *kind == SemanticKind::TypeDefinition
+                && *lang == Language::Python.tag()
+        }),
+        "expected embedded python semantic token in {pairs:?}"
+    );
+    assert!(
+        pairs.iter().any(|(text, kind, lang)| {
+            text == "run"
+                && *kind == SemanticKind::MethodDefinition
+                && *lang == Language::Python.tag()
+        }),
+        "expected embedded python method in {pairs:?}"
+    );
+}
+
+#[test]
 fn markdown_embeds_get_semantics() {
     let src = r#"
 ```rust

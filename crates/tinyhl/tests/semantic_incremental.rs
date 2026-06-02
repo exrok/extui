@@ -114,6 +114,51 @@ fn c_semantic_incremental_matches_fresh() {
 }
 
 #[test]
+fn python_semantic_incremental_matches_fresh() {
+    let source = "class Point:\n    def __init__(self, x):\n        self.x = x\n\n    def norm(self) -> float:\n        return self.x\n\ndef make(scale):\n    p = Point(1)\n    return p.norm()\n\nresult = make(2)\nprint(result)\n";
+    let init = source.find("__init__").unwrap();
+    let scale = source.find("scale").unwrap();
+    let cases: &[(usize, usize, &str)] = &[
+        (0, 0, "import os\n"),
+        (6, 5, "Vector"),
+        (init, 8, "setup"),
+        (scale, 5, "factor"),
+        (source.len(), 0, "x: int = 0\n"),
+    ];
+    for &(off, len, rep) in cases {
+        assert_incremental_semantics(
+            Language::Python,
+            source,
+            Span::new(off as u32, len as u32),
+            rep,
+        );
+    }
+}
+
+#[test]
+fn python_semantic_insert_delete_sweep() {
+    // The state machine must be deterministic on its token stream: a relexed
+    // suffix has to converge to the same semantic stream as a fresh parse for
+    // an edit at every offset. Covers def/class headers, member access,
+    // annotations, calls, comprehensions, and walrus.
+    let source = "class P:\n    def m(self, x: int):\n        self.x = x\n        return self.x\n\ndef f(a):\n    p = P()\n    ys = [p.m(i) for i in a if i]\n    return p.m(a)\n\nr = f(1)\nprint(r, café := 2)\n";
+    for off in 0..=source.len() {
+        if !source.is_char_boundary(off) {
+            continue;
+        }
+        for ins in ["x", "1", " ", ":", "(", ".", "=", "@", "\n", "self"] {
+            assert_incremental_semantics(Language::Python, source, Span::new(off as u32, 0), ins);
+        }
+    }
+    for off in 0..source.len() {
+        // Stay on UTF-8 boundaries so the spliced source is valid.
+        if source.is_char_boundary(off) && source.is_char_boundary(off + 1) {
+            assert_incremental_semantics(Language::Python, source, Span::new(off as u32, 1), "");
+        }
+    }
+}
+
+#[test]
 fn markdown_embed_semantic_incremental_matches_fresh() {
     let source = "```rust\nstruct Foo;\nfn make(arg: Foo) -> Foo { arg }\n```\n";
     for (off, len, rep) in [

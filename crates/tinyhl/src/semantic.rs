@@ -79,6 +79,7 @@ enum StateSnapshot {
     Rust(RustState),
     Ts(TsState),
     C(CState),
+    Py(PyState),
 }
 
 impl StateSnapshot {
@@ -87,6 +88,7 @@ impl StateSnapshot {
             Language::Rust => Self::Rust(RustState::default()),
             Language::Ts | Language::Tsx => Self::Ts(TsState::default()),
             Language::C => Self::C(CState::default()),
+            Language::Python => Self::Py(PyState::default()),
             _ => Self::None,
         }
     }
@@ -104,6 +106,9 @@ impl StateSnapshot {
             }
             Self::Ts(state) => {
                 state.recent_var_def = None;
+            }
+            Self::Py(state) => {
+                state.pending_fn_token = None;
             }
             Self::C(_) | Self::None => {}
         }
@@ -436,6 +441,13 @@ impl<'t> Builder<'t> {
                 state,
                 self.chunk.as_mut().unwrap(),
             ),
+            StateSnapshot::Py(state) => analyze_python(
+                self.src,
+                token,
+                next_sig,
+                state,
+                self.chunk.as_mut().unwrap(),
+            ),
         }
     }
 
@@ -497,6 +509,7 @@ fn is_ident(token: Token, language: Language) -> bool {
         Language::Rust => kind_local(token.kind) == kind::IDENT,
         Language::Ts | Language::Tsx => kind_local(token.kind) == kind::IDENT,
         Language::C => kind_local(token.kind) == kind::IDENT,
+        Language::Python => kind_local(token.kind) == kind::IDENT,
         _ => false,
     }
 }
@@ -511,6 +524,7 @@ fn is_trivia(token: Token) -> bool {
             matches!(kind_local(token.kind), kind::WHITESPACE | kind::COMMENT)
         }
         Language::C => matches!(kind_local(token.kind), kind::WHITESPACE | kind::COMMENT),
+        Language::Python => matches!(kind_local(token.kind), kind::WHITESPACE | kind::COMMENT),
         _ => false,
     }
 }
@@ -1477,6 +1491,332 @@ fn analyze_c(
     }
 
     state.prev_sig = Some(token);
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PyCall {
+    depth: usize,
+}
+
+/// Local analysis state for Python.
+///
+/// Python has no block delimiters, so methods are told apart from free
+/// functions by their first parameter (`self`/`cls`) rather than by a class
+/// body. Logical-line starts are tracked through newline-bearing whitespace
+/// (gated on zero bracket depth so implicit line joins do not count) to spot
+/// statement-level assignment targets.
+///
+/// Every field is offset-free — depths, counts, and booleans only — so the
+/// snapshot taken at a chunk boundary compares equal whenever two builds reach
+/// the same logical point, keeping `mutate` convergent. The one index field,
+/// `pending_fn_token`, points into the current chunk and is cleared by
+/// [`StateSnapshot::reset_chunk_local`] before any split.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+struct PyState {
+    started: bool,
+    at_line_start: bool,
+    after_dot: bool,
+    def_pending: bool,
+    class_pending: bool,
+    param_header_pending: bool,
+    method_check_pending: bool,
+    pending_fn_token: Option<usize>,
+    class_base_pending: bool,
+    class_base_paren: Option<usize>,
+    lambda_params_pending: bool,
+    for_target_pending: bool,
+    as_pending: bool,
+    decorator_pending: bool,
+    annotate_pending: bool,
+    pending_type: bool,
+    prev_was_ident: bool,
+    paren_depth: usize,
+    bracket_depth: usize,
+    brace_depth: usize,
+    param_depth: Option<usize>,
+    call_stack: Vec<PyCall>,
+}
+
+fn py_depth_all_zero(state: &PyState) -> bool {
+    state.paren_depth == 0 && state.bracket_depth == 0 && state.brace_depth == 0
+}
+
+fn py_is_assign_op(local: u16) -> bool {
+    matches!(
+        local,
+        kind::EQ
+            | kind::PLUS_EQ
+            | kind::MINUS_EQ
+            | kind::STAR_EQ
+            | kind::SLASH_EQ
+            | kind::PERCENT_EQ
+            | kind::STAR_STAR_EQ
+            | kind::SLASH_SLASH_EQ
+            | kind::SHL_EQ
+            | kind::SHR_EQ
+            | kind::AMP_EQ
+            | kind::PIPE_EQ
+            | kind::CARET_EQ
+            | kind::AT_EQ
+    )
+}
+
+/// Returns `true` if any byte of `token`'s span is a newline.
+fn token_has_newline(src: &dyn Source, token: Token) -> bool {
+    let mut offset = token.span.offset;
+    let end = token.span.end();
+    while offset < end {
+        let (base, page) = src.page(offset);
+        if page.is_empty() {
+            return false;
+        }
+        let rel = (offset - base) as usize;
+        let take = ((end - offset) as usize).min(page.len().saturating_sub(rel));
+        if take == 0 {
+            return false;
+        }
+        if page[rel..rel + take].contains(&b'\n') {
+            return true;
+        }
+        offset += take as u32;
+    }
+    false
+}
+
+fn analyze_python(
+    src: &dyn Source,
+    token: Token,
+    next_sig: Option<Token>,
+    state: &mut PyState,
+    chunk: &mut SemanticChunk,
+) {
+    let local = kind_local(token.kind);
+
+    // Trivia is not significant, but a newline at bracket depth zero opens a
+    // new logical line — record it for the next real token without disturbing
+    // any other state.
+    if local == kind::WHITESPACE {
+        if py_depth_all_zero(state) && token_has_newline(src, token) {
+            state.at_line_start = true;
+        }
+        return;
+    }
+    if local == kind::COMMENT {
+        return;
+    }
+
+    let line_head = state.at_line_start || !state.started;
+    state.started = true;
+    state.at_line_start = false;
+
+    let next_local = next_sig.map(|t| kind_local(t.kind));
+    let is_call = next_local == Some(kind::OPEN_PAREN);
+    let next_is_assign = next_local.map(py_is_assign_op).unwrap_or(false);
+
+    match local {
+        kind::OPEN_PAREN => {
+            state.paren_depth += 1;
+            if state.param_header_pending {
+                state.param_depth = Some(state.paren_depth);
+                state.method_check_pending = true;
+                state.param_header_pending = false;
+            } else if state.class_base_pending {
+                state.class_base_paren = Some(state.paren_depth);
+                state.pending_type = true;
+                state.class_base_pending = false;
+            } else if state.prev_was_ident {
+                state.call_stack.push(PyCall {
+                    depth: state.paren_depth,
+                });
+            }
+            state.after_dot = false;
+        }
+        kind::CLOSE_PAREN => {
+            if state.param_depth == Some(state.paren_depth) {
+                state.param_depth = None;
+                state.method_check_pending = false;
+                state.pending_fn_token = None;
+            }
+            if state.class_base_paren == Some(state.paren_depth) {
+                state.class_base_paren = None;
+                state.pending_type = false;
+            }
+            while state
+                .call_stack
+                .last()
+                .map(|c| c.depth >= state.paren_depth)
+                .unwrap_or(false)
+            {
+                state.call_stack.pop();
+            }
+            if state.paren_depth > 0 {
+                state.paren_depth -= 1;
+            }
+            state.after_dot = false;
+            state.pending_type = false;
+        }
+        kind::OPEN_BRACKET => {
+            state.bracket_depth += 1;
+            state.after_dot = false;
+        }
+        kind::CLOSE_BRACKET => {
+            if state.bracket_depth > 0 {
+                state.bracket_depth -= 1;
+            }
+            state.after_dot = false;
+        }
+        kind::OPEN_BRACE => {
+            state.brace_depth += 1;
+            state.after_dot = false;
+            state.pending_type = false;
+        }
+        kind::CLOSE_BRACE => {
+            if state.brace_depth > 0 {
+                state.brace_depth -= 1;
+            }
+            state.after_dot = false;
+        }
+        kind::DOT => {
+            state.after_dot = true;
+        }
+        kind::THIN_ARROW => {
+            state.pending_type = true;
+            state.after_dot = false;
+        }
+        kind::COLON => {
+            let annotate = state.annotate_pending;
+            state.annotate_pending = false;
+            state.for_target_pending = false;
+            state.lambda_params_pending = false;
+            state.after_dot = false;
+            // An annotation colon opens a type context; a block, dict, slice,
+            // or lambda colon ends one.
+            state.pending_type = annotate;
+        }
+        kind::COMMA => {
+            state.after_dot = false;
+            // Keep the type context across commas only inside a subscript
+            // (`Dict[str, int]`) or a class base list (`class C(A, B)`).
+            state.pending_type = state.pending_type
+                && (state.bracket_depth > 0 || state.class_base_paren == Some(state.paren_depth));
+        }
+        kind::AT if line_head => {
+            state.decorator_pending = true;
+            state.after_dot = false;
+        }
+        _ if py_is_assign_op(local) => {
+            state.after_dot = false;
+            state.pending_type = false;
+        }
+        kind::KEYWORD => {
+            state.after_dot = false;
+            state.pending_type = false;
+            state.decorator_pending = false;
+            if token_eq(src, token, b"def") {
+                state.def_pending = true;
+            } else if token_eq(src, token, b"class") {
+                state.class_pending = true;
+            } else if token_eq(src, token, b"lambda") {
+                state.lambda_params_pending = true;
+            } else if token_eq(src, token, b"for") {
+                state.for_target_pending = true;
+            } else if token_eq(src, token, b"in") {
+                state.for_target_pending = false;
+            } else if token_eq(src, token, b"as") {
+                state.as_pending = true;
+            }
+        }
+        _ if is_ident(token, Language::Python) => {
+            let kind = if next_local == Some(kind::COLON_EQ) {
+                // Walrus binding (`n := ...`), valid anywhere.
+                Some(SemanticKind::VariableDefinition)
+            } else if state.def_pending {
+                state.def_pending = false;
+                if next_local == Some(kind::OPEN_PAREN) {
+                    state.param_header_pending = true;
+                }
+                let idx = push_semantic(chunk, token, SemanticKind::FunctionDefinition);
+                state.pending_fn_token = Some(idx);
+                None
+            } else if state.class_pending {
+                state.class_pending = false;
+                if next_local == Some(kind::OPEN_PAREN) {
+                    state.class_base_pending = true;
+                }
+                Some(SemanticKind::TypeDefinition)
+            } else if state.as_pending {
+                state.as_pending = false;
+                Some(SemanticKind::VariableDefinition)
+            } else if state.decorator_pending {
+                state.decorator_pending = false;
+                if next_local == Some(kind::DOT) {
+                    Some(SemanticKind::Variable)
+                } else {
+                    Some(SemanticKind::FunctionCall)
+                }
+            } else if state.lambda_params_pending {
+                Some(SemanticKind::Parameter)
+            } else if state.for_target_pending {
+                Some(SemanticKind::VariableDefinition)
+            } else if state.after_dot {
+                if is_call {
+                    Some(SemanticKind::MethodCall)
+                } else if next_is_assign {
+                    Some(SemanticKind::FieldDefinition)
+                } else {
+                    Some(SemanticKind::Field)
+                }
+            } else if state.param_depth == Some(state.paren_depth) {
+                if state.method_check_pending {
+                    state.method_check_pending = false;
+                    if token_eq(src, token, b"self") || token_eq(src, token, b"cls") {
+                        if let Some(idx) = state.pending_fn_token {
+                            chunk.tokens[idx].kind = SemanticKind::MethodDefinition;
+                        }
+                    }
+                }
+                if next_local == Some(kind::COLON) {
+                    state.annotate_pending = true;
+                }
+                Some(SemanticKind::Parameter)
+            } else if state.pending_type {
+                Some(SemanticKind::TypeName)
+            } else if line_head && py_depth_all_zero(state) {
+                if is_call {
+                    Some(SemanticKind::FunctionCall)
+                } else if next_is_assign {
+                    Some(SemanticKind::VariableDefinition)
+                } else if next_local == Some(kind::COLON) {
+                    state.annotate_pending = true;
+                    Some(SemanticKind::VariableDefinition)
+                } else {
+                    Some(SemanticKind::Variable)
+                }
+            } else if is_call {
+                Some(SemanticKind::FunctionCall)
+            } else if state
+                .call_stack
+                .last()
+                .map(|c| c.depth == state.paren_depth)
+                .unwrap_or(false)
+            {
+                Some(SemanticKind::Argument)
+            } else {
+                Some(SemanticKind::Variable)
+            };
+
+            if let Some(kind) = kind {
+                push_semantic(chunk, token, kind);
+            }
+            state.after_dot = false;
+        }
+        _ => {
+            state.after_dot = false;
+            state.pending_type = false;
+        }
+    }
+
+    state.prev_was_ident = is_ident(token, Language::Python);
 }
 
 #[cfg(test)]
