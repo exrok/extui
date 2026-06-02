@@ -77,6 +77,7 @@ pub enum Language {
     /// highlight a `.tsx` or `.jsx` file use [`Language::Tsx`] instead.
     #[doc(hidden)]
     InternalSingleJsxElement = 11,
+    Python = 12,
 }
 
 impl Language {
@@ -106,6 +107,7 @@ impl Language {
             9 => Self::Html,
             10 => Self::Tsx,
             11 => Self::InternalSingleJsxElement,
+            12 => Self::Python,
             _ => panic!("unknown language tag"),
         }
     }

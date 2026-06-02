@@ -147,6 +147,10 @@ pub const PLUS_PLUS: u16 = 116;
 pub const MINUS_MINUS: u16 = 117;
 /// `**`
 pub const STAR_STAR: u16 = 118;
+/// `//` (Python floor division).
+pub const SLASH_SLASH: u16 = 119;
+/// `:=` (Python walrus / named-expression operator).
+pub const COLON_EQ: u16 = 120;
 
 // Compound assignment.
 
@@ -180,6 +184,10 @@ pub const AMP_AMP_EQ: u16 = 142;
 pub const PIPE_PIPE_EQ: u16 = 143;
 /// `??=`
 pub const QUESTION_QUESTION_EQ: u16 = 144;
+/// `//=` (Python floor-division assignment).
+pub const SLASH_SLASH_EQ: u16 = 145;
+/// `@=` (Python matrix-multiplication assignment).
+pub const AT_EQ: u16 = 146;
 
 // C-specific punctuation / digraphs.
 

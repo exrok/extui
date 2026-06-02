@@ -806,6 +806,117 @@ fn markdown_html_nested_embed_sweep() {
 }
 
 #[test]
+fn python_insert_sweep() {
+    let source = "def f(x: int) -> int:\n    return x // 2 ** 1  # ok\n";
+    for off in 0..=source.len() {
+        for ins in [
+            "x", "9", "\"", "'", " ", "{", "(", "/", "*", "#", "\\", ":", "0x", "f\"",
+        ] {
+            assert_mutate_matches_lang(Language::Python, source, Span::new(off as u32, 0), ins);
+        }
+    }
+}
+
+#[test]
+fn python_delete_sweep() {
+    let source = "def f(x: int) -> int:\n    return x // 2 ** 1  # ok\n";
+    for off in 0..source.len() {
+        assert_mutate_matches_lang(Language::Python, source, Span::new(off as u32, 1), "");
+    }
+}
+
+#[test]
+fn python_replace_sweep() {
+    let source = "n = 0xFF_u; xs = [1, 2.5e-3, 3j]; s = r'a\\b'; t = (m := 10)";
+    for off in 0..source.len() {
+        for rep in ["x", "/", "*", "\"", "'", "#", "0", ".", ":", "=", "\\"] {
+            assert_mutate_matches_lang(Language::Python, source, Span::new(off as u32, 1), rep);
+        }
+    }
+}
+
+#[test]
+fn python_triple_string_sweep() {
+    // A docstring with embedded quotes and newlines: every edit, inside,
+    // before, and after the string must converge.
+    let source = "x = 1\ns = \"\"\"line 1\n'line' 2\nline 3\"\"\"\ny = 42\n";
+    for off in 0..=source.len() {
+        for ins in ["x", "\n", "\\", "\"", "'", " ", "#"] {
+            assert_mutate_matches_lang(Language::Python, source, Span::new(off as u32, 0), ins);
+        }
+    }
+    for off in 0..source.len() {
+        assert_mutate_matches_lang(Language::Python, source, Span::new(off as u32, 1), "");
+    }
+}
+
+#[test]
+fn python_string_prefix_sweep() {
+    // Edits that make or break string prefixes (r/b/f/u and combos) flip the
+    // bytes between identifiers and string literals.
+    let source = "a = rb'x'; b = f\"{v}\"; c = u'y'; d = forks; e = breaker\n";
+    for off in 0..=source.len() {
+        for ins in ["r", "b", "f", "u", "\"", "'", "x", " "] {
+            assert_mutate_matches_lang(Language::Python, source, Span::new(off as u32, 0), ins);
+        }
+    }
+    for off in 0..source.len() {
+        assert_mutate_matches_lang(Language::Python, source, Span::new(off as u32, 1), "");
+    }
+}
+
+#[test]
+fn python_number_sweep() {
+    let source = "a=0xFF;b=0o7;c=0b1;d=1_0.5e-3;e=.5;f=3j;g=1.";
+    for off in 0..source.len() {
+        for rep in ["x", "0", ".", "e", "j", "_", "o", "b", "+", "-"] {
+            assert_mutate_matches_lang(Language::Python, source, Span::new(off as u32, 1), rep);
+        }
+    }
+}
+
+#[test]
+fn python_unicode_ident_sweep() {
+    let source = "café = 1\nΩ = café + 1\nπ = '日本'\n";
+    for off in 0..=source.len() {
+        if !source.is_char_boundary(off) {
+            continue;
+        }
+        for ins in ["x", "α", "漢", " ", "'", "="] {
+            assert_mutate_matches_lang(Language::Python, source, Span::new(off as u32, 0), ins);
+        }
+    }
+}
+
+#[test]
+fn python_fixture_sweep_over_chunks() {
+    let path = format!(
+        "{}/fixtures/python/simple.py.in",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let source = std::fs::read_to_string(&path).unwrap();
+    let step = (source.len() / 96).max(1);
+    for off in (0..source.len()).step_by(step) {
+        for rep in ["x", " ", "\"", "'", "#", "\"\"\"", "0x", ":", "//"] {
+            assert_mutate_matches_lang(Language::Python, &source, Span::new(off as u32, 0), rep);
+        }
+    }
+}
+
+#[test]
+fn markdown_python_embed_sweep() {
+    let source = "# T\n\n```python\ndef f(x):\n    return x // 2  # c\n```\n\nend\n";
+    for off in 0..=source.len() {
+        for ins in ["x", "`", "\n", " ", "#", "\"", ":", "/"] {
+            assert_mutate_matches_lang(Language::Markdown, source, Span::new(off as u32, 0), ins);
+        }
+    }
+    for off in 0..source.len() {
+        assert_mutate_matches_lang(Language::Markdown, source, Span::new(off as u32, 1), "");
+    }
+}
+
+#[test]
 fn chain_of_edits_stays_in_sync() {
     let mut current = String::from("[]");
     let src: &dyn Source = &current.as_str();

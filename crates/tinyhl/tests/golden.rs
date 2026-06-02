@@ -50,6 +50,11 @@ fn load_tsx(name: &str) -> String {
     std::fs::read_to_string(path).unwrap_or_else(|e| panic!("fixture {name}: {e}"))
 }
 
+fn load_python(name: &str) -> String {
+    let path = format!("{}/fixtures/python/{name}", env!("CARGO_MANIFEST_DIR"));
+    std::fs::read_to_string(path).unwrap_or_else(|e| panic!("fixture {name}: {e}"))
+}
+
 fn tokens_of(language: Language, s: &str) -> Vec<tinyhl::Token> {
     let src: &dyn Source = &s;
     let table = TokenTable::new(language, src);
@@ -753,6 +758,77 @@ fn markdown_tsx_fence_embeds_jsx() {
     assert!(
         nested.contains(&Language::InternalSingleJsxElement.tag()),
         "JSX inside the `tsx` fence should embed JSX"
+    );
+}
+
+#[test]
+fn simple_python_coverage_and_tags() {
+    let input = load_python("simple.py.in");
+    let tokens = tokens_of(Language::Python, &input);
+
+    let mut pos = 0u32;
+    for t in &tokens {
+        assert_eq!(t.span.offset, pos, "gap before {pos}");
+        pos += t.span.len;
+        assert_eq!(t.lang_tag(), Language::Python.tag());
+    }
+    assert_eq!(pos as usize, input.len());
+}
+
+#[test]
+fn python_fixture_exercises_expected_kinds() {
+    use tinyhl::kind as kinds;
+
+    let mut seen = std::collections::HashSet::new();
+    let input = load_python("simple.py.in");
+    for t in tokens_of(Language::Python, &input) {
+        seen.insert(t.local_kind());
+    }
+    for required in [
+        kinds::WHITESPACE,
+        kinds::COMMENT,
+        kinds::STRING,
+        kinds::NUMBER,
+        kinds::KEYWORD,
+        kinds::IDENT,
+        kinds::OPEN_PAREN,
+        kinds::CLOSE_PAREN,
+        kinds::OPEN_BRACKET,
+        kinds::CLOSE_BRACKET,
+        kinds::OPEN_BRACE,
+        kinds::CLOSE_BRACE,
+        kinds::COLON,
+        kinds::COMMA,
+        kinds::DOT,
+        kinds::EQ,
+        kinds::PLUS,
+        kinds::STAR,
+        kinds::AT,
+        kinds::THIN_ARROW,
+        kinds::SLASH_SLASH,
+        kinds::STAR_STAR,
+        kinds::COLON_EQ,
+        kinds::ELLIPSIS,
+    ] {
+        assert!(
+            seen.contains(&required),
+            "python fixture should exercise kind {required}"
+        );
+    }
+}
+
+#[test]
+fn markdown_python_fence_embeds_python() {
+    let source = "intro\n\n```python\ndef f(x):\n    return x + 1\n```\n\n```py\nx = 1\n```\n";
+    let tokens = tokens_of(Language::Markdown, source);
+    let embedded: std::collections::HashSet<u8> = tokens
+        .iter()
+        .filter(|t| t.nest >= 1)
+        .map(|t| t.lang_tag())
+        .collect();
+    assert!(
+        embedded.contains(&Language::Python.tag()),
+        "both `python` and `py` fences should embed Python"
     );
 }
 
