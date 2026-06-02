@@ -24,6 +24,7 @@ pub(crate) mod toml;
 pub(crate) mod ts;
 pub(crate) mod tsx;
 pub(crate) mod xml;
+pub(crate) mod yaml;
 
 use crate::{Language, LexState};
 

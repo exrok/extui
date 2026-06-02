@@ -1187,6 +1187,67 @@ fn markdown_go_embed_sweep() {
 }
 
 #[test]
+fn yaml_insert_sweep() {
+    let source = "---\nname: tinyhl\nitems:\n  - true\n  - \"quoted\"\nflow: [1, null, {a: b}]\n";
+    for off in 0..=source.len() {
+        for ins in [
+            "x", "9", "\"", "'", " ", "-", "#", ":", "[", "]", "{", "}", "!", "&", "*", "/", "\n",
+        ] {
+            assert_mutate_matches_lang(Language::Yaml, source, Span::new(off as u32, 0), ins);
+        }
+    }
+}
+
+#[test]
+fn yaml_delete_sweep() {
+    let source = "---\nname: tinyhl\nitems:\n  - true\n  - \"quoted\"\nflow: [1, null, {a: b}]\n";
+    for off in 0..source.len() {
+        assert_mutate_matches_lang(Language::Yaml, source, Span::new(off as u32, 1), "");
+    }
+}
+
+#[test]
+fn yaml_replace_sweep() {
+    let source =
+        "a: 1\nb: 'it''s'\nc: \"x\\\"y\"\nd: /tmp/path#frag # comment\nrefs: [&base, *base]\n";
+    for off in 0..source.len() {
+        for rep in [
+            "x", "0", "'", "\"", "#", "-", ":", ".", "!", "&", "*", "[", "]",
+        ] {
+            assert_mutate_matches_lang(Language::Yaml, source, Span::new(off as u32, 1), rep);
+        }
+    }
+}
+
+#[test]
+fn yaml_fixture_sweep_over_chunks() {
+    let path = format!(
+        "{}/fixtures/yaml/simple.yaml.in",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let source = std::fs::read_to_string(&path).unwrap();
+    let step = (source.len() / 64).max(1);
+    for off in (0..source.len()).step_by(step) {
+        for rep in ["x", " ", "'", "\"", "#", "---", "...", "[", "{", "&", "!"] {
+            assert_mutate_matches_lang(Language::Yaml, &source, Span::new(off as u32, 0), rep);
+        }
+    }
+}
+
+#[test]
+fn markdown_yaml_embed_sweep() {
+    let source = "# T\n\n```yaml\nname: tinyhl\nitems:\n  - true\n```\n\nend\n";
+    for off in 0..=source.len() {
+        for ins in ["x", "`", "\n", " ", "\"", "'", "#", "-", ":", "["] {
+            assert_mutate_matches_lang(Language::Markdown, source, Span::new(off as u32, 0), ins);
+        }
+    }
+    for off in 0..source.len() {
+        assert_mutate_matches_lang(Language::Markdown, source, Span::new(off as u32, 1), "");
+    }
+}
+
+#[test]
 fn chain_of_edits_stays_in_sync() {
     let mut current = String::from("[]");
     let src: &dyn Source = &current.as_str();

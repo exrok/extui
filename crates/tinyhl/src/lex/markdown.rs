@@ -589,6 +589,7 @@ fn info_to_language(
         b"sql" => Some(Language::Sql),
         b"go" | b"golang" => Some(Language::Go),
         b"sh" | b"shell" | b"bash" => Some(Language::Sh),
+        b"yaml" | b"yml" => Some(Language::Yaml),
         _ => None,
     }
 }

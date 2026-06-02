@@ -82,6 +82,7 @@ pub enum Language {
     Go = 14,
     Sh = 15,
     Cpp = 16,
+    Yaml = 17,
 }
 
 impl Language {
@@ -116,6 +117,7 @@ impl Language {
             14 => Self::Go,
             15 => Self::Sh,
             16 => Self::Cpp,
+            17 => Self::Yaml,
             _ => panic!("unknown language tag"),
         }
     }
