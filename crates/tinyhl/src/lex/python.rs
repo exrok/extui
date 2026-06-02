@@ -124,7 +124,11 @@ fn classify(view: &mut SourceView<'_>, cursor: u32, first: u8) -> (u16, u32, boo
         // Explicit line continuation (`\` at end of line) is trivia; a stray
         // backslash anywhere else is an error.
         b'\\' => match view.byte_at(cursor + 1) {
-            Some(b'\n') | Some(b'\r') => (kinds::WHITESPACE, cursor + 1, false),
+            Some(b'\n') | Some(b'\r') => (
+                kinds::WHITESPACE,
+                scan_line_continuation(view, cursor),
+                false,
+            ),
             _ => (kinds::ERROR, cursor + 1, true),
         },
         b'.' => match view.byte_at(cursor + 1) {
@@ -147,7 +151,7 @@ fn classify(view: &mut SourceView<'_>, cursor: u32, first: u8) -> (u16, u32, boo
         },
         // String prefix letters take precedence over identifiers, but only
         // when an actual quote follows a valid prefix.
-        b'r' | b'R' | b'b' | b'B' | b'f' | b'F' | b'u' | b'U' => {
+        b'r' | b'R' | b'b' | b'B' | b'f' | b'F' | b't' | b'T' | b'u' | b'U' => {
             match string_prefix_len(view, cursor) {
                 Some(n) => scan_string_at(view, cursor, n),
                 None => classify_ident(view, cursor),
@@ -199,21 +203,21 @@ fn is_quote_byte(b: Option<u8>) -> bool {
 /// Returns the byte length (1 or 2) of a valid string prefix at `cursor` when
 /// it is immediately followed by a quote, or [`None`] otherwise.
 ///
-/// Recognised prefixes (case-insensitive): `r`, `b`, `f`, `u`, and the
-/// two-letter combinations `rb`/`br`/`rf`/`fr`.
+/// Recognised prefixes (case-insensitive): `r`, `b`, `f`, `t`, `u`, and the
+/// two-letter combinations `rb`/`br`/`rf`/`fr`/`rt`/`tr`.
 fn string_prefix_len(view: &mut SourceView<'_>, cursor: u32) -> Option<u32> {
     let b0 = view.byte_at(cursor)? | 0x20;
     if let Some(b1) = view.byte_at(cursor + 1) {
         let b1 = b1 | 0x20;
         let two_ok = matches!(
             (b0, b1),
-            (b'r', b'b') | (b'b', b'r') | (b'r', b'f') | (b'f', b'r')
+            (b'r', b'b') | (b'b', b'r') | (b'r', b'f') | (b'f', b'r') | (b'r', b't') | (b't', b'r')
         );
         if two_ok && is_quote_byte(view.byte_at(cursor + 2)) {
             return Some(2);
         }
     }
-    if matches!(b0, b'r' | b'b' | b'f' | b'u') && is_quote_byte(view.byte_at(cursor + 1)) {
+    if matches!(b0, b'r' | b'b' | b'f' | b't' | b'u') && is_quote_byte(view.byte_at(cursor + 1)) {
         return Some(1);
     }
     None
@@ -315,6 +319,24 @@ fn scan_hash_comment(view: &mut SourceView<'_>, cursor: u32) -> u32 {
             return end;
         }
     }
+}
+
+fn scan_line_continuation(view: &mut SourceView<'_>, cursor: u32) -> u32 {
+    let mut end = cursor + 1;
+    match view.byte_at(end) {
+        Some(b'\r') => {
+            end += 1;
+            if view.byte_at(end) == Some(b'\n') {
+                end += 1;
+            }
+        }
+        Some(b'\n') => end += 1,
+        _ => return end,
+    }
+    while matches!(view.byte_at(end), Some(b' ' | b'\t' | 0x0C)) {
+        end += 1;
+    }
+    end
 }
 
 fn is_oct_digit(b: u8) -> bool {
@@ -571,9 +593,12 @@ mod tests {
             r#"r"raw\n""#,
             r#"b"bytes""#,
             r#"f"f {x}""#,
+            r#"t"template {x}""#,
             r#"rb"rawbytes""#,
             r#"BR"x""#,
             r#"Rf'y'"#,
+            r#"rt'x'"#,
+            r#"TR"x""#,
             r#"u"unicode""#,
         ] {
             let t = run(s);

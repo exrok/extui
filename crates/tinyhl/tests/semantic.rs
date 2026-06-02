@@ -220,6 +220,43 @@ fn python_walrus_is_a_binding() {
 }
 
 #[test]
+fn python_semantic_regressions() {
+    let pairs = semantic_pairs(
+        Language::Python,
+        r#"
+import os, pkg.mod
+from lib import name, other as alias
+
+def f(x: User, y=factory(default), *, z: Other = make()) -> Result:
+    return x
+
+a, (b, c) = row
+d = e = make()
+foo
+(bar)
+"#,
+    );
+
+    for name in ["os", "pkg", "name", "alias", "a", "b", "c", "d", "e"] {
+        assert_has(&pairs, name, SemanticKind::VariableDefinition);
+    }
+    for name in ["x", "y", "z"] {
+        assert_has(&pairs, name, SemanticKind::Parameter);
+    }
+    for name in ["User", "Other", "Result"] {
+        assert_has(&pairs, name, SemanticKind::TypeName);
+    }
+
+    assert_has(&pairs, "factory", SemanticKind::FunctionCall);
+    assert_has(&pairs, "make", SemanticKind::FunctionCall);
+    assert_has(&pairs, "row", SemanticKind::Variable);
+    assert_has(&pairs, "foo", SemanticKind::Variable);
+    assert_lacks(&pairs, "foo", SemanticKind::FunctionCall);
+    assert_lacks(&pairs, "factory", SemanticKind::Parameter);
+    assert_lacks(&pairs, "default", SemanticKind::Parameter);
+}
+
+#[test]
 fn markdown_python_fence_gets_semantics() {
     let src = "```python\nclass Widget:\n    def run(self):\n        return self.size\n```\n";
     let source: &dyn Source = &src;

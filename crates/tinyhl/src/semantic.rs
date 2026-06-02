@@ -108,7 +108,9 @@ impl StateSnapshot {
                 state.recent_var_def = None;
             }
             Self::Py(state) => {
-                state.pending_fn_token = None;
+                state.assign_candidates.clear();
+                state.last_assign_candidate = None;
+                state.import_candidate = None;
             }
             Self::C(_) | Self::None => {}
         }
@@ -415,7 +417,10 @@ impl<'t> Builder<'t> {
             chunk.end_offset = token.span.end();
         }
 
-        let (next_sig, next2_sig) = self.peek_next_sig_pair();
+        let (next_sig, next2_sig) = match &self.state {
+            StateSnapshot::Py(state) => self.peek_next_sig_pair_python(state, token),
+            _ => self.peek_next_sig_pair(),
+        };
 
         match &mut self.state {
             StateSnapshot::None => {}
@@ -445,6 +450,7 @@ impl<'t> Builder<'t> {
                 self.src,
                 token,
                 next_sig,
+                next2_sig,
                 state,
                 self.chunk.as_mut().unwrap(),
             ),
@@ -462,6 +468,46 @@ impl<'t> Builder<'t> {
                 if seen == 2 {
                     break;
                 }
+            }
+        }
+        (out[0], out[1])
+    }
+
+    fn peek_next_sig_pair_python(
+        &self,
+        state: &PyState,
+        token: Token,
+    ) -> (Option<Token>, Option<Token>) {
+        let mut cursor = self.cursor.clone();
+        let (mut paren_depth, mut bracket_depth, mut brace_depth) = py_depth_after_local(
+            state.paren_depth,
+            state.bracket_depth,
+            state.brace_depth,
+            kind_local(token.kind),
+        );
+        let mut out = [None, None];
+        let mut seen = 0usize;
+        while let Some(token) = cursor.next() {
+            let local = kind_local(token.kind);
+            if local == kind::WHITESPACE {
+                if paren_depth == 0
+                    && bracket_depth == 0
+                    && brace_depth == 0
+                    && py_whitespace_has_logical_newline(self.src, token)
+                {
+                    break;
+                }
+                continue;
+            }
+            if local == kind::COMMENT {
+                continue;
+            }
+            out[seen] = Some(token);
+            seen += 1;
+            (paren_depth, bracket_depth, brace_depth) =
+                py_depth_after_local(paren_depth, bracket_depth, brace_depth, local);
+            if seen == 2 {
+                break;
             }
         }
         (out[0], out[1])
@@ -1506,11 +1552,11 @@ struct PyCall {
 /// (gated on zero bracket depth so implicit line joins do not count) to spot
 /// statement-level assignment targets.
 ///
-/// Every field is offset-free — depths, counts, and booleans only — so the
+/// Most fields are offset-free — depths, counts, and booleans only — so the
 /// snapshot taken at a chunk boundary compares equal whenever two builds reach
-/// the same logical point, keeping `mutate` convergent. The one index field,
-/// `pending_fn_token`, points into the current chunk and is cleared by
-/// [`StateSnapshot::reset_chunk_local`] before any split.
+/// the same logical point, keeping `mutate` convergent. Index fields point into
+/// the current chunk and are cleared by [`StateSnapshot::reset_chunk_local`]
+/// before any split.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 struct PyState {
     started: bool,
@@ -1519,12 +1565,14 @@ struct PyState {
     def_pending: bool,
     class_pending: bool,
     param_header_pending: bool,
-    method_check_pending: bool,
-    pending_fn_token: Option<usize>,
     class_base_pending: bool,
     class_base_paren: Option<usize>,
     lambda_params_pending: bool,
     for_target_pending: bool,
+    from_pending: bool,
+    import_mode: Option<PyImportMode>,
+    import_alias_start: bool,
+    import_candidate: Option<usize>,
     as_pending: bool,
     decorator_pending: bool,
     annotate_pending: bool,
@@ -1534,7 +1582,24 @@ struct PyState {
     bracket_depth: usize,
     brace_depth: usize,
     param_depth: Option<usize>,
+    param_mode: Option<PyParamMode>,
+    assign_candidates: Vec<usize>,
+    last_assign_candidate: Option<usize>,
     call_stack: Vec<PyCall>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PyParamMode {
+    Name,
+    AfterName,
+    Annotation,
+    Default,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PyImportMode {
+    Import,
+    FromImport,
 }
 
 fn py_depth_all_zero(state: &PyState) -> bool {
@@ -1561,10 +1626,65 @@ fn py_is_assign_op(local: u16) -> bool {
     )
 }
 
-/// Returns `true` if any byte of `token`'s span is a newline.
-fn token_has_newline(src: &dyn Source, token: Token) -> bool {
+fn py_clear_assign_candidates(state: &mut PyState) {
+    state.assign_candidates.clear();
+    state.last_assign_candidate = None;
+}
+
+fn py_push_assign_candidate(state: &mut PyState, semantic_idx: usize) {
+    state.assign_candidates.push(semantic_idx);
+    state.last_assign_candidate = Some(semantic_idx);
+}
+
+fn py_remove_last_assign_candidate(state: &mut PyState) {
+    if let Some(idx) = state.last_assign_candidate.take() {
+        if state.assign_candidates.last() == Some(&idx) {
+            state.assign_candidates.pop();
+        }
+    }
+}
+
+fn py_mark_assign_candidates(state: &mut PyState, chunk: &mut SemanticChunk) {
+    for idx in state.assign_candidates.drain(..) {
+        if let Some(token) = chunk.tokens.get_mut(idx) {
+            token.kind = SemanticKind::VariableDefinition;
+        }
+    }
+    state.last_assign_candidate = None;
+}
+
+fn py_reset_statement(state: &mut PyState) {
+    state.def_pending = false;
+    state.class_pending = false;
+    state.lambda_params_pending = false;
+    state.for_target_pending = false;
+    state.from_pending = false;
+    state.import_mode = None;
+    state.import_alias_start = false;
+    state.import_candidate = None;
+    state.as_pending = false;
+    state.annotate_pending = false;
+    state.pending_type = false;
+    py_clear_assign_candidates(state);
+}
+
+fn py_downgrade_import_candidate(state: &mut PyState, chunk: &mut SemanticChunk) {
+    if let Some(idx) = state.import_candidate.take() {
+        if let Some(token) = chunk.tokens.get_mut(idx) {
+            token.kind = SemanticKind::Variable;
+        }
+    }
+}
+
+/// Returns `true` if `token`'s whitespace span contains a logical newline.
+///
+/// Explicit line continuations are whitespace too, but their newline is not a
+/// statement boundary.
+fn py_whitespace_has_logical_newline(src: &dyn Source, token: Token) -> bool {
     let mut offset = token.span.offset;
     let end = token.span.end();
+    let mut escaped = false;
+    let mut skip_lf = false;
     while offset < end {
         let (base, page) = src.page(offset);
         if page.is_empty() {
@@ -1575,18 +1695,59 @@ fn token_has_newline(src: &dyn Source, token: Token) -> bool {
         if take == 0 {
             return false;
         }
-        if page[rel..rel + take].contains(&b'\n') {
-            return true;
+        for &b in &page[rel..rel + take] {
+            if skip_lf {
+                skip_lf = false;
+                if b == b'\n' {
+                    continue;
+                }
+            }
+            match b {
+                b'\\' => escaped = true,
+                b'\r' => {
+                    if !escaped {
+                        return true;
+                    }
+                    escaped = false;
+                    skip_lf = true;
+                }
+                b'\n' => {
+                    if !escaped {
+                        return true;
+                    }
+                    escaped = false;
+                }
+                _ => escaped = false,
+            }
         }
         offset += take as u32;
     }
     false
 }
 
+fn py_depth_after_local(
+    mut paren_depth: usize,
+    mut bracket_depth: usize,
+    mut brace_depth: usize,
+    local: u16,
+) -> (usize, usize, usize) {
+    match local {
+        kind::OPEN_PAREN => paren_depth += 1,
+        kind::CLOSE_PAREN => paren_depth = paren_depth.saturating_sub(1),
+        kind::OPEN_BRACKET => bracket_depth += 1,
+        kind::CLOSE_BRACKET => bracket_depth = bracket_depth.saturating_sub(1),
+        kind::OPEN_BRACE => brace_depth += 1,
+        kind::CLOSE_BRACE => brace_depth = brace_depth.saturating_sub(1),
+        _ => {}
+    }
+    (paren_depth, bracket_depth, brace_depth)
+}
+
 fn analyze_python(
     src: &dyn Source,
     token: Token,
     next_sig: Option<Token>,
+    next2_sig: Option<Token>,
     state: &mut PyState,
     chunk: &mut SemanticChunk,
 ) {
@@ -1596,8 +1757,9 @@ fn analyze_python(
     // new logical line — record it for the next real token without disturbing
     // any other state.
     if local == kind::WHITESPACE {
-        if py_depth_all_zero(state) && token_has_newline(src, token) {
+        if py_depth_all_zero(state) && py_whitespace_has_logical_newline(src, token) {
             state.at_line_start = true;
+            py_reset_statement(state);
         }
         return;
     }
@@ -1611,6 +1773,10 @@ fn analyze_python(
 
     let next_local = next_sig.map(|t| kind_local(t.kind));
     let is_call = next_local == Some(kind::OPEN_PAREN);
+    let next2_is_self = next2_sig
+        .filter(|t| is_ident(*t, Language::Python))
+        .map(|t| token_eq(src, t, b"self") || token_eq(src, t, b"cls"))
+        .unwrap_or(false);
     let next_is_assign = next_local.map(py_is_assign_op).unwrap_or(false);
 
     match local {
@@ -1618,7 +1784,7 @@ fn analyze_python(
             state.paren_depth += 1;
             if state.param_header_pending {
                 state.param_depth = Some(state.paren_depth);
-                state.method_check_pending = true;
+                state.param_mode = Some(PyParamMode::Name);
                 state.param_header_pending = false;
             } else if state.class_base_pending {
                 state.class_base_paren = Some(state.paren_depth);
@@ -1634,8 +1800,8 @@ fn analyze_python(
         kind::CLOSE_PAREN => {
             if state.param_depth == Some(state.paren_depth) {
                 state.param_depth = None;
-                state.method_check_pending = false;
-                state.pending_fn_token = None;
+                state.param_mode = None;
+                state.pending_type = false;
             }
             if state.class_base_paren == Some(state.paren_depth) {
                 state.class_base_paren = None;
@@ -1656,6 +1822,9 @@ fn analyze_python(
             state.pending_type = false;
         }
         kind::OPEN_BRACKET => {
+            if state.prev_was_ident {
+                py_remove_last_assign_candidate(state);
+            }
             state.bracket_depth += 1;
             state.after_dot = false;
         }
@@ -1677,6 +1846,11 @@ fn analyze_python(
             state.after_dot = false;
         }
         kind::DOT => {
+            if state.import_mode.is_none() {
+                py_remove_last_assign_candidate(state);
+            } else {
+                state.import_alias_start = false;
+            }
             state.after_dot = true;
         }
         kind::THIN_ARROW => {
@@ -1684,27 +1858,60 @@ fn analyze_python(
             state.after_dot = false;
         }
         kind::COLON => {
-            let annotate = state.annotate_pending;
+            let param_annotation = state.param_depth == Some(state.paren_depth)
+                && state.bracket_depth == 0
+                && state.brace_depth == 0
+                && matches!(state.param_mode, Some(PyParamMode::AfterName));
+            let annotate = state.annotate_pending || param_annotation;
             state.annotate_pending = false;
             state.for_target_pending = false;
             state.lambda_params_pending = false;
             state.after_dot = false;
+            if param_annotation {
+                state.param_mode = Some(PyParamMode::Annotation);
+            }
             // An annotation colon opens a type context; a block, dict, slice,
             // or lambda colon ends one.
             state.pending_type = annotate;
         }
         kind::COMMA => {
             state.after_dot = false;
+            if state.import_mode.is_some() {
+                state.import_alias_start = true;
+                state.import_candidate = None;
+                state.as_pending = false;
+            }
+            if state.param_depth == Some(state.paren_depth)
+                && state.bracket_depth == 0
+                && state.brace_depth == 0
+            {
+                state.param_mode = Some(PyParamMode::Name);
+                state.annotate_pending = false;
+                state.pending_type = false;
+            }
             // Keep the type context across commas only inside a subscript
             // (`Dict[str, int]`) or a class base list (`class C(A, B)`).
             state.pending_type = state.pending_type
                 && (state.bracket_depth > 0 || state.class_base_paren == Some(state.paren_depth));
+        }
+        kind::SEMI => {
+            py_reset_statement(state);
+            state.at_line_start = true;
+            state.after_dot = false;
         }
         kind::AT if line_head => {
             state.decorator_pending = true;
             state.after_dot = false;
         }
         _ if py_is_assign_op(local) => {
+            if state.param_depth == Some(state.paren_depth)
+                && state.bracket_depth == 0
+                && state.brace_depth == 0
+            {
+                state.param_mode = Some(PyParamMode::Default);
+            } else {
+                py_mark_assign_candidates(state, chunk);
+            }
             state.after_dot = false;
             state.pending_type = false;
         }
@@ -1713,20 +1920,38 @@ fn analyze_python(
             state.pending_type = false;
             state.decorator_pending = false;
             if token_eq(src, token, b"def") {
+                py_clear_assign_candidates(state);
                 state.def_pending = true;
             } else if token_eq(src, token, b"class") {
+                py_clear_assign_candidates(state);
                 state.class_pending = true;
             } else if token_eq(src, token, b"lambda") {
                 state.lambda_params_pending = true;
             } else if token_eq(src, token, b"for") {
+                py_clear_assign_candidates(state);
                 state.for_target_pending = true;
             } else if token_eq(src, token, b"in") {
                 state.for_target_pending = false;
+            } else if token_eq(src, token, b"from") {
+                state.from_pending = true;
+            } else if token_eq(src, token, b"import") {
+                state.import_mode = Some(if state.from_pending {
+                    PyImportMode::FromImport
+                } else {
+                    PyImportMode::Import
+                });
+                state.from_pending = false;
+                state.import_alias_start = true;
+                state.import_candidate = None;
             } else if token_eq(src, token, b"as") {
+                if state.import_mode.is_some() {
+                    py_downgrade_import_candidate(state, chunk);
+                }
                 state.as_pending = true;
             }
         }
         _ if is_ident(token, Language::Python) => {
+            let mut collect_assign_candidate = false;
             let kind = if next_local == Some(kind::COLON_EQ) {
                 // Walrus binding (`n := ...`), valid anywhere.
                 Some(SemanticKind::VariableDefinition)
@@ -1735,15 +1960,29 @@ fn analyze_python(
                 if next_local == Some(kind::OPEN_PAREN) {
                     state.param_header_pending = true;
                 }
-                let idx = push_semantic(chunk, token, SemanticKind::FunctionDefinition);
-                state.pending_fn_token = Some(idx);
-                None
+                if next2_is_self {
+                    Some(SemanticKind::MethodDefinition)
+                } else {
+                    Some(SemanticKind::FunctionDefinition)
+                }
             } else if state.class_pending {
                 state.class_pending = false;
                 if next_local == Some(kind::OPEN_PAREN) {
                     state.class_base_pending = true;
                 }
                 Some(SemanticKind::TypeDefinition)
+            } else if state.import_mode.is_some() {
+                if state.as_pending {
+                    state.as_pending = false;
+                    state.import_alias_start = false;
+                    state.import_candidate = None;
+                    Some(SemanticKind::VariableDefinition)
+                } else if state.import_alias_start {
+                    state.import_alias_start = false;
+                    Some(SemanticKind::VariableDefinition)
+                } else {
+                    Some(SemanticKind::Variable)
+                }
             } else if state.as_pending {
                 state.as_pending = false;
                 Some(SemanticKind::VariableDefinition)
@@ -1758,6 +1997,41 @@ fn analyze_python(
                 Some(SemanticKind::Parameter)
             } else if state.for_target_pending {
                 Some(SemanticKind::VariableDefinition)
+            } else if state.param_depth == Some(state.paren_depth) {
+                match state.param_mode {
+                    Some(PyParamMode::Name) => {
+                        state.param_mode = Some(PyParamMode::AfterName);
+                        Some(SemanticKind::Parameter)
+                    }
+                    Some(PyParamMode::Annotation) => Some(SemanticKind::TypeName),
+                    Some(PyParamMode::Default) | Some(PyParamMode::AfterName) | None => {
+                        if state.pending_type {
+                            Some(SemanticKind::TypeName)
+                        } else if state.after_dot {
+                            if is_call {
+                                Some(SemanticKind::MethodCall)
+                            } else if next_is_assign {
+                                Some(SemanticKind::FieldDefinition)
+                            } else {
+                                Some(SemanticKind::Field)
+                            }
+                        } else if is_call {
+                            Some(SemanticKind::FunctionCall)
+                        } else if state
+                            .call_stack
+                            .last()
+                            .map(|c| c.depth == state.paren_depth)
+                            .unwrap_or(false)
+                        {
+                            Some(SemanticKind::Argument)
+                        } else {
+                            collect_assign_candidate = true;
+                            Some(SemanticKind::Variable)
+                        }
+                    }
+                }
+            } else if state.pending_type {
+                Some(SemanticKind::TypeName)
             } else if state.after_dot {
                 if is_call {
                     Some(SemanticKind::MethodCall)
@@ -1766,21 +2040,6 @@ fn analyze_python(
                 } else {
                     Some(SemanticKind::Field)
                 }
-            } else if state.param_depth == Some(state.paren_depth) {
-                if state.method_check_pending {
-                    state.method_check_pending = false;
-                    if token_eq(src, token, b"self") || token_eq(src, token, b"cls") {
-                        if let Some(idx) = state.pending_fn_token {
-                            chunk.tokens[idx].kind = SemanticKind::MethodDefinition;
-                        }
-                    }
-                }
-                if next_local == Some(kind::COLON) {
-                    state.annotate_pending = true;
-                }
-                Some(SemanticKind::Parameter)
-            } else if state.pending_type {
-                Some(SemanticKind::TypeName)
             } else if line_head && py_depth_all_zero(state) {
                 if is_call {
                     Some(SemanticKind::FunctionCall)
@@ -1788,10 +2047,14 @@ fn analyze_python(
                     Some(SemanticKind::VariableDefinition)
                 } else if next_local == Some(kind::COLON) {
                     state.annotate_pending = true;
+                    collect_assign_candidate = true;
                     Some(SemanticKind::VariableDefinition)
                 } else {
+                    collect_assign_candidate = true;
                     Some(SemanticKind::Variable)
                 }
+            } else if next_is_assign {
+                Some(SemanticKind::VariableDefinition)
             } else if is_call {
                 Some(SemanticKind::FunctionCall)
             } else if state
@@ -1802,11 +2065,18 @@ fn analyze_python(
             {
                 Some(SemanticKind::Argument)
             } else {
+                collect_assign_candidate = true;
                 Some(SemanticKind::Variable)
             };
 
             if let Some(kind) = kind {
-                push_semantic(chunk, token, kind);
+                let idx = push_semantic(chunk, token, kind);
+                if collect_assign_candidate {
+                    py_push_assign_candidate(state, idx);
+                }
+                if state.import_mode.is_some() && kind == SemanticKind::VariableDefinition {
+                    state.import_candidate = Some(idx);
+                }
             }
             state.after_dot = false;
         }
