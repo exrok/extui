@@ -25,6 +25,11 @@ fn load_ts(name: &str) -> String {
     std::fs::read_to_string(path).unwrap_or_else(|e| panic!("fixture {name}: {e}"))
 }
 
+fn load_xml(name: &str) -> String {
+    let path = format!("{}/fixtures/xml/{name}", env!("CARGO_MANIFEST_DIR"));
+    std::fs::read_to_string(path).unwrap_or_else(|e| panic!("fixture {name}: {e}"))
+}
+
 fn tokens_of(language: Language, s: &str) -> Vec<tinyhl::Token> {
     let src: &dyn Source = &s;
     let table = TokenTable::new(language, src);
@@ -324,4 +329,54 @@ fn markdown_embed_dispatches_to_inner_languages() {
         nested_langs.contains(&Language::Json.tag()),
         "json fence should embed"
     );
+    assert!(
+        nested_langs.contains(&Language::Xml.tag()),
+        "xml fence should embed"
+    );
+}
+
+#[test]
+fn simple_xml_coverage_and_tags() {
+    let input = load_xml("simple.xml.in");
+    let tokens = tokens_of(Language::Xml, &input);
+
+    let mut pos = 0u32;
+    for t in &tokens {
+        assert_eq!(t.span.offset, pos, "gap before {pos}");
+        pos += t.span.len;
+        assert_eq!(t.lang_tag(), Language::Xml.tag());
+    }
+    assert_eq!(pos as usize, input.len());
+}
+
+#[test]
+fn xml_fixture_exercises_expected_kinds() {
+    use tinyhl::kind as kinds;
+
+    let mut seen = std::collections::HashSet::new();
+    let input = load_xml("simple.xml.in");
+    for t in tokens_of(Language::Xml, &input) {
+        seen.insert(t.local_kind());
+    }
+    for required in [
+        kinds::TEXT,
+        kinds::WHITESPACE,
+        kinds::LT,
+        kinds::GT,
+        kinds::SLASH,
+        kinds::QUESTION,
+        kinds::EQ,
+        kinds::TAG_NAME,
+        kinds::ATTR_NAME,
+        kinds::STRING,
+        kinds::COMMENT,
+        kinds::ENTITY_REF,
+        kinds::CDATA,
+        kinds::DOCTYPE,
+    ] {
+        assert!(
+            seen.contains(&required),
+            "xml fixture should exercise kind {required}"
+        );
+    }
 }

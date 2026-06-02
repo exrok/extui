@@ -155,6 +155,8 @@ fn render_html(language: Language, src: &str) -> String {
     .tok-keyword { color: var(--purple); }
     .tok-error { color: var(--red); background: rgba(204,102,102,0.16); }
     .tok-punct { color: #c5c8c6; }
+    .tok-markup { color: var(--blue); }
+    .tok-entity { color: var(--orange); }
     .tok-heading { color: var(--blue); font-weight: 700; }
     .tok-link { color: var(--aqua); text-decoration: underline; text-decoration-color: rgba(138,190,183,0.45); }
     .sem-type { color: var(--yellow); }
@@ -400,6 +402,7 @@ fn parse_language(arg: &str) -> Result<Language, String> {
         "ts" | "typescript" => Ok(Language::Ts),
         "toml" => Ok(Language::Toml),
         "md" | "markdown" => Ok(Language::Markdown),
+        "xml" => Ok(Language::Xml),
         other => Err(format!("unsupported language: {other}")),
     }
 }
@@ -416,6 +419,10 @@ fn base_class(token: Token) -> &'static str {
         kind::KEYWORD => "tok-keyword",
         kind::COMMENT | kind::DOC_COMMENT => "tok-comment",
         kind::ERROR => "tok-error",
+        kind::TAG_NAME | kind::ATTR_NAME => "tok-markup",
+        kind::ENTITY_REF => "tok-entity",
+        kind::CDATA => "tok-string",
+        kind::DOCTYPE => "tok-keyword",
         kind::HEADING_MARKER | kind::HEADING_TEXT => "tok-heading",
         kind::LINK_URL | kind::LINK_TEXT => "tok-link",
         kind::CODE_INLINE | kind::CODE_FENCE | kind::CODE_BLOCK => "tok-string",
@@ -430,6 +437,8 @@ fn base_label(token: Token) -> &'static str {
         "tok-number" => "number",
         "tok-keyword" => "keyword",
         "tok-error" => "error",
+        "tok-markup" => "markup name",
+        "tok-entity" => "entity reference",
         "tok-heading" => "heading",
         "tok-link" => "link",
         _ => "punctuation / plain token",
@@ -585,6 +594,11 @@ fn local_kind_name(token: Token) -> &'static str {
         kind::LINK_URL => "LINK_URL",
         kind::BLOCKQUOTE => "BLOCKQUOTE",
         kind::LIST_MARKER => "LIST_MARKER",
+        kind::TAG_NAME => "TAG_NAME",
+        kind::ATTR_NAME => "ATTR_NAME",
+        kind::ENTITY_REF => "ENTITY_REF",
+        kind::CDATA => "CDATA",
+        kind::DOCTYPE => "DOCTYPE",
         _ => "<other>",
     }
 }

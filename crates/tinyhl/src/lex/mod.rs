@@ -13,6 +13,7 @@ pub(crate) mod rust;
 pub(crate) mod scan;
 pub(crate) mod toml;
 pub(crate) mod ts;
+pub(crate) mod xml;
 
 use crate::{Language, LexState};
 

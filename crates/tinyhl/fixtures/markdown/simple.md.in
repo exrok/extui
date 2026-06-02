@@ -39,6 +39,10 @@ int main(void) {
 {"a": 1, "b": [true, null]}
 ```
 
+```xml
+<note id="1">hello &amp; goodbye</note>
+```
+
 ```python
 print("opaque body, no embed")
 ```

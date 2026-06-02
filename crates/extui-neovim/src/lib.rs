@@ -51,6 +51,7 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
+use std::time::Duration;
 
 use extui::event::polling;
 use extui::event::{KeyEvent, MouseEvent};
@@ -70,6 +71,22 @@ use crate::msgpack::{self as mp, Writer};
 const UI_ATTACH_MSGID: u32 = 0;
 type PendingRequests = Arc<Mutex<HashMap<u32, SyncSender<Vec<u8>>>>>;
 type Notifications = Arc<Mutex<VecDeque<String>>>;
+
+/// Upper bound on how long [`NeovimEmbed::request`] waits for a reply.
+///
+/// # Hazard
+///
+/// `request` is a synchronous round trip that parks the calling thread, which
+/// in a host TUI is the same thread that forwards keystrokes to neovim. Neovim
+/// does not service non-`api-fast` requests while it sits in a *blocking* input
+/// state: operator-pending, an unfinished mapping, waiting for the second half
+/// of a digraph or for a register after `Ctrl-K` / `Ctrl-R`, or a modal prompt.
+/// A request issued in that state is never answered until neovim receives more
+/// input, but the only thread that could send that input is the one now parked
+/// in the request. An unbounded wait there is therefore a hard deadlock: the
+/// whole UI freezes with no way out. Time out instead so the caller can surface
+/// an error and let the user unblock neovim.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Controls how the background reader thread notifies the host that new
 /// content is available.
@@ -303,10 +320,16 @@ impl NeovimEmbed {
 
     /// Returns the current buffer contents joined by `\n`.
     ///
+    /// This is a synchronous RPC round trip on the calling thread. It returns an
+    /// [`io::ErrorKind::TimedOut`] error if neovim does not reply within
+    /// [`REQUEST_TIMEOUT`], which happens when neovim is parked in a blocking
+    /// input state (see [`REQUEST_TIMEOUT`] for the full hazard). A caller on a
+    /// UI thread must handle that error rather than treat the read as infallible.
+    ///
     /// # Errors
     ///
-    /// Returns an error if the RPC request fails, Neovim replies with an
-    /// error, or the response payload is malformed.
+    /// Returns an error if the RPC request fails or times out, Neovim replies
+    /// with an error, or the response payload is malformed.
     pub fn current_buffer_text(&mut self) -> io::Result<String> {
         let response = self.request(|writer, msgid| {
             mp::encode_current_buffer_get_lines_request(writer, msgid);
@@ -534,6 +557,11 @@ impl NeovimEmbed {
         stdin.flush()
     }
 
+    /// Sends an RPC request and blocks the calling thread until neovim replies.
+    ///
+    /// The wait is bounded by [`REQUEST_TIMEOUT`]. See that constant for why an
+    /// unbounded wait here would deadlock a host UI thread rather than just run
+    /// slow.
     fn request(&mut self, encode: impl FnOnce(&mut Writer, u32)) -> io::Result<Vec<u8>> {
         let msgid = self.next_request_id();
         let (tx, rx) = mpsc::sync_channel(1);
@@ -545,14 +573,30 @@ impl NeovimEmbed {
         self.scratch_writer.clear();
         encode(&mut self.scratch_writer, msgid);
         if let Err(err) = self.write_frame() {
-            if let Ok(mut pending) = self.pending_requests.lock() {
-                pending.remove(&msgid);
-            }
+            self.remove_pending(msgid);
             return Err(err);
         }
 
-        rx.recv()
-            .map_err(|_| io::Error::other("neovim request was interrupted"))
+        match rx.recv_timeout(REQUEST_TIMEOUT) {
+            Ok(response) => Ok(response),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                // Neovim is wedged in a blocking input state and will not reply.
+                // Drop the pending slot so a late reply is discarded rather than
+                // matched against a future request id.
+                self.remove_pending(msgid);
+                Err(io::Error::new(io::ErrorKind::TimedOut, "neovim request timed out"))
+            }
+            // The reader thread cleared the table on stdout EOF: neovim is gone.
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                Err(io::Error::other("neovim request was interrupted"))
+            }
+        }
+    }
+
+    fn remove_pending(&self, msgid: u32) {
+        if let Ok(mut pending) = self.pending_requests.lock() {
+            pending.remove(&msgid);
+        }
     }
 
     fn next_request_id(&mut self) -> u32 {

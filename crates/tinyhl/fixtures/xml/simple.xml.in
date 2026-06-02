@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE note [
+  <!ENTITY writer "Donald Duck">
+]>
+<note xmlns:h="http://example.com/h" data-id="42">
+  <!-- greeting -->
+  <to>Tove &amp; <h:name first='A'>Alice</h:name></to>
+  <empty checked="true"/>
+  <![CDATA[<raw>&value;</raw>]]>
+</note>

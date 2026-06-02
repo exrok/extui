@@ -221,3 +221,16 @@ pub const BLOCKQUOTE: u16 = 209;
 /// A list-item marker (`-` / `*` / `+` / `<digits>.` / `<digits>)`) together
 /// with the trailing space.
 pub const LIST_MARKER: u16 = 210;
+
+// Markup-specific structure, shared by XML and future HTML / TSX lexers.
+
+/// Element, processing-instruction target, or closing-tag name.
+pub const TAG_NAME: u16 = 220;
+/// Attribute name inside a markup tag.
+pub const ATTR_NAME: u16 = 221;
+/// XML / HTML character or entity reference, e.g. `&amp;` or `&#10;`.
+pub const ENTITY_REF: u16 = 222;
+/// CDATA section, including delimiters.
+pub const CDATA: u16 = 223;
+/// Document type declaration, including delimiters.
+pub const DOCTYPE: u16 = 224;

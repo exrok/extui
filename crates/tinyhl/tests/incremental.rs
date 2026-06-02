@@ -452,6 +452,62 @@ fn markdown_fixture_sweep_over_chunks() {
 }
 
 #[test]
+fn xml_insert_sweep() {
+    let source =
+        r#"<?xml version="1.0"?><root a="b">text &amp; <![CDATA[x]]><!--c--><empty/></root>"#;
+    for off in 0..=source.len() {
+        for ins in [
+            "x",
+            "<",
+            ">",
+            "/",
+            "?",
+            "!",
+            "\"",
+            "'",
+            " ",
+            "&",
+            ";",
+            "<!--",
+            "<![CDATA[",
+        ] {
+            assert_mutate_matches_lang(Language::Xml, source, Span::new(off as u32, 0), ins);
+        }
+    }
+}
+
+#[test]
+fn xml_delete_sweep() {
+    let source =
+        r#"<?xml version="1.0"?><root a="b">text &amp; <![CDATA[x]]><!--c--><empty/></root>"#;
+    for off in 0..source.len() {
+        assert_mutate_matches_lang(Language::Xml, source, Span::new(off as u32, 1), "");
+    }
+}
+
+#[test]
+fn xml_replace_sweep() {
+    let source = r#"<root xmlns:h="urn:h"><h:item name='one'>value</h:item><empty/></root>"#;
+    for off in 0..source.len() {
+        for rep in ["x", "<", ">", "/", "=", "\"", "'", "&", " "] {
+            assert_mutate_matches_lang(Language::Xml, source, Span::new(off as u32, 1), rep);
+        }
+    }
+}
+
+#[test]
+fn xml_fixture_sweep_over_chunks() {
+    let path = format!("{}/fixtures/xml/simple.xml.in", env!("CARGO_MANIFEST_DIR"));
+    let source = std::fs::read_to_string(&path).unwrap();
+    let step = (source.len() / 64).max(1);
+    for off in (0..source.len()).step_by(step) {
+        for rep in ["x", "<", ">", "\"", "'", "&", "<!--", "<![CDATA["] {
+            assert_mutate_matches_lang(Language::Xml, &source, Span::new(off as u32, 0), rep);
+        }
+    }
+}
+
+#[test]
 fn chain_of_edits_stays_in_sync() {
     let mut current = String::from("[]");
     let src: &dyn Source = &current.as_str();
