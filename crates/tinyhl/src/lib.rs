@@ -83,6 +83,7 @@ pub enum Language {
     Sh = 15,
     Cpp = 16,
     Yaml = 17,
+    Lua = 18,
 }
 
 impl Language {
@@ -118,6 +119,7 @@ impl Language {
             15 => Self::Sh,
             16 => Self::Cpp,
             17 => Self::Yaml,
+            18 => Self::Lua,
             _ => panic!("unknown language tag"),
         }
     }

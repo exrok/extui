@@ -1248,6 +1248,77 @@ fn markdown_yaml_embed_sweep() {
 }
 
 #[test]
+fn lua_insert_sweep() {
+    let source = "global<const> *\nlocal t = {name = \"hi\"}; if t.name ~= nil then print(t.name .. [[x]]) end\n";
+    for off in 0..=source.len() {
+        for ins in [
+            "x", "9", "\"", "'", "[", "]", "-", "=", "<", ">", ".", "\n", "\\",
+        ] {
+            assert_mutate_matches_lang(Language::Lua, source, Span::new(off as u32, 0), ins);
+        }
+    }
+}
+
+#[test]
+fn lua_delete_sweep() {
+    let source = "global<const> *\nlocal t = {name = \"hi\"}; if t.name ~= nil then print(t.name .. [[x]]) end\n";
+    for off in 0..source.len() {
+        assert_mutate_matches_lang(Language::Lua, source, Span::new(off as u32, 1), "");
+    }
+}
+
+#[test]
+fn lua_replace_sweep() {
+    let source = "n=0x1.fp3; m=.5e-2; s='a\\z\n b'; bits=(n << 1) | (~n >> 2); q=n//2";
+    for off in 0..source.len() {
+        for rep in [
+            "x", "0", ".", "e", "p", "'", "\"", "[", "]", "-", "=", "<", ">", "/",
+        ] {
+            assert_mutate_matches_lang(Language::Lua, source, Span::new(off as u32, 1), rep);
+        }
+    }
+}
+
+#[test]
+fn lua_long_bracket_sweep() {
+    let source =
+        "--[=[comment\n--[[nested-looking]]\n]=]\nlocal s = [==[line 1\n]===]\nline 3]==]\n";
+    for off in 0..=source.len() {
+        for ins in ["x", "\n", "[", "]", "=", "-", "--", "[=["] {
+            assert_mutate_matches_lang(Language::Lua, source, Span::new(off as u32, 0), ins);
+        }
+    }
+    for off in 0..source.len() {
+        assert_mutate_matches_lang(Language::Lua, source, Span::new(off as u32, 1), "");
+    }
+}
+
+#[test]
+fn lua_fixture_sweep_over_chunks() {
+    let path = format!("{}/fixtures/lua/simple.lua.in", env!("CARGO_MANIFEST_DIR"));
+    let source = std::fs::read_to_string(&path).unwrap();
+    let step = (source.len() / 96).max(1);
+    for off in (0..source.len()).step_by(step) {
+        for rep in ["x", " ", "'", "\"", "--", "[=[", "]", "0x", "::", ".."] {
+            assert_mutate_matches_lang(Language::Lua, &source, Span::new(off as u32, 0), rep);
+        }
+    }
+}
+
+#[test]
+fn markdown_lua_embed_sweep() {
+    let source = "# T\n\n```lua\nglobal<const> *\nlocal s = [=[hi]=]\n```\n\nend\n";
+    for off in 0..=source.len() {
+        for ins in ["x", "`", "\n", " ", "'", "\"", "-", "[", "]", "="] {
+            assert_mutate_matches_lang(Language::Markdown, source, Span::new(off as u32, 0), ins);
+        }
+    }
+    for off in 0..source.len() {
+        assert_mutate_matches_lang(Language::Markdown, source, Span::new(off as u32, 1), "");
+    }
+}
+
+#[test]
 fn chain_of_edits_stays_in_sync() {
     let mut current = String::from("[]");
     let src: &dyn Source = &current.as_str();

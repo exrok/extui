@@ -14,6 +14,7 @@ pub(crate) mod html;
 pub(crate) mod json;
 pub(crate) mod jsx;
 pub mod kw;
+pub(crate) mod lua;
 pub(crate) mod markdown;
 pub(crate) mod python;
 pub(crate) mod rust;

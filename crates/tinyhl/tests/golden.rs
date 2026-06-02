@@ -80,6 +80,11 @@ fn load_yaml(name: &str) -> String {
     std::fs::read_to_string(path).unwrap_or_else(|e| panic!("fixture {name}: {e}"))
 }
 
+fn load_lua(name: &str) -> String {
+    let path = format!("{}/fixtures/lua/{name}", env!("CARGO_MANIFEST_DIR"));
+    std::fs::read_to_string(path).unwrap_or_else(|e| panic!("fixture {name}: {e}"))
+}
+
 fn tokens_of(language: Language, s: &str) -> Vec<tinyhl::Token> {
     let src: &dyn Source = &s;
     let table = TokenTable::new(language, src);
@@ -1193,6 +1198,92 @@ fn markdown_yaml_fence_embeds_yaml() {
     assert!(
         embedded.contains(&Language::Yaml.tag()),
         "both `yaml` and `yml` fences should embed YAML"
+    );
+}
+
+#[test]
+fn simple_lua_coverage_and_tags() {
+    let input = load_lua("simple.lua.in");
+    let tokens = tokens_of(Language::Lua, &input);
+
+    let mut pos = 0u32;
+    for t in &tokens {
+        assert_eq!(t.span.offset, pos, "gap before {pos}");
+        pos += t.span.len;
+        assert_eq!(t.lang_tag(), Language::Lua.tag());
+    }
+    assert_eq!(pos as usize, input.len());
+}
+
+#[test]
+fn lua_fixture_exercises_expected_kinds() {
+    use tinyhl::kind as kinds;
+
+    let mut seen = std::collections::HashSet::new();
+    let input = load_lua("simple.lua.in");
+    for t in tokens_of(Language::Lua, &input) {
+        seen.insert(t.local_kind());
+    }
+    for required in [
+        kinds::WHITESPACE,
+        kinds::COMMENT,
+        kinds::STRING,
+        kinds::NUMBER,
+        kinds::KEYWORD,
+        kinds::IDENT,
+        kinds::OPEN_BRACE,
+        kinds::CLOSE_BRACE,
+        kinds::OPEN_PAREN,
+        kinds::CLOSE_PAREN,
+        kinds::OPEN_BRACKET,
+        kinds::CLOSE_BRACKET,
+        kinds::COMMA,
+        kinds::SEMI,
+        kinds::COLON,
+        kinds::DOT,
+        kinds::HASH,
+        kinds::EQ,
+        kinds::EQ_EQ,
+        kinds::BANG_EQ,
+        kinds::LT,
+        kinds::GT,
+        kinds::LT_EQ,
+        kinds::GT_EQ,
+        kinds::PLUS,
+        kinds::MINUS,
+        kinds::STAR,
+        kinds::SLASH,
+        kinds::PERCENT,
+        kinds::CARET,
+        kinds::AMP,
+        kinds::PIPE,
+        kinds::TILDE,
+        kinds::SHL,
+        kinds::SHR,
+        kinds::SLASH_SLASH,
+        kinds::DOT_DOT,
+        kinds::ELLIPSIS,
+        kinds::COLON_COLON,
+    ] {
+        assert!(
+            seen.contains(&required),
+            "lua fixture should exercise kind {required}"
+        );
+    }
+}
+
+#[test]
+fn markdown_lua_fence_embeds_lua() {
+    let source = "intro\n\n```lua\nglobal<const> *\nlocal x = [[ok]]\n```\n";
+    let tokens = tokens_of(Language::Markdown, source);
+    let embedded: std::collections::HashSet<u8> = tokens
+        .iter()
+        .filter(|t| t.nest >= 1)
+        .map(|t| t.lang_tag())
+        .collect();
+    assert!(
+        embedded.contains(&Language::Lua.tag()),
+        "`lua` fence should embed Lua"
     );
 }
 

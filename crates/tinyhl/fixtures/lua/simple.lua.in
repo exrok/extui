@@ -1,0 +1,31 @@
+#!/usr/bin/env lua
+global<const> *
+
+local config <const> = {
+    name = "tinyhl",
+    path = 'a\z
+        b',
+    mask = 0xff & 0x0f,
+    ratio = 0x1.fp3 // 2,
+    long = [==[
+hello
+]==],
+    [1] = "first",
+}
+
+local bits = (config.mask << 1) | (~config.mask >> 2)
+local calc = (1 + 2 - 3) * 4 / 5 % 2 ^ 3;
+
+-- line comment
+--[=[
+block comment
+]=]
+
+function config:greet(...)
+    if self.name ~= nil and #self.name > 0 then
+        return self.name .. tostring(...)
+    elseif bits == 0 or calc <= 1 or calc >= 10 then
+        goto done
+    end
+    ::done::
+end

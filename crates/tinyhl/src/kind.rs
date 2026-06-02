@@ -155,6 +155,8 @@ pub const COLON_EQ: u16 = 120;
 pub const LEFT_ARROW: u16 = 121;
 /// `&^` (Go bit clear).
 pub const AMP_CARET: u16 = 122;
+/// `..` (Lua concatenation).
+pub const DOT_DOT: u16 = 123;
 
 // Compound assignment.
 
