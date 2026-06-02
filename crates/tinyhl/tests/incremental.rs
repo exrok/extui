@@ -550,6 +550,64 @@ fn csv_fixture_sweep_over_chunks() {
 }
 
 #[test]
+fn css_insert_sweep() {
+    let source = ".btn#x:hover { color: #fff; width: calc(50% - 10px) !important; }";
+    for off in 0..=source.len() {
+        for ins in [
+            "x", "9", "\"", "'", " ", "{", "}", "(", ")", "[", "]", "/", "*", "#", "@", ".", ":",
+            ";", "%", "\\", "-",
+        ] {
+            assert_mutate_matches_lang(Language::Css, source, Span::new(off as u32, 0), ins);
+        }
+    }
+}
+
+#[test]
+fn css_delete_sweep() {
+    let source = ".btn#x:hover { color: #fff; width: calc(50% - 10px) !important; }";
+    for off in 0..source.len() {
+        assert_mutate_matches_lang(Language::Css, source, Span::new(off as u32, 1), "");
+    }
+}
+
+#[test]
+fn css_replace_sweep() {
+    let source = "@media (w:1px){a{background:url(a.png) #f00;font:1e3px/2 'x'}}";
+    for off in 0..source.len() {
+        for rep in [
+            "x", "/", "*", "\"", "'", "#", "@", "(", ")", "0", ".", "%", "e",
+        ] {
+            assert_mutate_matches_lang(Language::Css, source, Span::new(off as u32, 1), rep);
+        }
+    }
+}
+
+#[test]
+fn css_multiline_comment_and_url_sweep() {
+    let source = "/* a\nmulti\nline */ .x {\n  background: url(path/to/img.png);\n}\n";
+    for off in 0..=source.len() {
+        for ins in ["x", "\n", "*", "/", "\"", " ", ")", "("] {
+            assert_mutate_matches_lang(Language::Css, source, Span::new(off as u32, 0), ins);
+        }
+    }
+    for off in 0..source.len() {
+        assert_mutate_matches_lang(Language::Css, source, Span::new(off as u32, 1), "");
+    }
+}
+
+#[test]
+fn css_fixture_sweep_over_chunks() {
+    let path = format!("{}/fixtures/css/simple.css.in", env!("CARGO_MANIFEST_DIR"));
+    let source = std::fs::read_to_string(&path).unwrap();
+    let step = (source.len() / 64).max(1);
+    for off in (0..source.len()).step_by(step) {
+        for rep in ["x", " ", "\"", "/*", "#", "@", "url(", ")", "%"] {
+            assert_mutate_matches_lang(Language::Css, &source, Span::new(off as u32, 0), rep);
+        }
+    }
+}
+
+#[test]
 fn chain_of_edits_stays_in_sync() {
     let mut current = String::from("[]");
     let src: &dyn Source = &current.as_str();

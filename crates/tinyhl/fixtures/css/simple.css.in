@@ -1,0 +1,30 @@
+/* Theme tokens and a couple of rules. */
+@import "reset.css";
+
+:root {
+    --accent: #3b82f6;
+    --gap: 0.5rem;
+}
+
+@media (min-width: 700px) {
+    .card,
+    .panel > .body {
+        margin: 0 auto;
+        padding: 10px 1.5em;
+        width: calc(100% - 2 * var(--gap));
+        color: var(--accent);
+        background: url(images/bg.png) no-repeat;
+        background-image: url("layer.svg");
+        font: 16px/1.5 "Helvetica Neue", sans-serif;
+        z-index: 10 !important;
+    }
+
+    a[href^="https://"]::before {
+        content: "\2197";
+        opacity: 50%;
+    }
+}
+
+#main:hover {
+    transform: translateX(-3px) rotate(45deg);
+}

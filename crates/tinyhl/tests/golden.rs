@@ -35,6 +35,11 @@ fn load_csv(name: &str) -> String {
     std::fs::read_to_string(path).unwrap_or_else(|e| panic!("fixture {name}: {e}"))
 }
 
+fn load_css(name: &str) -> String {
+    let path = format!("{}/fixtures/css/{name}", env!("CARGO_MANIFEST_DIR"));
+    std::fs::read_to_string(path).unwrap_or_else(|e| panic!("fixture {name}: {e}"))
+}
+
 fn tokens_of(language: Language, s: &str) -> Vec<tinyhl::Token> {
     let src: &dyn Source = &s;
     let table = TokenTable::new(language, src);
@@ -342,6 +347,10 @@ fn markdown_embed_dispatches_to_inner_languages() {
         nested_langs.contains(&Language::Xml.tag()),
         "xml fence should embed"
     );
+    assert!(
+        nested_langs.contains(&Language::Css.tag()),
+        "css fence should embed"
+    );
 }
 
 #[test]
@@ -423,6 +432,59 @@ fn csv_fixture_exercises_expected_kinds() {
         assert!(
             seen.contains(&required),
             "csv fixture should exercise kind {required}"
+        );
+    }
+}
+
+#[test]
+fn simple_css_coverage_and_tags() {
+    let input = load_css("simple.css.in");
+    let tokens = tokens_of(Language::Css, &input);
+
+    let mut pos = 0u32;
+    for t in &tokens {
+        assert_eq!(t.span.offset, pos, "gap before {pos}");
+        pos += t.span.len;
+        assert_eq!(t.lang_tag(), Language::Css.tag());
+    }
+    assert_eq!(pos as usize, input.len());
+}
+
+#[test]
+fn css_fixture_exercises_expected_kinds() {
+    use tinyhl::kind as kinds;
+
+    let mut seen = std::collections::HashSet::new();
+    let input = load_css("simple.css.in");
+    for t in tokens_of(Language::Css, &input) {
+        seen.insert(t.local_kind());
+    }
+    for required in [
+        kinds::WHITESPACE,
+        kinds::COMMENT,
+        kinds::STRING,
+        kinds::NUMBER,
+        kinds::IDENT,
+        kinds::AT_KEYWORD,
+        kinds::HASH_TOKEN,
+        kinds::OPEN_BRACE,
+        kinds::CLOSE_BRACE,
+        kinds::OPEN_PAREN,
+        kinds::CLOSE_PAREN,
+        kinds::OPEN_BRACKET,
+        kinds::CLOSE_BRACKET,
+        kinds::COLON,
+        kinds::SEMI,
+        kinds::COMMA,
+        kinds::DOT,
+        kinds::GT,
+        kinds::BANG,
+        kinds::CARET,
+        kinds::EQ,
+    ] {
+        assert!(
+            seen.contains(&required),
+            "css fixture should exercise kind {required}"
         );
     }
 }

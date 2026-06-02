@@ -48,6 +48,10 @@ Alice,42
 <note id="1">hello &amp; goodbye</note>
 ```
 
+```css
+.banner { color: #fff; padding: 10px 0; }
+```
+
 ```python
 print("opaque body, no embed")
 ```

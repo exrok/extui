@@ -234,3 +234,11 @@ pub const ENTITY_REF: u16 = 222;
 pub const CDATA: u16 = 223;
 /// Document type declaration, including delimiters.
 pub const DOCTYPE: u16 = 224;
+
+// Stylesheet-specific structure (CSS).
+
+/// At-rule keyword, including the leading `@`, e.g. `@media`, `@import`.
+pub const AT_KEYWORD: u16 = 230;
+/// `#`-prefixed hash token, used for id selectors (`#main`) and hex colors
+/// (`#ff0000`).
+pub const HASH_TOKEN: u16 = 231;
