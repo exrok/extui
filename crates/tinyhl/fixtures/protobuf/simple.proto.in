@@ -1,0 +1,48 @@
+syntax = "proto3";
+
+package tinyhl.demo;
+
+import public "google/protobuf/timestamp.proto";
+
+// Person exercises common proto3 schema forms.
+option go_package = "example.com/tinyhl/demo;demopb";
+option (custom.file).enabled = true;
+
+message Person {
+  reserved 4, 15 to max;
+  reserved "old_name";
+
+  string name = 1;
+  optional int32 age = 2 [json_name = "ageYears", deprecated = false];
+  repeated google.protobuf.Timestamp seen_at = 3;
+  map<string, bytes> labels = 5;
+
+  oneof contact {
+    string email = 6;
+    bytes phone = 7;
+  }
+
+  double ratio = 8 [default = -1.5e+2];
+  float positive = 9 [default = +inf];
+  extensions 100 to 199;
+}
+
+enum Status {
+  option allow_alias = true;
+  STATUS_UNSPECIFIED = 0;
+  STATUS_ACTIVE = 1;
+}
+
+service Directory {
+  rpc GetPerson (Person) returns (Person);
+  rpc StreamPeople (stream Person) returns (stream Person) {
+    option (google.api.http) = {
+      get: "/v1/{name}"
+    };
+  }
+}
+
+/* Legacy extension for proto2-style users. */
+extend Person {
+  optional string legacy_id = 100;
+}

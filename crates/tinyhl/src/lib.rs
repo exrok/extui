@@ -86,6 +86,7 @@ pub enum Language {
     Lua = 18,
     Make = 19,
     Cmake = 20,
+    Protobuf = 21,
 }
 
 impl Language {
@@ -124,6 +125,7 @@ impl Language {
             18 => Self::Lua,
             19 => Self::Make,
             20 => Self::Cmake,
+            21 => Self::Protobuf,
             _ => panic!("unknown language tag"),
         }
     }

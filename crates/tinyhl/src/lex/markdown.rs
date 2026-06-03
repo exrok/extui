@@ -15,7 +15,7 @@
 //!   three. Info strings `rust`/`rs`, `c`, `csv`, `json`, `xml`, `css`,
 //!   `ts`/`typescript`, `tsx`/`jsx`, `html`/`htm`, `python`/`py`,
 //!   `sql`, `go`/`golang`, `sh`/`shell`/`bash`, `yaml`/`yml`, `lua`,
-//!   `make`/`makefile`/`mk`, and `cmake`
+//!   `make`/`makefile`/`mk`, `cmake`, and `proto`/`protobuf`
 //!   (case-insensitive ASCII) dispatch to the corresponding language. An
 //!   embedded `html` block in turn
 //!   embeds CSS and TypeScript for its `<style>` and `<script>` content; a
@@ -605,6 +605,8 @@ const INFO_LANGS: &[(&[u8], Language)] = &[
     (b"make", Language::Make),
     (b"makefile", Language::Make),
     (b"mk", Language::Make),
+    (b"proto", Language::Protobuf),
+    (b"protobuf", Language::Protobuf),
     (b"py", Language::Python),
     (b"python", Language::Python),
     (b"rs", Language::Rust),

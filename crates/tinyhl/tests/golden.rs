@@ -95,6 +95,11 @@ fn load_cmake(name: &str) -> String {
     std::fs::read_to_string(path).unwrap_or_else(|e| panic!("fixture {name}: {e}"))
 }
 
+fn load_protobuf(name: &str) -> String {
+    let path = format!("{}/fixtures/protobuf/{name}", env!("CARGO_MANIFEST_DIR"));
+    std::fs::read_to_string(path).unwrap_or_else(|e| panic!("fixture {name}: {e}"))
+}
+
 fn tokens_of(language: Language, s: &str) -> Vec<tinyhl::Token> {
     let src: &dyn Source = &s;
     let table = TokenTable::new(language, src);
@@ -1415,6 +1420,74 @@ fn markdown_cmake_fence_embeds_cmake() {
     assert!(
         embedded.contains(&Language::Cmake.tag()),
         "`cmake` fence should embed CMake"
+    );
+}
+
+#[test]
+fn simple_protobuf_coverage_and_tags() {
+    let input = load_protobuf("simple.proto.in");
+    let tokens = tokens_of(Language::Protobuf, &input);
+
+    let mut pos = 0u32;
+    for t in &tokens {
+        assert_eq!(t.span.offset, pos, "gap before {pos}");
+        pos += t.span.len;
+        assert_eq!(t.lang_tag(), Language::Protobuf.tag());
+    }
+    assert_eq!(pos as usize, input.len());
+}
+
+#[test]
+fn protobuf_fixture_exercises_expected_kinds() {
+    use tinyhl::kind as kinds;
+
+    let mut seen = std::collections::HashSet::new();
+    let input = load_protobuf("simple.proto.in");
+    for t in tokens_of(Language::Protobuf, &input) {
+        seen.insert(t.local_kind());
+    }
+    for required in [
+        kinds::WHITESPACE,
+        kinds::COMMENT,
+        kinds::STRING,
+        kinds::NUMBER,
+        kinds::KEYWORD,
+        kinds::IDENT,
+        kinds::OPEN_BRACE,
+        kinds::CLOSE_BRACE,
+        kinds::OPEN_PAREN,
+        kinds::CLOSE_PAREN,
+        kinds::OPEN_BRACKET,
+        kinds::CLOSE_BRACKET,
+        kinds::COMMA,
+        kinds::SEMI,
+        kinds::COLON,
+        kinds::DOT,
+        kinds::EQ,
+        kinds::LT,
+        kinds::GT,
+        kinds::PLUS,
+        kinds::MINUS,
+    ] {
+        assert!(
+            seen.contains(&required),
+            "protobuf fixture should exercise kind {required}"
+        );
+    }
+}
+
+#[test]
+fn markdown_protobuf_fence_embeds_protobuf() {
+    let source = "intro\n\n```proto\nsyntax = \"proto3\";\nmessage M { string name = 1; }\n```\n\n```protobuf\nservice S {}\n```\n";
+    let tokens = tokens_of(Language::Markdown, source);
+    let embedded: std::collections::HashSet<u8> = tokens
+        .iter()
+        .filter(|t| t.nest >= 1)
+        .map(|t| t.lang_tag())
+        .collect();
+    assert!(
+        embedded.contains(&Language::Protobuf.tag()),
+        "both `proto` and `protobuf` fences should embed Protobuf"
     );
 }
 

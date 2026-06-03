@@ -2,8 +2,9 @@
 
 use crate::lex::{
     Lexer, StepBuf, c::C, cmake::Cmake, cpp::Cpp, css::Css, csv::Csv, go::Go, html::Html,
-    json::Json, jsx::Jsx, lua::Lua, make::Make, markdown::Markdown, python::Python, rust::Rust,
-    sh::Sh, sql::Sql, toml::Toml, ts::Ts, tsx::Tsx, xml::Xml, yaml::Yaml,
+    json::Json, jsx::Jsx, lua::Lua, make::Make, markdown::Markdown, protobuf::Protobuf,
+    python::Python, rust::Rust, sh::Sh, sql::Sql, toml::Toml, ts::Ts, tsx::Tsx, xml::Xml,
+    yaml::Yaml,
 };
 use crate::{Language, LexState, SourceView};
 
@@ -36,5 +37,6 @@ pub(crate) fn step_batch(
         Language::Lua => Lua::step_batch(view, cursor, state, out),
         Language::Make => Make::step_batch(view, cursor, state, out),
         Language::Cmake => Cmake::step_batch(view, cursor, state, out),
+        Language::Protobuf => Protobuf::step_batch(view, cursor, state, out),
     }
 }

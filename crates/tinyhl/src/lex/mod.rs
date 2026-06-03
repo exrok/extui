@@ -18,6 +18,7 @@ pub mod kw;
 pub(crate) mod lua;
 pub(crate) mod make;
 pub(crate) mod markdown;
+pub(crate) mod protobuf;
 pub(crate) mod python;
 pub(crate) mod rust;
 pub(crate) mod scan;

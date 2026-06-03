@@ -1434,6 +1434,83 @@ fn markdown_cmake_embed_sweep() {
 }
 
 #[test]
+fn protobuf_insert_sweep() {
+    let source =
+        "syntax = \"proto3\";\nmessage M { optional string name = 1 [deprecated = false]; }\n";
+    for off in 0..=source.len() {
+        for ins in [
+            "x", "9", "\"", "'", " ", "{", "}", "(", ")", "[", "]", "/", "*", ".", "=", "<", ">",
+        ] {
+            assert_mutate_matches_lang(Language::Protobuf, source, Span::new(off as u32, 0), ins);
+        }
+    }
+}
+
+#[test]
+fn protobuf_delete_sweep() {
+    let source =
+        "syntax = \"proto3\";\nmessage M { optional string name = 1 [deprecated = false]; }\n";
+    for off in 0..source.len() {
+        assert_mutate_matches_lang(Language::Protobuf, source, Span::new(off as u32, 1), "");
+    }
+}
+
+#[test]
+fn protobuf_replace_sweep() {
+    let source =
+        "message M { map<string, bytes> labels = 1; double ratio = 2 [default = -1.5e+2]; }";
+    for off in 0..source.len() {
+        for rep in [
+            "x", "0", "\"", "'", "/", "*", ".", "=", "<", ">", "+", "-", "[",
+        ] {
+            assert_mutate_matches_lang(Language::Protobuf, source, Span::new(off as u32, 1), rep);
+        }
+    }
+}
+
+#[test]
+fn protobuf_string_comment_sweep() {
+    let source = "message M {\n  // comment\n  string s = 1 [default = \"line\\nvalue\"];\n  /* block */ bytes b = 2;\n}\n";
+    for off in 0..=source.len() {
+        for ins in ["x", "\n", "\\", "\"", "'", "/", "*", " "] {
+            assert_mutate_matches_lang(Language::Protobuf, source, Span::new(off as u32, 0), ins);
+        }
+    }
+    for off in 0..source.len() {
+        assert_mutate_matches_lang(Language::Protobuf, source, Span::new(off as u32, 1), "");
+    }
+}
+
+#[test]
+fn protobuf_fixture_sweep_over_chunks() {
+    let path = format!(
+        "{}/fixtures/protobuf/simple.proto.in",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let source = std::fs::read_to_string(&path).unwrap();
+    let step = (source.len() / 64).max(1);
+    for off in (0..source.len()).step_by(step) {
+        for rep in ["x", " ", "\"", "'", "/*", "//", "0x", "[", "<", "returns"] {
+            assert_mutate_matches_lang(Language::Protobuf, &source, Span::new(off as u32, 0), rep);
+        }
+    }
+}
+
+#[test]
+fn markdown_protobuf_embed_sweep() {
+    let source =
+        "# T\n\n```proto\nsyntax = \"proto3\";\nmessage M { string name = 1; }\n```\n\nend\n";
+    for off in 0..=source.len() {
+        for ins in ["x", "`", "\n", " ", "\"", "'", "/", "{", "}", "["] {
+            assert_mutate_matches_lang(Language::Markdown, source, Span::new(off as u32, 0), ins);
+        }
+    }
+    for off in 0..source.len() {
+        assert_mutate_matches_lang(Language::Markdown, source, Span::new(off as u32, 1), "");
+    }
+}
+
+#[test]
 fn chain_of_edits_stays_in_sync() {
     let mut current = String::from("[]");
     let src: &dyn Source = &current.as_str();

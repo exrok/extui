@@ -411,6 +411,7 @@ fn parse_language(arg: &str) -> Result<Language, String> {
         "sh" | "shell" | "bash" => Ok(Language::Sh),
         "make" | "makefile" | "mk" => Ok(Language::Make),
         "cmake" => Ok(Language::Cmake),
+        "proto" | "protobuf" => Ok(Language::Protobuf),
         other => Err(format!("unsupported language: {other}")),
     }
 }
