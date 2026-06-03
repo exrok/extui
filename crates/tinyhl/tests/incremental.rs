@@ -1687,6 +1687,205 @@ fn markdown_wgsl_embed_sweep() {
 }
 
 #[test]
+fn perl_insert_sweep() {
+    let source = "use strict; my $x = qr/foo/i; if ($x) { say qq{hi $x}; }\n";
+    for off in 0..=source.len() {
+        for ins in [
+            "x", "9", "\"", "'", "`", " ", "#", "$", "@", "%", "/", "{", "q",
+        ] {
+            assert_mutate_matches_lang(Language::Perl, source, Span::new(off as u32, 0), ins);
+        }
+    }
+}
+
+#[test]
+fn perl_delete_sweep() {
+    let source = "use strict; my $x = qr/foo/i; if ($x) { say qq{hi $x}; }\n";
+    for off in 0..source.len() {
+        assert_mutate_matches_lang(Language::Perl, source, Span::new(off as u32, 1), "");
+    }
+}
+
+#[test]
+fn perl_replace_sweep() {
+    let source = "$msg =~ s/foo/bar/g; my @xs = (1_000, 2); print q{done}; # ok\n";
+    for off in 0..source.len() {
+        for rep in [
+            "x", "0", "\"", "'", "`", "#", "$", "@", "%", "/", "{", "}", ".",
+        ] {
+            assert_mutate_matches_lang(Language::Perl, source, Span::new(off as u32, 1), rep);
+        }
+    }
+}
+
+#[test]
+fn perl_fixture_sweep_over_chunks() {
+    let path = format!("{}/fixtures/perl/simple.pl.in", env!("CARGO_MANIFEST_DIR"));
+    let source = std::fs::read_to_string(&path).unwrap();
+    let step = (source.len() / 64).max(1);
+    for off in (0..source.len()).step_by(step) {
+        for rep in ["x", " ", "\"", "'", "#", "$", "qr/", "s/", "qq{"] {
+            assert_mutate_matches_lang(Language::Perl, &source, Span::new(off as u32, 0), rep);
+        }
+    }
+}
+
+#[test]
+fn csharp_insert_sweep() {
+    let source =
+        "public record R(string Name) { string S => $@\"hi {Name}\"; var n = a?.B ?? 0; }\n";
+    for off in 0..=source.len() {
+        for ins in [
+            "x", "9", "\"", "'", " ", "{", "}", "(", ")", "/", "*", "@", "$", "?", ".",
+        ] {
+            assert_mutate_matches_lang(Language::Csharp, source, Span::new(off as u32, 0), ins);
+        }
+    }
+}
+
+#[test]
+fn csharp_delete_sweep() {
+    let source =
+        "public record R(string Name) { string S => $@\"hi {Name}\"; var n = a?.B ?? 0; }\n";
+    for off in 0..source.len() {
+        assert_mutate_matches_lang(Language::Csharp, source, Span::new(off as u32, 1), "");
+    }
+}
+
+#[test]
+fn csharp_replace_sweep() {
+    let source = "var path = @\"c:\\tmp\\x\"; var raw = \"\"\"line\nvalue\"\"\"; var n = 1_000;";
+    for off in 0..source.len() {
+        for rep in ["x", "0", "\"", "'", "@", "$", "/", "*", "?", ".", "=", "_"] {
+            assert_mutate_matches_lang(Language::Csharp, source, Span::new(off as u32, 1), rep);
+        }
+    }
+}
+
+#[test]
+fn csharp_fixture_sweep_over_chunks() {
+    let path = format!(
+        "{}/fixtures/csharp/simple.cs.in",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let source = std::fs::read_to_string(&path).unwrap();
+    let step = (source.len() / 64).max(1);
+    for off in (0..source.len()).step_by(step) {
+        for rep in ["x", " ", "\"", "/*", "//", "@\"", "$\"", "?.", "??"] {
+            assert_mutate_matches_lang(Language::Csharp, &source, Span::new(off as u32, 0), rep);
+        }
+    }
+}
+
+#[test]
+fn java_insert_sweep() {
+    let source =
+        "@Deprecated public class C { String s = \"\"\"hi\n\"\"\"; int n = 1_000 >>> 1; }\n";
+    for off in 0..=source.len() {
+        for ins in [
+            "x", "9", "\"", "'", " ", "{", "}", "(", ")", "/", "*", "@", "<", ">", "?",
+        ] {
+            assert_mutate_matches_lang(Language::Java, source, Span::new(off as u32, 0), ins);
+        }
+    }
+}
+
+#[test]
+fn java_delete_sweep() {
+    let source =
+        "@Deprecated public class C { String s = \"\"\"hi\n\"\"\"; int n = 1_000 >>> 1; }\n";
+    for off in 0..source.len() {
+        assert_mutate_matches_lang(Language::Java, source, Span::new(off as u32, 1), "");
+    }
+}
+
+#[test]
+fn java_replace_sweep() {
+    let source = "package demo; import java.util.*; class C<T> { char c='x'; String s=\"v\"; }";
+    for off in 0..source.len() {
+        for rep in [
+            "x", "0", "\"", "'", "/", "*", "@", "<", ">", "?", ":", ".", "_",
+        ] {
+            assert_mutate_matches_lang(Language::Java, source, Span::new(off as u32, 1), rep);
+        }
+    }
+}
+
+#[test]
+fn java_fixture_sweep_over_chunks() {
+    let path = format!(
+        "{}/fixtures/java/simple.java.in",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let source = std::fs::read_to_string(&path).unwrap();
+    let step = (source.len() / 64).max(1);
+    for off in (0..source.len()).step_by(step) {
+        for rep in ["x", " ", "\"", "/*", "//", "@", ">>>", "0x", "<T>"] {
+            assert_mutate_matches_lang(Language::Java, &source, Span::new(off as u32, 0), rep);
+        }
+    }
+}
+
+#[test]
+fn lisp_insert_sweep() {
+    let source = "(define (square x) #| c |# (* x x)) ; ok\n'(1 #t #\\space \"s\")\n";
+    for off in 0..=source.len() {
+        for ins in [
+            "x", "9", "\"", " ", "\n", ";", "#", "|", "'", "`", ",", "(", ")",
+        ] {
+            assert_mutate_matches_lang(Language::Lisp, source, Span::new(off as u32, 0), ins);
+        }
+    }
+}
+
+#[test]
+fn lisp_delete_sweep() {
+    let source = "(define (square x) #| c |# (* x x)) ; ok\n'(1 #t #\\space \"s\")\n";
+    for off in 0..source.len() {
+        assert_mutate_matches_lang(Language::Lisp, source, Span::new(off as u32, 1), "");
+    }
+}
+
+#[test]
+fn lisp_replace_sweep() {
+    let source = "(let* ((xs '(1 2 3))) (if #false (display \"no\") (quote ok)))";
+    for off in 0..source.len() {
+        for rep in ["x", "0", "\"", ";", "#", "|", "'", "`", ",", "(", ")", "-"] {
+            assert_mutate_matches_lang(Language::Lisp, source, Span::new(off as u32, 1), rep);
+        }
+    }
+}
+
+#[test]
+fn lisp_fixture_sweep_over_chunks() {
+    let path = format!(
+        "{}/fixtures/lisp/simple.lisp.in",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let source = std::fs::read_to_string(&path).unwrap();
+    let step = (source.len() / 64).max(1);
+    for off in (0..source.len()).step_by(step) {
+        for rep in ["x", " ", "\"", ";", "#|", "|#", "'", "(", ")"] {
+            assert_mutate_matches_lang(Language::Lisp, &source, Span::new(off as u32, 0), rep);
+        }
+    }
+}
+
+#[test]
+fn markdown_new_language_embed_sweep() {
+    let source = "# T\n\n```perl\nmy $x = qr/a/;\n```\n\n```cs\nrecord R(int X);\n```\n\n```java\nclass C {}\n```\n\n```scheme\n(define x 1)\n```\n";
+    let step = (source.len() / 64).max(1);
+    for off in (0..=source.len()).step_by(step) {
+        for ins in ["x", "`", "\n", " ", "\"", "'", "#", "{", "}", "(", ")"] {
+            assert_mutate_matches_lang(Language::Markdown, source, Span::new(off as u32, 0), ins);
+        }
+    }
+    for off in (0..source.len()).step_by(step) {
+        assert_mutate_matches_lang(Language::Markdown, source, Span::new(off as u32, 1), "");
+    }
+}
+
+#[test]
 fn chain_of_edits_stays_in_sync() {
     let mut current = String::from("[]");
     let src: &dyn Source = &current.as_str();

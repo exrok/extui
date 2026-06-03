@@ -1,0 +1,12 @@
+(define (square x)
+  #| block
+     #| nested |#
+  |#
+  (* x x))
+
+(let* ((xs '(1 2 3))
+       (flag #t)
+       (ch #\space))
+  (if flag
+      (display "ok")
+      (quote done))) ; trailing

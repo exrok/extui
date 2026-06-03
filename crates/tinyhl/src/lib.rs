@@ -90,6 +90,10 @@ pub enum Language {
     Ini = 22,
     Conf = 23,
     Wgsl = 24,
+    Perl = 25,
+    Csharp = 26,
+    Java = 27,
+    Lisp = 28,
 }
 
 impl Language {
@@ -132,6 +136,10 @@ impl Language {
             22 => Self::Ini,
             23 => Self::Conf,
             24 => Self::Wgsl,
+            25 => Self::Perl,
+            26 => Self::Csharp,
+            27 => Self::Java,
+            28 => Self::Lisp,
             _ => panic!("unknown language tag"),
         }
     }

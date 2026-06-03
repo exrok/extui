@@ -1,0 +1,16 @@
+using System;
+
+namespace Demo;
+
+public record Person(string Name)
+{
+    public string Greeting => $@"Hello ""{Name}""";
+    public int Count { get; init; } = 1_000;
+    public string Path = @"c:\tmp\file.txt";
+
+    public void Run()
+    {
+        var value = Name?.Length ?? 0;
+        Console.WriteLine(value);
+    }
+}

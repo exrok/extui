@@ -81,6 +81,8 @@ pub const DOLLAR: u16 = 58;
 pub const BANG: u16 = 59;
 /// `` ` `` (Markdown inline-code run that did not form a valid code span).
 pub const BACKTICK: u16 = 60;
+/// `'` quote punctuation, used by Lisp-family forms.
+pub const QUOTE: u16 = 61;
 
 // Single-byte operators.
 

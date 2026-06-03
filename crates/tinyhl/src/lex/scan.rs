@@ -488,7 +488,7 @@ pub fn scan_nested_block_comment(view: &mut SourceView<'_>, cursor: u32) -> Scan
 /// The caller must dispatch here only when the first byte is an ASCII digit,
 /// or a `.` followed by an ASCII digit (for `.5`-style decimals).
 pub fn scan_c_number(view: &mut SourceView<'_>, cursor: u32) -> ScanResult {
-    scan_c_family_number(view, cursor, false)
+    scan_c_family_number(view, cursor, 0)
 }
 
 /// Scans a C++ numeric literal starting at `cursor`.
@@ -498,28 +498,38 @@ pub fn scan_c_number(view: &mut SourceView<'_>, cursor: u32) -> ScanResult {
 /// local to one numeric token instead of turning the separator into a broken
 /// character literal.
 pub fn scan_cxx_number(view: &mut SourceView<'_>, cursor: u32) -> ScanResult {
-    scan_c_family_number(view, cursor, true)
+    scan_c_family_number(view, cursor, b'\'')
 }
 
-fn scan_c_family_number(view: &mut SourceView<'_>, cursor: u32, allow_sep: bool) -> ScanResult {
+/// Scans a C-family numeric literal with Java/C# underscore separators.
+///
+/// This deliberately reuses the C suffix scanner. Unsupported suffix letters
+/// will become a following identifier token, which is harmless for
+/// highlighting; the important bit is keeping `1_000` and `0xFF_AA` local to
+/// one number token.
+pub fn scan_c_number_with_underscores(view: &mut SourceView<'_>, cursor: u32) -> ScanResult {
+    scan_c_family_number(view, cursor, b'_')
+}
+
+fn scan_c_family_number(view: &mut SourceView<'_>, cursor: u32, sep: u8) -> ScanResult {
     if view.byte_at(cursor) == Some(b'0') {
         match view.byte_at(cursor + 1) {
-            Some(b'x') | Some(b'X') => return scan_c_hex_number(view, cursor + 2, allow_sep),
-            Some(b'b') | Some(b'B') => return scan_c_binary_number(view, cursor + 2, allow_sep),
+            Some(b'x') | Some(b'X') => return scan_c_hex_number(view, cursor + 2, sep),
+            Some(b'b') | Some(b'B') => return scan_c_binary_number(view, cursor + 2, sep),
             _ => {}
         }
     }
-    scan_c_decimal_number(view, cursor, allow_sep)
+    scan_c_decimal_number(view, cursor, sep)
 }
 
-fn scan_c_hex_number(view: &mut SourceView<'_>, after_prefix: u32, allow_sep: bool) -> ScanResult {
+fn scan_c_hex_number(view: &mut SourceView<'_>, after_prefix: u32, sep: u8) -> ScanResult {
     let (end_int, had_int_digits) =
-        scan_radix_digits_with_sep(view, after_prefix, byteclass::is_hex_digit, allow_sep);
+        scan_radix_digits_with_sep(view, after_prefix, byteclass::is_hex_digit, sep);
 
     let (body_end, saw_dot, had_frac_digits) = if view.byte_at(end_int) == Some(b'.') {
         let frac_start = end_int + 1;
         let (end_frac, had_frac_digits) =
-            scan_radix_digits_with_sep(view, frac_start, byteclass::is_hex_digit, allow_sep);
+            scan_radix_digits_with_sep(view, frac_start, byteclass::is_hex_digit, sep);
         (end_frac, true, had_frac_digits)
     } else {
         (end_int, false, false)
@@ -536,7 +546,7 @@ fn scan_c_hex_number(view: &mut SourceView<'_>, after_prefix: u32, allow_sep: bo
                 end += 1;
             }
             let (exp_end, had_exp_digits) =
-                scan_radix_digits_with_sep(view, end, byteclass::is_digit, allow_sep);
+                scan_radix_digits_with_sep(view, end, byteclass::is_digit, sep);
             end = exp_end;
             if !had_exp_digits {
                 return ScanResult::err(end);
@@ -552,30 +562,25 @@ fn scan_c_hex_number(view: &mut SourceView<'_>, after_prefix: u32, allow_sep: bo
     }
 }
 
-fn scan_c_binary_number(
-    view: &mut SourceView<'_>,
-    after_prefix: u32,
-    allow_sep: bool,
-) -> ScanResult {
+fn scan_c_binary_number(view: &mut SourceView<'_>, after_prefix: u32, sep: u8) -> ScanResult {
     let (end_digits, had_digits) =
-        scan_radix_digits_with_sep(view, after_prefix, is_binary_digit, allow_sep);
+        scan_radix_digits_with_sep(view, after_prefix, is_binary_digit, sep);
     if !had_digits {
         return ScanResult::err(end_digits);
     }
     ScanResult::ok(scan_int_suffix(view, end_digits))
 }
 
-fn scan_c_decimal_number(view: &mut SourceView<'_>, cursor: u32, allow_sep: bool) -> ScanResult {
+fn scan_c_decimal_number(view: &mut SourceView<'_>, cursor: u32, sep: u8) -> ScanResult {
     let (mut end, had_int_digits) =
-        scan_radix_digits_with_sep(view, cursor, byteclass::is_digit, allow_sep);
+        scan_radix_digits_with_sep(view, cursor, byteclass::is_digit, sep);
     let mut is_float = false;
     let mut had_frac_digits = false;
 
     if view.byte_at(end) == Some(b'.') {
         end += 1;
         is_float = true;
-        let (frac_end, had_frac) =
-            scan_radix_digits_with_sep(view, end, byteclass::is_digit, allow_sep);
+        let (frac_end, had_frac) = scan_radix_digits_with_sep(view, end, byteclass::is_digit, sep);
         end = frac_end;
         had_frac_digits = had_frac;
     }
@@ -591,7 +596,7 @@ fn scan_c_decimal_number(view: &mut SourceView<'_>, cursor: u32, allow_sep: bool
             end += 1;
         }
         let (exp_end, had_exp_digits) =
-            scan_radix_digits_with_sep(view, end, byteclass::is_digit, allow_sep);
+            scan_radix_digits_with_sep(view, end, byteclass::is_digit, sep);
         end = exp_end;
         if !had_exp_digits {
             return ScanResult::err(end);
@@ -610,7 +615,7 @@ fn scan_radix_digits_with_sep(
     view: &mut SourceView<'_>,
     cursor: u32,
     pred: fn(u8) -> bool,
-    allow_sep: bool,
+    sep: u8,
 ) -> (u32, bool) {
     let mut cursor = cursor;
     let mut saw_digit = false;
@@ -625,7 +630,7 @@ fn scan_radix_digits_with_sep(
             if pred(b) {
                 saw_digit = true;
                 i += 1;
-            } else if allow_sep && b == b'\'' {
+            } else if sep != 0 && b == sep {
                 i += 1;
             } else {
                 break;

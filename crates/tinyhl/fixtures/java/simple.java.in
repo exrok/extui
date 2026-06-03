@@ -1,0 +1,15 @@
+package demo;
+import java.util.List;
+
+// Annotation and text block coverage.
+@Deprecated
+public final class Demo<T> {
+    private static final String TEXT = """
+        hello
+        """;
+
+    public int count(List<String> names) {
+        int n = 1_000;
+        return names == null ? 0 : names.size() >>> 1;
+    }
+}

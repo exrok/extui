@@ -1,10 +1,10 @@
 //! Per-language lexer dispatch.
 
 use crate::lex::{
-    Lexer, StepBuf, c::C, cmake::Cmake, conf::Conf, cpp::Cpp, css::Css, csv::Csv, go::Go,
-    html::Html, ini::Ini, json::Json, jsx::Jsx, lua::Lua, make::Make, markdown::Markdown,
-    protobuf::Protobuf, python::Python, rust::Rust, sh::Sh, sql::Sql, toml::Toml, ts::Ts, tsx::Tsx,
-    wgsl::Wgsl, xml::Xml, yaml::Yaml,
+    Lexer, StepBuf, c::C, cmake::Cmake, conf::Conf, cpp::Cpp, csharp::Csharp, css::Css, csv::Csv,
+    go::Go, html::Html, ini::Ini, java::Java, json::Json, jsx::Jsx, lisp::Lisp, lua::Lua,
+    make::Make, markdown::Markdown, perl::Perl, protobuf::Protobuf, python::Python, rust::Rust,
+    sh::Sh, sql::Sql, toml::Toml, ts::Ts, tsx::Tsx, wgsl::Wgsl, xml::Xml, yaml::Yaml,
 };
 use crate::{Language, LexState, SourceView};
 
@@ -41,5 +41,9 @@ pub(crate) fn step_batch(
         Language::Ini => Ini::step_batch(view, cursor, state, out),
         Language::Conf => Conf::step_batch(view, cursor, state, out),
         Language::Wgsl => Wgsl::step_batch(view, cursor, state, out),
+        Language::Perl => Perl::step_batch(view, cursor, state, out),
+        Language::Csharp => Csharp::step_batch(view, cursor, state, out),
+        Language::Java => Java::step_batch(view, cursor, state, out),
+        Language::Lisp => Lisp::step_batch(view, cursor, state, out),
     }
 }

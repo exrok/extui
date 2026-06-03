@@ -12,12 +12,29 @@ use crate::{LexState, SourceView};
 pub(crate) enum Dialect {
     C,
     Cpp,
+    Java,
+    Csharp,
 }
 
 impl Dialect {
     #[inline]
     const fn is_cpp(self) -> bool {
         matches!(self, Self::Cpp)
+    }
+
+    #[inline]
+    const fn uses_xid_ident(self) -> bool {
+        matches!(self, Self::Java | Self::Csharp)
+    }
+
+    #[inline]
+    const fn uses_oneline_strings(self) -> bool {
+        matches!(self, Self::Java | Self::Csharp)
+    }
+
+    #[inline]
+    const fn uses_underscore_numbers(self) -> bool {
+        matches!(self, Self::Java | Self::Csharp)
     }
 }
 
@@ -178,6 +195,203 @@ kw::kw_table! {
 
 const MAX_CPP_KW_LEN: usize = 16; // "reinterpret_cast"
 
+kw::kw_table! {
+    static JAVA_KWS = [
+        (b"abstract", kinds::KEYWORD),
+        (b"assert", kinds::KEYWORD),
+        (b"boolean", kinds::KEYWORD),
+        (b"break", kinds::KEYWORD),
+        (b"byte", kinds::KEYWORD),
+        (b"case", kinds::KEYWORD),
+        (b"catch", kinds::KEYWORD),
+        (b"char", kinds::KEYWORD),
+        (b"class", kinds::KEYWORD),
+        (b"const", kinds::KEYWORD),
+        (b"continue", kinds::KEYWORD),
+        (b"default", kinds::KEYWORD),
+        (b"do", kinds::KEYWORD),
+        (b"double", kinds::KEYWORD),
+        (b"else", kinds::KEYWORD),
+        (b"enum", kinds::KEYWORD),
+        (b"exports", kinds::KEYWORD),
+        (b"extends", kinds::KEYWORD),
+        (b"false", kinds::KEYWORD),
+        (b"final", kinds::KEYWORD),
+        (b"finally", kinds::KEYWORD),
+        (b"float", kinds::KEYWORD),
+        (b"for", kinds::KEYWORD),
+        (b"goto", kinds::KEYWORD),
+        (b"if", kinds::KEYWORD),
+        (b"implements", kinds::KEYWORD),
+        (b"import", kinds::KEYWORD),
+        (b"instanceof", kinds::KEYWORD),
+        (b"int", kinds::KEYWORD),
+        (b"interface", kinds::KEYWORD),
+        (b"long", kinds::KEYWORD),
+        (b"module", kinds::KEYWORD),
+        (b"native", kinds::KEYWORD),
+        (b"new", kinds::KEYWORD),
+        (b"null", kinds::KEYWORD),
+        (b"open", kinds::KEYWORD),
+        (b"opens", kinds::KEYWORD),
+        (b"package", kinds::KEYWORD),
+        (b"permits", kinds::KEYWORD),
+        (b"private", kinds::KEYWORD),
+        (b"protected", kinds::KEYWORD),
+        (b"provides", kinds::KEYWORD),
+        (b"public", kinds::KEYWORD),
+        (b"record", kinds::KEYWORD),
+        (b"requires", kinds::KEYWORD),
+        (b"return", kinds::KEYWORD),
+        (b"sealed", kinds::KEYWORD),
+        (b"short", kinds::KEYWORD),
+        (b"static", kinds::KEYWORD),
+        (b"strictfp", kinds::KEYWORD),
+        (b"super", kinds::KEYWORD),
+        (b"switch", kinds::KEYWORD),
+        (b"synchronized", kinds::KEYWORD),
+        (b"this", kinds::KEYWORD),
+        (b"throw", kinds::KEYWORD),
+        (b"throws", kinds::KEYWORD),
+        (b"to", kinds::KEYWORD),
+        (b"transient", kinds::KEYWORD),
+        (b"transitive", kinds::KEYWORD),
+        (b"true", kinds::KEYWORD),
+        (b"try", kinds::KEYWORD),
+        (b"uses", kinds::KEYWORD),
+        (b"var", kinds::KEYWORD),
+        (b"void", kinds::KEYWORD),
+        (b"volatile", kinds::KEYWORD),
+        (b"while", kinds::KEYWORD),
+        (b"with", kinds::KEYWORD),
+        (b"yield", kinds::KEYWORD),
+    ];
+}
+
+const MAX_JAVA_KW_LEN: usize = 12; // "synchronized"
+
+kw::kw_table! {
+    static CSHARP_KWS = [
+        (b"abstract", kinds::KEYWORD),
+        (b"add", kinds::KEYWORD),
+        (b"alias", kinds::KEYWORD),
+        (b"as", kinds::KEYWORD),
+        (b"ascending", kinds::KEYWORD),
+        (b"async", kinds::KEYWORD),
+        (b"await", kinds::KEYWORD),
+        (b"base", kinds::KEYWORD),
+        (b"bool", kinds::KEYWORD),
+        (b"break", kinds::KEYWORD),
+        (b"by", kinds::KEYWORD),
+        (b"byte", kinds::KEYWORD),
+        (b"case", kinds::KEYWORD),
+        (b"catch", kinds::KEYWORD),
+        (b"char", kinds::KEYWORD),
+        (b"checked", kinds::KEYWORD),
+        (b"class", kinds::KEYWORD),
+        (b"const", kinds::KEYWORD),
+        (b"continue", kinds::KEYWORD),
+        (b"decimal", kinds::KEYWORD),
+        (b"default", kinds::KEYWORD),
+        (b"delegate", kinds::KEYWORD),
+        (b"descending", kinds::KEYWORD),
+        (b"do", kinds::KEYWORD),
+        (b"double", kinds::KEYWORD),
+        (b"dynamic", kinds::KEYWORD),
+        (b"else", kinds::KEYWORD),
+        (b"enum", kinds::KEYWORD),
+        (b"equals", kinds::KEYWORD),
+        (b"event", kinds::KEYWORD),
+        (b"explicit", kinds::KEYWORD),
+        (b"extern", kinds::KEYWORD),
+        (b"false", kinds::KEYWORD),
+        (b"file", kinds::KEYWORD),
+        (b"finally", kinds::KEYWORD),
+        (b"fixed", kinds::KEYWORD),
+        (b"float", kinds::KEYWORD),
+        (b"for", kinds::KEYWORD),
+        (b"foreach", kinds::KEYWORD),
+        (b"from", kinds::KEYWORD),
+        (b"get", kinds::KEYWORD),
+        (b"global", kinds::KEYWORD),
+        (b"goto", kinds::KEYWORD),
+        (b"group", kinds::KEYWORD),
+        (b"if", kinds::KEYWORD),
+        (b"implicit", kinds::KEYWORD),
+        (b"in", kinds::KEYWORD),
+        (b"init", kinds::KEYWORD),
+        (b"int", kinds::KEYWORD),
+        (b"interface", kinds::KEYWORD),
+        (b"internal", kinds::KEYWORD),
+        (b"into", kinds::KEYWORD),
+        (b"is", kinds::KEYWORD),
+        (b"join", kinds::KEYWORD),
+        (b"let", kinds::KEYWORD),
+        (b"lock", kinds::KEYWORD),
+        (b"long", kinds::KEYWORD),
+        (b"managed", kinds::KEYWORD),
+        (b"namespace", kinds::KEYWORD),
+        (b"new", kinds::KEYWORD),
+        (b"nint", kinds::KEYWORD),
+        (b"not", kinds::KEYWORD),
+        (b"notnull", kinds::KEYWORD),
+        (b"nuint", kinds::KEYWORD),
+        (b"null", kinds::KEYWORD),
+        (b"object", kinds::KEYWORD),
+        (b"on", kinds::KEYWORD),
+        (b"operator", kinds::KEYWORD),
+        (b"orderby", kinds::KEYWORD),
+        (b"out", kinds::KEYWORD),
+        (b"override", kinds::KEYWORD),
+        (b"params", kinds::KEYWORD),
+        (b"partial", kinds::KEYWORD),
+        (b"private", kinds::KEYWORD),
+        (b"protected", kinds::KEYWORD),
+        (b"public", kinds::KEYWORD),
+        (b"readonly", kinds::KEYWORD),
+        (b"record", kinds::KEYWORD),
+        (b"ref", kinds::KEYWORD),
+        (b"remove", kinds::KEYWORD),
+        (b"required", kinds::KEYWORD),
+        (b"return", kinds::KEYWORD),
+        (b"sbyte", kinds::KEYWORD),
+        (b"scoped", kinds::KEYWORD),
+        (b"sealed", kinds::KEYWORD),
+        (b"select", kinds::KEYWORD),
+        (b"set", kinds::KEYWORD),
+        (b"short", kinds::KEYWORD),
+        (b"sizeof", kinds::KEYWORD),
+        (b"stackalloc", kinds::KEYWORD),
+        (b"static", kinds::KEYWORD),
+        (b"string", kinds::KEYWORD),
+        (b"struct", kinds::KEYWORD),
+        (b"switch", kinds::KEYWORD),
+        (b"this", kinds::KEYWORD),
+        (b"throw", kinds::KEYWORD),
+        (b"true", kinds::KEYWORD),
+        (b"try", kinds::KEYWORD),
+        (b"typeof", kinds::KEYWORD),
+        (b"uint", kinds::KEYWORD),
+        (b"ulong", kinds::KEYWORD),
+        (b"unmanaged", kinds::KEYWORD),
+        (b"unsafe", kinds::KEYWORD),
+        (b"ushort", kinds::KEYWORD),
+        (b"using", kinds::KEYWORD),
+        (b"value", kinds::KEYWORD),
+        (b"var", kinds::KEYWORD),
+        (b"virtual", kinds::KEYWORD),
+        (b"void", kinds::KEYWORD),
+        (b"volatile", kinds::KEYWORD),
+        (b"when", kinds::KEYWORD),
+        (b"where", kinds::KEYWORD),
+        (b"while", kinds::KEYWORD),
+        (b"with", kinds::KEYWORD),
+        (b"yield", kinds::KEYWORD),
+    ];
+}
+
+const MAX_CSHARP_KW_LEN: usize = 10; // "descending" / "stackalloc"
+
 pub(crate) struct C;
 
 impl Lexer for C {
@@ -255,7 +469,14 @@ fn classify(
             }
         },
         b'"' => {
-            let r = scan::scan_c_string(view, cursor);
+            let r = if dialect.uses_oneline_strings()
+                && view.byte_at(cursor + 1) == Some(b'"')
+                && view.byte_at(cursor + 2) == Some(b'"')
+            {
+                scan_quote_run_string(view, cursor)
+            } else {
+                scan_string(view, cursor, dialect)
+            };
             (
                 kinds::STRING,
                 scan_literal_suffix(view, r.end, dialect),
@@ -263,7 +484,7 @@ fn classify(
             )
         }
         b'\'' => {
-            let r = scan::scan_c_char(view, cursor);
+            let r = scan_char(view, cursor, dialect);
             (
                 kinds::CHAR,
                 scan_literal_suffix(view, r.end, dialect),
@@ -360,6 +581,40 @@ fn classify(
             }
             _ => classify_ident(view, cursor, dialect),
         },
+        b'$' if matches!(dialect, Dialect::Csharp) => match view.byte_at(cursor + 1) {
+            Some(b'@') if view.byte_at(cursor + 2) == Some(b'"') => {
+                let r = scan_csharp_verbatim_string(view, cursor, cursor + 2);
+                (kinds::STRING, r.end, r.is_error)
+            }
+            Some(b'"') => {
+                let r = scan_string(view, cursor + 1, dialect);
+                (kinds::STRING, r.end, r.is_error)
+            }
+            _ => (kinds::DOLLAR, cursor + 1, false),
+        },
+        b'$' if matches!(dialect, Dialect::Java) => classify_ident(view, cursor, dialect),
+        b'@' if matches!(dialect, Dialect::Csharp) => match view.byte_at(cursor + 1) {
+            Some(b'"') => {
+                let r = scan_csharp_verbatim_string(view, cursor, cursor + 1);
+                (kinds::STRING, r.end, r.is_error)
+            }
+            Some(b'$') if view.byte_at(cursor + 2) == Some(b'"') => {
+                let r = scan_csharp_verbatim_string(view, cursor, cursor + 2);
+                (kinds::STRING, r.end, r.is_error)
+            }
+            Some(b) if byteclass::is_ident_start(b) => {
+                (kinds::IDENT, scan_ident(view, cursor + 1, dialect), false)
+            }
+            Some(b) if b >= 0x80 => {
+                let end = scan::scan_xid_ident(view, cursor + 1, false);
+                if end > cursor + 1 {
+                    (kinds::IDENT, end, false)
+                } else {
+                    (kinds::AT, cursor + 1, false)
+                }
+            }
+            _ => (kinds::AT, cursor + 1, false),
+        },
         b'.' => match view.byte_at(cursor + 1) {
             Some(b) if byteclass::is_digit(b) => {
                 let r = scan_number(view, cursor, dialect);
@@ -375,11 +630,16 @@ fn classify(
             (kinds::NUMBER, r.end, r.is_error)
         }
         b if byteclass::is_ident_start(b) => classify_ident(view, cursor, dialect),
+        b'@' if matches!(dialect, Dialect::Java) => {
+            let (kind, end) = scan_operator(view, cursor, first, dialect);
+            (kind, end, false)
+        }
         b'+' | b'-' | b'*' | b'%' | b'=' | b'<' | b'>' | b'!' | b'&' | b'|' | b'^' | b'~'
         | b'?' | b':' | b',' | b';' | b'(' | b')' | b'{' | b'}' | b'[' | b']' | b'#' => {
             let (kind, end) = scan_operator(view, cursor, first, dialect);
             (kind, end, false)
         }
+        b if dialect.uses_xid_ident() && b >= 0x80 => classify_unicode_ident(view, cursor),
         _ => (kinds::ERROR, cursor + 1, true),
     }
 }
@@ -388,12 +648,16 @@ fn keyword_table(dialect: Dialect) -> (&'static [Entry], usize) {
     match dialect {
         Dialect::C => (C_KWS, MAX_KW_LEN),
         Dialect::Cpp => (CPP_KWS, MAX_CPP_KW_LEN),
+        Dialect::Java => (JAVA_KWS, MAX_JAVA_KW_LEN),
+        Dialect::Csharp => (CSHARP_KWS, MAX_CSHARP_KW_LEN),
     }
 }
 
 fn scan_number(view: &mut SourceView<'_>, cursor: u32, dialect: Dialect) -> scan::ScanResult {
     if dialect.is_cpp() {
         scan::scan_cxx_number(view, cursor)
+    } else if dialect.uses_underscore_numbers() {
+        scan::scan_c_number_with_underscores(view, cursor)
     } else {
         scan::scan_c_number(view, cursor)
     }
@@ -407,8 +671,24 @@ fn scan_literal_suffix(view: &mut SourceView<'_>, cursor: u32, dialect: Dialect)
     }
 }
 
+fn scan_string(view: &mut SourceView<'_>, cursor: u32, dialect: Dialect) -> scan::ScanResult {
+    if dialect.uses_oneline_strings() {
+        scan::scan_oneline_quoted(view, cursor, b'"')
+    } else {
+        scan::scan_c_string(view, cursor)
+    }
+}
+
+fn scan_char(view: &mut SourceView<'_>, cursor: u32, dialect: Dialect) -> scan::ScanResult {
+    if dialect.uses_oneline_strings() {
+        scan::scan_oneline_quoted(view, cursor, b'\'')
+    } else {
+        scan::scan_c_char(view, cursor)
+    }
+}
+
 fn classify_ident(view: &mut SourceView<'_>, cursor: u32, dialect: Dialect) -> (u16, u32, bool) {
-    let end = scan::scan_ident_ascii(view, cursor);
+    let end = scan_ident(view, cursor, dialect);
     let len = (end - cursor) as usize;
     let (keywords, max_kw_len) = keyword_table(dialect);
     if len <= max_kw_len {
@@ -420,6 +700,82 @@ fn classify_ident(view: &mut SourceView<'_>, cursor: u32, dialect: Dialect) -> (
         }
     }
     (kinds::IDENT, end, false)
+}
+
+fn scan_ident(view: &mut SourceView<'_>, cursor: u32, dialect: Dialect) -> u32 {
+    if dialect.uses_xid_ident() {
+        scan::scan_xid_ident(view, cursor, matches!(dialect, Dialect::Java))
+    } else {
+        scan::scan_ident_ascii(view, cursor)
+    }
+}
+
+fn classify_unicode_ident(view: &mut SourceView<'_>, cursor: u32) -> (u16, u32, bool) {
+    let end = scan::scan_xid_ident(view, cursor, false);
+    if end > cursor {
+        return (kinds::IDENT, end, false);
+    }
+    let len = scan::decoded_len_or_one(view, cursor);
+    (kinds::ERROR, cursor + len, true)
+}
+
+fn scan_quote_run_string(view: &mut SourceView<'_>, cursor: u32) -> scan::ScanResult {
+    let mut quotes = 0u32;
+    while view.byte_at(cursor + quotes) == Some(b'"') {
+        quotes += 1;
+    }
+    let mut end = cursor + quotes;
+    let mut run = 0u32;
+    loop {
+        match view.byte_at(end) {
+            None => {
+                return scan::ScanResult {
+                    end,
+                    is_error: true,
+                };
+            }
+            Some(b'"') => {
+                run += 1;
+                end += 1;
+                if run == quotes {
+                    return scan::ScanResult {
+                        end,
+                        is_error: false,
+                    };
+                }
+            }
+            Some(_) => {
+                run = 0;
+                end += 1;
+            }
+        }
+    }
+}
+
+fn scan_csharp_verbatim_string(
+    view: &mut SourceView<'_>,
+    _cursor: u32,
+    quote_cursor: u32,
+) -> scan::ScanResult {
+    let mut end = quote_cursor + 1;
+    loop {
+        match view.byte_at(end) {
+            None => {
+                return scan::ScanResult {
+                    end,
+                    is_error: true,
+                };
+            }
+            Some(b'"') if view.byte_at(end + 1) == Some(b'"') => end += 2,
+            Some(b'"') => {
+                return scan::ScanResult {
+                    end: end + 1,
+                    is_error: false,
+                };
+            }
+            Some(_) => end += 1,
+        }
+    }
 }
 
 fn scan_operator(view: &mut SourceView<'_>, cursor: u32, b0: u8, dialect: Dialect) -> (u16, u32) {
@@ -454,6 +810,7 @@ fn scan_operator(view: &mut SourceView<'_>, cursor: u32, b0: u8, dialect: Dialec
         },
         b'=' => match b1 {
             Some(b'=') => (kinds::EQ_EQ, 2),
+            Some(b'>') if matches!(dialect, Dialect::Csharp) => (kinds::FAT_ARROW, 2),
             _ => (kinds::EQ, 1),
         },
         b'<' => match b1 {
@@ -468,6 +825,19 @@ fn scan_operator(view: &mut SourceView<'_>, cursor: u32, b0: u8, dialect: Dialec
             _ => (kinds::LT, 1),
         },
         b'>' => match b1 {
+            Some(b'>')
+                if matches!(dialect, Dialect::Java | Dialect::Csharp)
+                    && view.byte_at(cursor + 2) == Some(b'>')
+                    && view.byte_at(cursor + 3) == Some(b'=') =>
+            {
+                (kinds::USHR_EQ, 4)
+            }
+            Some(b'>')
+                if matches!(dialect, Dialect::Java | Dialect::Csharp)
+                    && view.byte_at(cursor + 2) == Some(b'>') =>
+            {
+                (kinds::USHR, 3)
+            }
             Some(b'>') if view.byte_at(cursor + 2) == Some(b'=') => (kinds::SHR_EQ, 3),
             Some(b'>') => (kinds::SHR, 2),
             Some(b'=') => (kinds::GT_EQ, 2),
@@ -492,9 +862,20 @@ fn scan_operator(view: &mut SourceView<'_>, cursor: u32, b0: u8, dialect: Dialec
             _ => (kinds::CARET, 1),
         },
         b'~' => (kinds::TILDE, 1),
-        b'?' => (kinds::QUESTION, 1),
+        b'?' => match b1 {
+            Some(b'?')
+                if matches!(dialect, Dialect::Csharp) && view.byte_at(cursor + 2) == Some(b'=') =>
+            {
+                (kinds::QUESTION_QUESTION_EQ, 3)
+            }
+            Some(b'?') if matches!(dialect, Dialect::Csharp) => (kinds::QUESTION_QUESTION, 2),
+            Some(b'.') if matches!(dialect, Dialect::Csharp) => (kinds::OPTIONAL_CHAIN, 2),
+            _ => (kinds::QUESTION, 1),
+        },
         b':' => match b1 {
-            Some(b':') if dialect.is_cpp() => (kinds::COLON_COLON, 2),
+            Some(b':') if matches!(dialect, Dialect::Cpp | Dialect::Java | Dialect::Csharp) => {
+                (kinds::COLON_COLON, 2)
+            }
             Some(b'>') => (kinds::COLON_GT, 2),
             _ => (kinds::COLON, 1),
         },
@@ -512,9 +893,11 @@ fn scan_operator(view: &mut SourceView<'_>, cursor: u32, b0: u8, dialect: Dialec
         },
         b'.' => match b1 {
             Some(b'.') if view.byte_at(cursor + 2) == Some(b'.') => (kinds::ELLIPSIS, 3),
+            Some(b'.') if matches!(dialect, Dialect::Csharp) => (kinds::DOT_DOT, 2),
             Some(b'*') if dialect.is_cpp() => (kinds::DOT_STAR, 2),
             _ => (kinds::DOT, 1),
         },
+        b'@' => (kinds::AT, 1),
         _ => (kinds::ERROR, 1),
     };
     (kind, cursor + len)
