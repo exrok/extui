@@ -442,7 +442,11 @@ impl TokenTable {
 
     /// Returns the total token count.
     pub fn token_count(&self) -> usize {
-        self.chunks.iter().map(|c| c.tokens.len()).sum()
+        let mut count = 0usize;
+        for chunk in &self.chunks {
+            count += chunk.tokens.len();
+        }
+        count
     }
 
     #[doc(hidden)]

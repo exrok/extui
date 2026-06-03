@@ -170,11 +170,10 @@ impl SemanticTable {
             .chunks
             .partition_point(|c| c.base_offset < edit.invalidated.offset)
             .saturating_sub(1);
-        let start_offset = self
-            .chunks
-            .get(start_idx)
-            .map(|c| c.base_offset)
-            .unwrap_or(0);
+        let start_offset = match self.chunks.get(start_idx) {
+            Some(chunk) => chunk.base_offset,
+            None => 0,
+        };
         let mut old_stop_idx = self.chunks.len();
         let mut new_chunks = Vec::new();
 
@@ -259,7 +258,11 @@ impl SemanticTable {
 
     /// Returns the number of stored semantic tokens.
     pub fn token_count(&self) -> usize {
-        self.chunks.iter().map(|c| c.tokens.len()).sum()
+        let mut count = 0usize;
+        for chunk in &self.chunks {
+            count += chunk.tokens.len();
+        }
+        count
     }
 
     #[doc(hidden)]
@@ -345,10 +348,10 @@ impl<'t> Builder<'t> {
     fn new(tokens: &'t TokenTable, src: &'t dyn Source, start_offset: u32) -> Self {
         let cursor = tokens.cursor_at(start_offset);
         let first = cursor.peek();
-        let current_lang = first
-            .map(|t| Language::from_tag(kind_lang_tag(t.kind)))
-            .unwrap_or(tokens.root_language());
-        let current_nest = first.map(|t| t.nest).unwrap_or(0);
+        let (current_lang, current_nest) = match first {
+            Some(token) => (Language::from_tag(kind_lang_tag(token.kind)), token.nest),
+            None => (tokens.root_language(), 0),
+        };
         let state = StateSnapshot::for_lang(current_lang);
         Self {
             cursor,
@@ -379,11 +382,10 @@ impl<'t> Builder<'t> {
             }
 
             let split_for_lang = token_lang != self.current_lang || token.nest != self.current_nest;
-            let split_for_size = self
-                .chunk
-                .as_ref()
-                .map(|chunk| chunk.lex_token_count >= CHUNK_TOKEN_TARGET)
-                .unwrap_or(false);
+            let split_for_size = match self.chunk.as_ref() {
+                Some(chunk) => chunk.lex_token_count >= CHUNK_TOKEN_TARGET,
+                None => false,
+            };
 
             if split_for_lang || split_for_size {
                 self.state.reset_chunk_local();
@@ -401,7 +403,9 @@ impl<'t> Builder<'t> {
         let next = self.cursor.peek();
         let chunk = self.chunk.take()?;
         let mut chunk = chunk;
-        chunk.end_offset = next.map(|t| t.span.offset).unwrap_or(chunk.end_offset);
+        if let Some(token) = next {
+            chunk.end_offset = token.span.offset;
+        }
         Some(chunk)
     }
 
@@ -560,6 +564,19 @@ fn is_ident(token: Token, language: Language) -> bool {
     }
 }
 
+#[inline]
+fn local_of(token: Option<Token>) -> Option<u16> {
+    match token {
+        Some(token) => Some(kind_local(token.kind)),
+        None => None,
+    }
+}
+
+#[inline]
+fn option_usize_eq(value: Option<usize>, expected: usize) -> bool {
+    matches!(value, Some(value) if value == expected)
+}
+
 fn is_trivia(token: Token) -> bool {
     match Language::from_tag(kind_lang_tag(token.kind)) {
         Language::Rust => matches!(
@@ -577,9 +594,25 @@ fn is_trivia(token: Token) -> bool {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct RustCall {
-    depth: usize,
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct CallDepths(u64);
+
+impl CallDepths {
+    fn insert(&mut self, depth: usize) {
+        if depth < u64::BITS as usize {
+            self.0 |= 1u64 << depth;
+        }
+    }
+
+    fn remove_from(&mut self, depth: usize) {
+        if depth < u64::BITS as usize {
+            self.0 &= (1u64 << depth) - 1;
+        }
+    }
+
+    fn contains(self, depth: usize) -> bool {
+        depth < u64::BITS as usize && (self.0 & (1u64 << depth)) != 0
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -631,7 +664,7 @@ struct RustState {
     brace_depth: usize,
     bracket_depth: usize,
     brace_stack: Vec<RustBraceKind>,
-    call_stack: Vec<RustCall>,
+    call_depths: CallDepths,
     fn_param_depth: Option<usize>,
     fn_param_base: Option<RustDepthMark>,
     pending_fn_token: Option<usize>,
@@ -659,10 +692,17 @@ fn rust_current_brace_kind(state: &RustState) -> Option<RustBraceKind> {
 }
 
 fn rust_type_context_is_root(state: &RustState) -> bool {
-    state
-        .type_context
-        .map(|ctx| ctx.angle_depth == 0 && rust_is_at_depth(state, ctx.base))
-        .unwrap_or(false)
+    match state.type_context {
+        Some(ctx) => ctx.angle_depth == 0 && rust_is_at_depth(state, ctx.base),
+        None => false,
+    }
+}
+
+fn rust_type_context_from_turbofish(state: &RustState) -> bool {
+    match state.type_context {
+        Some(ctx) => ctx.from_turbofish,
+        None => false,
+    }
 }
 
 fn rust_start_type_context(state: &mut RustState, allow_plus_bounds: bool, from_turbofish: bool) {
@@ -697,24 +737,25 @@ fn rust_type_keyword(src: &dyn Source, token: Token) -> bool {
 }
 
 fn rust_in_param_root(state: &RustState) -> bool {
-    state
-        .fn_param_base
-        .map(|base| {
-            state.fn_param_depth == Some(state.paren_depth) && rust_is_at_depth(state, base)
-        })
-        .unwrap_or(false)
+    match state.fn_param_base {
+        Some(base) => {
+            option_usize_eq(state.fn_param_depth, state.paren_depth)
+                && rust_is_at_depth(state, base)
+        }
+        None => false,
+    }
 }
 
 fn rust_should_start_annotation_type(state: &RustState) -> bool {
-    state
-        .let_annotation_base
-        .map(|base| rust_is_at_depth(state, base))
-        .unwrap_or(false)
-        || state
-            .item_annotation_base
-            .map(|base| rust_is_at_depth(state, base))
-            .unwrap_or(false)
-        || rust_in_param_root(state)
+    match state.let_annotation_base {
+        Some(base) if rust_is_at_depth(state, base) => return true,
+        _ => {}
+    }
+    match state.item_annotation_base {
+        Some(base) if rust_is_at_depth(state, base) => return true,
+        _ => {}
+    }
+    rust_in_param_root(state)
 }
 
 fn rust_finish_type_context(
@@ -764,16 +805,16 @@ fn rust_finish_type_context(
         kind::KEYWORD => rust_type_keyword(src, token),
         kind::LT | kind::GT | kind::OPEN_PAREN | kind::OPEN_BRACKET => true,
         kind::COLON | kind::AMP | kind::STAR | kind::BANG | kind::QUESTION => true,
-        kind::MINUS => matches!(next_sig.map(|t| kind_local(t.kind)), Some(kind::GT)),
+        kind::MINUS => matches!(local_of(next_sig), Some(kind::GT)),
         kind::PLUS => ctx.allow_plus_bounds,
         kind::EQ => ctx.angle_depth > 0,
         kind::CLOSE_PAREN => {
-            matches!(next_sig.map(|t| kind_local(t.kind)), Some(kind::MINUS))
-                && matches!(next2_sig.map(|t| kind_local(t.kind)), Some(kind::GT))
+            matches!(local_of(next_sig), Some(kind::MINUS))
+                && matches!(local_of(next2_sig), Some(kind::GT))
         }
         kind::CLOSE_BRACKET => {
-            matches!(next_sig.map(|t| kind_local(t.kind)), Some(kind::COLON))
-                && matches!(next2_sig.map(|t| kind_local(t.kind)), Some(kind::COLON))
+            matches!(local_of(next_sig), Some(kind::COLON))
+                && matches!(local_of(next2_sig), Some(kind::COLON))
         }
         _ => false,
     };
@@ -803,22 +844,18 @@ fn analyze_rust(
                 state.fn_param_depth = Some(state.paren_depth);
                 state.fn_param_base = Some(rust_depth_mark(state));
                 state.fn_header_pending = false;
-            } else if matches!(state.prev_sig.map(|t| kind_local(t.kind)), Some(kind::GT)) {
+            } else if matches!(local_of(state.prev_sig), Some(kind::GT)) {
                 if let Some(pending) = state.pending_call.take() {
                     chunk.tokens[pending.semantic_idx].kind = if pending.method {
                         SemanticKind::MethodCall
                     } else {
                         SemanticKind::FunctionCall
                     };
-                    state.call_stack.push(RustCall {
-                        depth: state.paren_depth,
-                    });
+                    state.call_depths.insert(state.paren_depth);
                 }
             } else if let Some(prev) = state.prev_sig {
                 if rust_name_token(src, prev) {
-                    state.call_stack.push(RustCall {
-                        depth: state.paren_depth,
-                    });
+                    state.call_depths.insert(state.paren_depth);
                 }
             }
             state.after_dot = false;
@@ -827,19 +864,12 @@ fn analyze_rust(
         }
         kind::CLOSE_PAREN => {
             if state.paren_depth > 0 {
-                if state.fn_param_depth == Some(state.paren_depth) {
+                if option_usize_eq(state.fn_param_depth, state.paren_depth) {
                     state.fn_param_depth = None;
                     state.fn_param_base = None;
                     state.pending_fn_token = None;
                 }
-                while state
-                    .call_stack
-                    .last()
-                    .map(|c| c.depth >= state.paren_depth)
-                    .unwrap_or(false)
-                {
-                    state.call_stack.pop();
-                }
+                state.call_depths.remove_from(state.paren_depth);
                 state.paren_depth -= 1;
             }
             state.after_dot = false;
@@ -883,11 +913,7 @@ fn analyze_rust(
                 state.brace_depth -= 1;
             }
             state.brace_stack.pop();
-            if state
-                .record_expr_value_depth
-                .map(|depth| depth > state.brace_depth)
-                .unwrap_or(false)
-            {
+            if matches!(state.record_expr_value_depth, Some(depth) if depth > state.brace_depth) {
                 state.record_expr_value_depth = None;
             }
             state.after_dot = false;
@@ -901,17 +927,23 @@ fn analyze_rust(
             state.record_expr_candidate = false;
         }
         kind::COLON => {
-            if matches!(next_sig.map(|t| kind_local(t.kind)), Some(kind::COLON)) {
-                if !matches!(next2_sig.map(|t| kind_local(t.kind)), Some(kind::LT)) {
+            if matches!(local_of(next_sig), Some(kind::COLON)) {
+                if !matches!(local_of(next2_sig), Some(kind::LT)) {
                     state.pending_call = None;
                 }
                 state.after_dot = false;
-            } else if rust_current_brace_kind(state) == Some(RustBraceKind::RecordFields) {
+            } else if matches!(
+                rust_current_brace_kind(state),
+                Some(RustBraceKind::RecordFields)
+            ) {
                 rust_start_type_context(state, false, false);
                 state.after_dot = false;
                 state.can_start_value_path = false;
                 state.record_expr_candidate = false;
-            } else if rust_current_brace_kind(state) == Some(RustBraceKind::RecordExpr) {
+            } else if matches!(
+                rust_current_brace_kind(state),
+                Some(RustBraceKind::RecordExpr)
+            ) {
                 state.after_dot = false;
                 state.can_start_value_path = true;
                 state.record_expr_candidate = false;
@@ -930,13 +962,9 @@ fn analyze_rust(
         kind::LT => {
             if let Some(ctx) = &mut state.type_context {
                 ctx.angle_depth += 1;
-            } else if matches!(
-                state.prev_sig.map(|t| kind_local(t.kind)),
-                Some(kind::COLON)
-            ) && matches!(
-                state.prev_prev_sig.map(|t| kind_local(t.kind)),
-                Some(kind::COLON)
-            ) {
+            } else if matches!(local_of(state.prev_sig), Some(kind::COLON))
+                && matches!(local_of(state.prev_prev_sig), Some(kind::COLON))
+            {
                 rust_start_type_context(state, false, true);
             }
             state.after_dot = false;
@@ -947,12 +975,7 @@ fn analyze_rust(
             state.can_start_value_path = false;
             state.record_expr_candidate = false;
         }
-        kind::GT
-            if matches!(
-                state.prev_sig.map(|t| kind_local(t.kind)),
-                Some(kind::MINUS)
-            ) =>
-        {
+        kind::GT if matches!(local_of(state.prev_sig), Some(kind::MINUS)) => {
             rust_start_type_context(state, false, false);
             state.after_dot = false;
             state.can_start_value_path = false;
@@ -972,11 +995,7 @@ fn analyze_rust(
             state.can_start_value_path = true;
             state.record_expr_candidate = false;
             state.record_expr_value_depth = None;
-            if !state
-                .type_context
-                .map(|ctx| ctx.from_turbofish)
-                .unwrap_or(false)
-            {
+            if !rust_type_context_from_turbofish(state) {
                 state.pending_call = None;
             }
         }
@@ -1005,27 +1024,28 @@ fn analyze_rust(
             state.pending_call = None;
         }
         _ if rust_name_token(src, token) => {
-            let in_turbofish = state
-                .type_context
-                .map(|ctx| ctx.from_turbofish)
-                .unwrap_or(false);
-            let in_record_expr_value = state.record_expr_value_depth == Some(state.brace_depth);
-            let direct_call =
-                matches!(next_sig.map(|t| kind_local(t.kind)), Some(kind::OPEN_PAREN));
-            let path_sep = matches!(next_sig.map(|t| kind_local(t.kind)), Some(kind::COLON))
-                && matches!(next2_sig.map(|t| kind_local(t.kind)), Some(kind::COLON));
-            let record_field_def = rust_current_brace_kind(state)
-                == Some(RustBraceKind::RecordFields)
-                && matches!(next_sig.map(|t| kind_local(t.kind)), Some(kind::COLON));
+            let in_turbofish = rust_type_context_from_turbofish(state);
+            let in_record_expr_value =
+                option_usize_eq(state.record_expr_value_depth, state.brace_depth);
+            let direct_call = matches!(local_of(next_sig), Some(kind::OPEN_PAREN));
+            let path_sep = matches!(local_of(next_sig), Some(kind::COLON))
+                && matches!(local_of(next2_sig), Some(kind::COLON));
+            let record_field_def = matches!(
+                rust_current_brace_kind(state),
+                Some(RustBraceKind::RecordFields)
+            ) && matches!(local_of(next_sig), Some(kind::COLON));
             let record_field_use = !in_record_expr_value
-                && rust_current_brace_kind(state) == Some(RustBraceKind::RecordExpr)
                 && matches!(
-                    next_sig.map(|t| kind_local(t.kind)),
+                    rust_current_brace_kind(state),
+                    Some(RustBraceKind::RecordExpr)
+                )
+                && matches!(
+                    local_of(next_sig),
                     Some(kind::COLON | kind::COMMA | kind::CLOSE_BRACE)
                 );
             let record_ctor = state.can_start_value_path
                 && !state.after_dot
-                && matches!(next_sig.map(|t| kind_local(t.kind)), Some(kind::OPEN_BRACE));
+                && matches!(local_of(next_sig), Some(kind::OPEN_BRACE));
 
             let kind = if state.fn_pending {
                 let idx = push_semantic(chunk, token, SemanticKind::FunctionDefinition);
@@ -1076,12 +1096,7 @@ fn analyze_rust(
                 Some(SemanticKind::FunctionCall)
             } else if record_ctor {
                 Some(SemanticKind::TypeName)
-            } else if state
-                .call_stack
-                .last()
-                .map(|c| c.depth == state.paren_depth)
-                .unwrap_or(false)
-            {
+            } else if state.call_depths.contains(state.paren_depth) {
                 Some(SemanticKind::Argument)
             } else {
                 Some(SemanticKind::Variable)
@@ -1103,8 +1118,8 @@ fn analyze_rust(
                 state.can_start_value_path && !state.after_dot && (path_sep || record_ctor);
             state.after_dot = false;
             if matches!(
-                chunk.tokens.last().map(|t| t.kind),
-                Some(SemanticKind::Parameter)
+                chunk.tokens.last(),
+                Some(last) if last.kind == SemanticKind::Parameter
             ) && token_eq(src, token, b"self")
             {
                 if let Some(idx) = state.pending_fn_token {
@@ -1162,7 +1177,7 @@ fn analyze_rust(
             }
             state.after_dot = false;
             state.record_expr_candidate = false;
-            if state.record_expr_value_depth == Some(state.brace_depth) {
+            if option_usize_eq(state.record_expr_value_depth, state.brace_depth) {
                 state.record_expr_value_depth = None;
             }
         }
@@ -1170,14 +1185,10 @@ fn analyze_rust(
             state.after_dot = false;
             state.can_start_value_path = false;
             state.record_expr_candidate = false;
-            if !state
-                .type_context
-                .map(|ctx| ctx.from_turbofish)
-                .unwrap_or(false)
-            {
+            if !rust_type_context_from_turbofish(state) {
                 state.pending_call = None;
             }
-            if state.record_expr_value_depth == Some(state.brace_depth) {
+            if option_usize_eq(state.record_expr_value_depth, state.brace_depth) {
                 state.record_expr_value_depth = None;
             }
         }
@@ -1189,12 +1200,12 @@ fn analyze_rust(
 }
 
 fn matches_keyword_any(src: &dyn Source, token: Token, set: &[&[u8]]) -> bool {
-    set.iter().any(|kw| token_eq(src, token, kw))
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct TsCall {
-    depth: usize,
+    for &kw in set {
+        if token_eq(src, token, kw) {
+            return true;
+        }
+    }
+    false
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
@@ -1212,7 +1223,7 @@ struct TsState {
     pending_type: bool,
     after_dot: bool,
     paren_depth: usize,
-    call_stack: Vec<TsCall>,
+    call_depths: CallDepths,
     param_depth: Option<usize>,
     class_body_depth: Option<usize>,
     interface_body_depth: Option<usize>,
@@ -1247,10 +1258,10 @@ fn analyze_ts(
             return;
         }
         kind::CLOSE_BRACE => {
-            if state.class_body_depth == Some(state.brace_depth) {
+            if option_usize_eq(state.class_body_depth, state.brace_depth) {
                 state.class_body_depth = None;
             }
-            if state.interface_body_depth == Some(state.brace_depth) {
+            if option_usize_eq(state.interface_body_depth, state.brace_depth) {
                 state.interface_body_depth = None;
             }
             if state.brace_depth > 0 {
@@ -1264,26 +1275,17 @@ fn analyze_ts(
                 state.param_header_pending = false;
             } else if let Some(prev) = state.prev_sig {
                 if is_ident(prev, Language::Ts) {
-                    state.call_stack.push(TsCall {
-                        depth: state.paren_depth,
-                    });
+                    state.call_depths.insert(state.paren_depth);
                 }
             }
             state.prev_sig = Some(token);
             return;
         }
         kind::CLOSE_PAREN => {
-            if state.param_depth == Some(state.paren_depth) {
+            if option_usize_eq(state.param_depth, state.paren_depth) {
                 state.param_depth = None;
             }
-            while state
-                .call_stack
-                .last()
-                .map(|c| c.depth >= state.paren_depth)
-                .unwrap_or(false)
-            {
-                state.call_stack.pop();
-            }
+            state.call_depths.remove_from(state.paren_depth);
             if state.paren_depth > 0 {
                 state.paren_depth -= 1;
             }
@@ -1352,17 +1354,16 @@ fn analyze_ts(
                 state.recent_var_def = Some(idx);
                 state.var_pending = false;
                 Some(idx)
-            } else if state.param_depth == Some(state.paren_depth) {
+            } else if option_usize_eq(state.param_depth, state.paren_depth) {
                 Some(push_semantic(chunk, token, SemanticKind::Parameter))
             } else if state.after_dot {
                 Some(push_semantic(chunk, token, SemanticKind::Field))
             } else if state.pending_type {
                 Some(push_semantic(chunk, token, SemanticKind::TypeName))
-            } else if state.class_body_depth == Some(state.brace_depth)
-                || state.interface_body_depth == Some(state.brace_depth)
+            } else if option_usize_eq(state.class_body_depth, state.brace_depth)
+                || option_usize_eq(state.interface_body_depth, state.brace_depth)
             {
-                let kind = if matches!(next_sig.map(|t| kind_local(t.kind)), Some(kind::OPEN_PAREN))
-                {
+                let kind = if matches!(local_of(next_sig), Some(kind::OPEN_PAREN)) {
                     SemanticKind::MethodDefinition
                 } else {
                     SemanticKind::FieldDefinition
@@ -1372,19 +1373,14 @@ fn analyze_ts(
                     state.param_header_pending = true;
                 }
                 emitted
-            } else if state
-                .call_stack
-                .last()
-                .map(|c| c.depth == state.paren_depth)
-                .unwrap_or(false)
-            {
+            } else if state.call_depths.contains(state.paren_depth) {
                 Some(push_semantic(chunk, token, SemanticKind::Argument))
             } else {
                 Some(push_semantic(chunk, token, SemanticKind::Variable))
             };
 
             if let Some(idx) = emitted {
-                if matches!(next_sig.map(|t| kind_local(t.kind)), Some(kind::OPEN_PAREN)) {
+                if matches!(local_of(next_sig), Some(kind::OPEN_PAREN)) {
                     if state.after_dot {
                         chunk.tokens[idx].kind = SemanticKind::MethodCall;
                     } else if !matches!(
@@ -1445,7 +1441,7 @@ fn analyze_c(
         }
         kind::OPEN_BRACE => state.brace_depth += 1,
         kind::CLOSE_BRACE => {
-            if state.struct_body_depth == Some(state.brace_depth) {
+            if option_usize_eq(state.struct_body_depth, state.brace_depth) {
                 state.struct_body_depth = None;
             }
             if state.brace_depth > 0 {
@@ -1459,7 +1455,7 @@ fn analyze_c(
             }
         }
         kind::CLOSE_PAREN => {
-            if state.param_depth == Some(state.paren_depth) {
+            if option_usize_eq(state.param_depth, state.paren_depth) {
                 state.param_depth = None;
             }
             if state.paren_depth > 0 {
@@ -1515,18 +1511,18 @@ fn analyze_c(
             } else if state.after_member {
                 push_semantic(chunk, token, SemanticKind::Field);
                 state.after_member = false;
-            } else if state.param_depth == Some(state.paren_depth) {
+            } else if option_usize_eq(state.param_depth, state.paren_depth) {
                 push_semantic(chunk, token, SemanticKind::Parameter);
-            } else if state.struct_body_depth == Some(state.brace_depth) {
+            } else if option_usize_eq(state.struct_body_depth, state.brace_depth) {
                 push_semantic(chunk, token, SemanticKind::FieldDefinition);
             } else if state.decl_mode {
-                if matches!(next_sig.map(|t| kind_local(t.kind)), Some(kind::OPEN_PAREN)) {
+                if matches!(local_of(next_sig), Some(kind::OPEN_PAREN)) {
                     push_semantic(chunk, token, SemanticKind::FunctionDefinition);
                 } else {
                     push_semantic(chunk, token, SemanticKind::VariableDefinition);
                 }
             } else {
-                if matches!(next_sig.map(|t| kind_local(t.kind)), Some(kind::OPEN_PAREN)) {
+                if matches!(local_of(next_sig), Some(kind::OPEN_PAREN)) {
                     push_semantic(chunk, token, SemanticKind::FunctionCall);
                 } else {
                     push_semantic(chunk, token, SemanticKind::Variable);
@@ -1539,11 +1535,6 @@ fn analyze_c(
     }
 
     state.prev_sig = Some(token);
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct PyCall {
-    depth: usize,
 }
 
 /// Local analysis state for Python.
@@ -1587,7 +1578,7 @@ struct PyState {
     param_mode: Option<PyParamMode>,
     assign_candidates: Vec<usize>,
     last_assign_candidate: Option<usize>,
-    call_stack: Vec<PyCall>,
+    call_depths: CallDepths,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1640,18 +1631,19 @@ fn py_push_assign_candidate(state: &mut PyState, semantic_idx: usize) {
 
 fn py_remove_last_assign_candidate(state: &mut PyState) {
     if let Some(idx) = state.last_assign_candidate.take() {
-        if state.assign_candidates.last() == Some(&idx) {
+        if matches!(state.assign_candidates.last(), Some(&last) if last == idx) {
             state.assign_candidates.pop();
         }
     }
 }
 
 fn py_mark_assign_candidates(state: &mut PyState, chunk: &mut SemanticChunk) {
-    for idx in state.assign_candidates.drain(..) {
+    for &idx in &state.assign_candidates {
         if let Some(token) = chunk.tokens.get_mut(idx) {
             token.kind = SemanticKind::VariableDefinition;
         }
     }
+    state.assign_candidates.clear();
     state.last_assign_candidate = None;
 }
 
@@ -1773,13 +1765,18 @@ fn analyze_python(
     state.started = true;
     state.at_line_start = false;
 
-    let next_local = next_sig.map(|t| kind_local(t.kind));
-    let is_call = next_local == Some(kind::OPEN_PAREN);
-    let next2_is_self = next2_sig
-        .filter(|t| is_ident(*t, Language::Python))
-        .map(|t| token_eq(src, t, b"self") || token_eq(src, t, b"cls"))
-        .unwrap_or(false);
-    let next_is_assign = next_local.map(py_is_assign_op).unwrap_or(false);
+    let next_local = local_of(next_sig);
+    let is_call = matches!(next_local, Some(kind::OPEN_PAREN));
+    let next2_is_self = match next2_sig {
+        Some(t) if is_ident(t, Language::Python) => {
+            token_eq(src, t, b"self") || token_eq(src, t, b"cls")
+        }
+        _ => false,
+    };
+    let next_is_assign = match next_local {
+        Some(local) => py_is_assign_op(local),
+        None => false,
+    };
 
     match local {
         kind::OPEN_PAREN => {
@@ -1793,30 +1790,21 @@ fn analyze_python(
                 state.pending_type = true;
                 state.class_base_pending = false;
             } else if state.prev_was_ident {
-                state.call_stack.push(PyCall {
-                    depth: state.paren_depth,
-                });
+                state.call_depths.insert(state.paren_depth);
             }
             state.after_dot = false;
         }
         kind::CLOSE_PAREN => {
-            if state.param_depth == Some(state.paren_depth) {
+            if option_usize_eq(state.param_depth, state.paren_depth) {
                 state.param_depth = None;
                 state.param_mode = None;
                 state.pending_type = false;
             }
-            if state.class_base_paren == Some(state.paren_depth) {
+            if option_usize_eq(state.class_base_paren, state.paren_depth) {
                 state.class_base_paren = None;
                 state.pending_type = false;
             }
-            while state
-                .call_stack
-                .last()
-                .map(|c| c.depth >= state.paren_depth)
-                .unwrap_or(false)
-            {
-                state.call_stack.pop();
-            }
+            state.call_depths.remove_from(state.paren_depth);
             if state.paren_depth > 0 {
                 state.paren_depth -= 1;
             }
@@ -1860,7 +1848,7 @@ fn analyze_python(
             state.after_dot = false;
         }
         kind::COLON => {
-            let param_annotation = state.param_depth == Some(state.paren_depth)
+            let param_annotation = option_usize_eq(state.param_depth, state.paren_depth)
                 && state.bracket_depth == 0
                 && state.brace_depth == 0
                 && matches!(state.param_mode, Some(PyParamMode::AfterName));
@@ -1883,7 +1871,7 @@ fn analyze_python(
                 state.import_candidate = None;
                 state.as_pending = false;
             }
-            if state.param_depth == Some(state.paren_depth)
+            if option_usize_eq(state.param_depth, state.paren_depth)
                 && state.bracket_depth == 0
                 && state.brace_depth == 0
             {
@@ -1894,7 +1882,8 @@ fn analyze_python(
             // Keep the type context across commas only inside a subscript
             // (`Dict[str, int]`) or a class base list (`class C(A, B)`).
             state.pending_type = state.pending_type
-                && (state.bracket_depth > 0 || state.class_base_paren == Some(state.paren_depth));
+                && (state.bracket_depth > 0
+                    || option_usize_eq(state.class_base_paren, state.paren_depth));
         }
         kind::SEMI => {
             py_reset_statement(state);
@@ -1906,7 +1895,7 @@ fn analyze_python(
             state.after_dot = false;
         }
         _ if py_is_assign_op(local) => {
-            if state.param_depth == Some(state.paren_depth)
+            if option_usize_eq(state.param_depth, state.paren_depth)
                 && state.bracket_depth == 0
                 && state.brace_depth == 0
             {
@@ -1954,12 +1943,12 @@ fn analyze_python(
         }
         _ if is_ident(token, Language::Python) => {
             let mut collect_assign_candidate = false;
-            let kind = if next_local == Some(kind::COLON_EQ) {
+            let kind = if matches!(next_local, Some(kind::COLON_EQ)) {
                 // Walrus binding (`n := ...`), valid anywhere.
                 Some(SemanticKind::VariableDefinition)
             } else if state.def_pending {
                 state.def_pending = false;
-                if next_local == Some(kind::OPEN_PAREN) {
+                if matches!(next_local, Some(kind::OPEN_PAREN)) {
                     state.param_header_pending = true;
                 }
                 if next2_is_self {
@@ -1969,7 +1958,7 @@ fn analyze_python(
                 }
             } else if state.class_pending {
                 state.class_pending = false;
-                if next_local == Some(kind::OPEN_PAREN) {
+                if matches!(next_local, Some(kind::OPEN_PAREN)) {
                     state.class_base_pending = true;
                 }
                 Some(SemanticKind::TypeDefinition)
@@ -1990,7 +1979,7 @@ fn analyze_python(
                 Some(SemanticKind::VariableDefinition)
             } else if state.decorator_pending {
                 state.decorator_pending = false;
-                if next_local == Some(kind::DOT) {
+                if matches!(next_local, Some(kind::DOT)) {
                     Some(SemanticKind::Variable)
                 } else {
                     Some(SemanticKind::FunctionCall)
@@ -1999,7 +1988,7 @@ fn analyze_python(
                 Some(SemanticKind::Parameter)
             } else if state.for_target_pending {
                 Some(SemanticKind::VariableDefinition)
-            } else if state.param_depth == Some(state.paren_depth) {
+            } else if option_usize_eq(state.param_depth, state.paren_depth) {
                 match state.param_mode {
                     Some(PyParamMode::Name) => {
                         state.param_mode = Some(PyParamMode::AfterName);
@@ -2019,12 +2008,7 @@ fn analyze_python(
                             }
                         } else if is_call {
                             Some(SemanticKind::FunctionCall)
-                        } else if state
-                            .call_stack
-                            .last()
-                            .map(|c| c.depth == state.paren_depth)
-                            .unwrap_or(false)
-                        {
+                        } else if state.call_depths.contains(state.paren_depth) {
                             Some(SemanticKind::Argument)
                         } else {
                             collect_assign_candidate = true;
@@ -2047,7 +2031,7 @@ fn analyze_python(
                     Some(SemanticKind::FunctionCall)
                 } else if next_is_assign {
                     Some(SemanticKind::VariableDefinition)
-                } else if next_local == Some(kind::COLON) {
+                } else if matches!(next_local, Some(kind::COLON)) {
                     state.annotate_pending = true;
                     collect_assign_candidate = true;
                     Some(SemanticKind::VariableDefinition)
@@ -2059,12 +2043,7 @@ fn analyze_python(
                 Some(SemanticKind::VariableDefinition)
             } else if is_call {
                 Some(SemanticKind::FunctionCall)
-            } else if state
-                .call_stack
-                .last()
-                .map(|c| c.depth == state.paren_depth)
-                .unwrap_or(false)
-            {
+            } else if state.call_depths.contains(state.paren_depth) {
                 Some(SemanticKind::Argument)
             } else {
                 collect_assign_candidate = true;

@@ -405,9 +405,10 @@ pub(crate) fn is_name_start(
     if first < 0x80 {
         is_name_start_ascii(first, allow_dollar)
     } else {
-        scan::decode_char_at(view, cursor)
-            .map(|(c, _)| unicode_ident::is_xid_start(c))
-            .unwrap_or(false)
+        match scan::decode_char_at(view, cursor) {
+            Some((c, _)) => unicode_ident::is_xid_start(c),
+            None => false,
+        }
     }
 }
 
@@ -559,10 +560,7 @@ pub(crate) fn scan_doctype(view: &mut SourceView<'_>, cursor: u32) -> ScanResult
 }
 
 fn error_end(view: &mut SourceView<'_>, cursor: u32) -> u32 {
-    cursor
-        + scan::decode_char_at(view, cursor)
-            .map(|(_, len)| len)
-            .unwrap_or(1)
+    cursor + scan::decoded_len_or_one(view, cursor)
 }
 
 #[cfg(test)]

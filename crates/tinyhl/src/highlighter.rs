@@ -122,8 +122,14 @@ pub struct Overlays<'t> {
 impl<'t> Overlays<'t> {
     /// Returns overlays restricted to tokens inside `span`.
     pub fn new(highlighter: &'t Highlighter, span: Span) -> Self {
-        let sem = highlighter.semantic().map(|t| t.query(span).peekable());
-        let delim = highlighter.delimiters().map(|t| t.query(span).peekable());
+        let sem = match highlighter.semantic() {
+            Some(table) => Some(table.query(span).peekable()),
+            None => None,
+        };
+        let delim = match highlighter.delimiters() {
+            Some(table) => Some(table.query(span).peekable()),
+            None => None,
+        };
         Self { sem, delim }
     }
 
@@ -133,30 +139,38 @@ impl<'t> Overlays<'t> {
     /// Each call advances past entries starting before `offset`, so
     /// `offset` must be non-decreasing across successive calls.
     pub fn at(&mut self, offset: u32) -> (Option<SemanticKind>, Option<u16>) {
-        let sem_kind = self.sem.as_mut().and_then(|iter| {
-            while let Some(entry) = iter.peek() {
-                if entry.span.offset < offset {
-                    iter.next();
-                } else {
-                    break;
+        let sem_kind = match self.sem.as_mut() {
+            Some(iter) => {
+                while let Some(entry) = iter.peek() {
+                    if entry.span.offset < offset {
+                        iter.next();
+                    } else {
+                        break;
+                    }
+                }
+                match iter.peek() {
+                    Some(entry) if entry.span.offset == offset => Some(entry.kind),
+                    _ => None,
                 }
             }
-            iter.peek()
-                .filter(|entry| entry.span.offset == offset)
-                .map(|entry| entry.kind)
-        });
-        let delim_depth = self.delim.as_mut().and_then(|iter| {
-            while let Some(entry) = iter.peek() {
-                if entry.span.offset < offset {
-                    iter.next();
-                } else {
-                    break;
+            None => None,
+        };
+        let delim_depth = match self.delim.as_mut() {
+            Some(iter) => {
+                while let Some(entry) = iter.peek() {
+                    if entry.span.offset < offset {
+                        iter.next();
+                    } else {
+                        break;
+                    }
+                }
+                match iter.peek() {
+                    Some(entry) if entry.span.offset == offset => Some(entry.depth),
+                    _ => None,
                 }
             }
-            iter.peek()
-                .filter(|entry| entry.span.offset == offset)
-                .map(|entry| entry.depth)
-        });
+            None => None,
+        };
         (sem_kind, delim_depth)
     }
 }

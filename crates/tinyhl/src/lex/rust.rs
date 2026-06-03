@@ -180,9 +180,7 @@ fn classify_unicode_ident(view: &mut SourceView<'_>, cursor: u32) -> (u16, u32, 
     }
     // Not a valid XID_Start — advance by one full UTF-8 char so the lexer
     // makes forward progress without stranding continuation bytes.
-    let len = scan::decode_char_at(view, cursor)
-        .map(|(_, n)| n)
-        .unwrap_or(1);
+    let len = scan::decoded_len_or_one(view, cursor);
     (kinds::ERROR, cursor + len, true)
 }
 

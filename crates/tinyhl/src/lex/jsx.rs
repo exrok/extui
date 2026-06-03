@@ -421,10 +421,7 @@ fn scan_expr_region(view: &mut SourceView<'_>, brace_cursor: u32) -> u32 {
 }
 
 fn error_end(view: &mut SourceView<'_>, cursor: u32) -> u32 {
-    cursor
-        + scan::decode_char_at(view, cursor)
-            .map(|(_, len)| len)
-            .unwrap_or(1)
+    cursor + scan::decoded_len_or_one(view, cursor)
 }
 
 #[cfg(test)]

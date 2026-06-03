@@ -575,28 +575,50 @@ fn info_to_language(
         }
         buf[i] = b.to_ascii_lowercase();
     }
-    match &buf[..len] {
-        b"rust" | b"rs" => Some(Language::Rust),
-        b"c" => Some(Language::C),
-        b"cpp" | b"c++" | b"cc" | b"cxx" | b"hpp" | b"hxx" => Some(Language::Cpp),
-        b"csv" => Some(Language::Csv),
-        b"json" => Some(Language::Json),
-        b"xml" => Some(Language::Xml),
-        b"css" => Some(Language::Css),
-        b"ts" | b"typescript" => Some(Language::Ts),
-        b"tsx" | b"jsx" => Some(Language::Tsx),
-        b"html" | b"htm" => Some(Language::Html),
-        b"python" | b"py" => Some(Language::Python),
-        b"sql" => Some(Language::Sql),
-        b"go" | b"golang" => Some(Language::Go),
-        b"sh" | b"shell" | b"bash" => Some(Language::Sh),
-        b"yaml" | b"yml" => Some(Language::Yaml),
-        b"lua" => Some(Language::Lua),
-        b"make" | b"makefile" | b"mk" => Some(Language::Make),
-        b"cmake" => Some(Language::Cmake),
-        _ => None,
+    for &(name, lang) in INFO_LANGS {
+        if &buf[..len] == name {
+            return Some(lang);
+        }
     }
+    None
 }
+
+const INFO_LANGS: &[(&[u8], Language)] = &[
+    (b"bash", Language::Sh),
+    (b"c", Language::C),
+    (b"c++", Language::Cpp),
+    (b"cc", Language::Cpp),
+    (b"cmake", Language::Cmake),
+    (b"cpp", Language::Cpp),
+    (b"css", Language::Css),
+    (b"csv", Language::Csv),
+    (b"cxx", Language::Cpp),
+    (b"go", Language::Go),
+    (b"golang", Language::Go),
+    (b"hpp", Language::Cpp),
+    (b"htm", Language::Html),
+    (b"html", Language::Html),
+    (b"hxx", Language::Cpp),
+    (b"json", Language::Json),
+    (b"jsx", Language::Tsx),
+    (b"lua", Language::Lua),
+    (b"make", Language::Make),
+    (b"makefile", Language::Make),
+    (b"mk", Language::Make),
+    (b"py", Language::Python),
+    (b"python", Language::Python),
+    (b"rs", Language::Rust),
+    (b"rust", Language::Rust),
+    (b"sh", Language::Sh),
+    (b"shell", Language::Sh),
+    (b"sql", Language::Sql),
+    (b"ts", Language::Ts),
+    (b"tsx", Language::Tsx),
+    (b"typescript", Language::Ts),
+    (b"xml", Language::Xml),
+    (b"yaml", Language::Yaml),
+    (b"yml", Language::Yaml),
+];
 
 fn inline_classify(view: &mut SourceView<'_>, cursor: u32, first: u8) -> (u16, u32, bool) {
     match first {

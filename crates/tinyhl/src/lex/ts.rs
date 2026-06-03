@@ -267,94 +267,98 @@ fn classify_unicode(view: &mut SourceView<'_>, cursor: u32) -> (u16, u32, bool, 
     }
     // Not a valid XID_Start — consume the full UTF-8 char so the lexer makes
     // forward progress without leaving a stranded continuation byte.
-    let len = scan::decode_char_at(view, cursor)
-        .map(|(_, n)| n)
-        .unwrap_or(1);
+    let len = scan::decoded_len_or_one(view, cursor);
     (kinds::ERROR, cursor + len, true, LexState::INITIAL)
 }
 
 fn scan_operator(view: &mut SourceView<'_>, cursor: u32, b0: u8) -> (u16, u32) {
     let b1 = view.byte_at(cursor + 1);
-    let b2 = view.byte_at(cursor + 2);
-    let b3 = view.byte_at(cursor + 3);
-
-    if let (b'>', Some(b'>'), Some(b'>'), Some(b'=')) = (b0, b1, b2, b3) {
-        return (kinds::USHR_EQ, cursor + 4);
-    }
-
-    let three = match (b0, b1, b2) {
-        (b'=', Some(b'='), Some(b'=')) => Some(kinds::EQ_EQ_EQ),
-        (b'!', Some(b'='), Some(b'=')) => Some(kinds::BANG_EQ_EQ),
-        (b'>', Some(b'>'), Some(b'>')) => Some(kinds::USHR),
-        (b'<', Some(b'<'), Some(b'=')) => Some(kinds::SHL_EQ),
-        (b'>', Some(b'>'), Some(b'=')) => Some(kinds::SHR_EQ),
-        (b'*', Some(b'*'), Some(b'=')) => Some(kinds::STAR_STAR_EQ),
-        (b'&', Some(b'&'), Some(b'=')) => Some(kinds::AMP_AMP_EQ),
-        (b'|', Some(b'|'), Some(b'=')) => Some(kinds::PIPE_PIPE_EQ),
-        (b'?', Some(b'?'), Some(b'=')) => Some(kinds::QUESTION_QUESTION_EQ),
-        _ => None,
+    let (kind, len) = match b0 {
+        b'{' => (kinds::OPEN_BRACE, 1),
+        b'}' => (kinds::CLOSE_BRACE, 1),
+        b'(' => (kinds::OPEN_PAREN, 1),
+        b')' => (kinds::CLOSE_PAREN, 1),
+        b'[' => (kinds::OPEN_BRACKET, 1),
+        b']' => (kinds::CLOSE_BRACKET, 1),
+        b',' => (kinds::COMMA, 1),
+        b';' => (kinds::SEMI, 1),
+        b':' => (kinds::COLON, 1),
+        b'?' => match b1 {
+            Some(b'?') if view.byte_at(cursor + 2) == Some(b'=') => {
+                (kinds::QUESTION_QUESTION_EQ, 3)
+            }
+            Some(b'?') => (kinds::QUESTION_QUESTION, 2),
+            Some(b'.') => (kinds::OPTIONAL_CHAIN, 2),
+            _ => (kinds::QUESTION, 1),
+        },
+        b'@' => (kinds::AT, 1),
+        b'~' => (kinds::TILDE, 1),
+        b'=' => match b1 {
+            Some(b'=') if view.byte_at(cursor + 2) == Some(b'=') => (kinds::EQ_EQ_EQ, 3),
+            Some(b'=') => (kinds::EQ_EQ, 2),
+            Some(b'>') => (kinds::FAT_ARROW, 2),
+            _ => (kinds::EQ, 1),
+        },
+        b'!' => match b1 {
+            Some(b'=') if view.byte_at(cursor + 2) == Some(b'=') => (kinds::BANG_EQ_EQ, 3),
+            Some(b'=') => (kinds::BANG_EQ, 2),
+            _ => (kinds::BANG, 1),
+        },
+        b'<' => match b1 {
+            Some(b'<') if view.byte_at(cursor + 2) == Some(b'=') => (kinds::SHL_EQ, 3),
+            Some(b'<') => (kinds::SHL, 2),
+            Some(b'=') => (kinds::LT_EQ, 2),
+            _ => (kinds::LT, 1),
+        },
+        b'>' => match b1 {
+            Some(b'>') => match view.byte_at(cursor + 2) {
+                Some(b'>') if view.byte_at(cursor + 3) == Some(b'=') => (kinds::USHR_EQ, 4),
+                Some(b'>') => (kinds::USHR, 3),
+                Some(b'=') => (kinds::SHR_EQ, 3),
+                _ => (kinds::SHR, 2),
+            },
+            Some(b'=') => (kinds::GT_EQ, 2),
+            _ => (kinds::GT, 1),
+        },
+        b'+' => match b1 {
+            Some(b'+') => (kinds::PLUS_PLUS, 2),
+            Some(b'=') => (kinds::PLUS_EQ, 2),
+            _ => (kinds::PLUS, 1),
+        },
+        b'-' => match b1 {
+            Some(b'-') => (kinds::MINUS_MINUS, 2),
+            Some(b'=') => (kinds::MINUS_EQ, 2),
+            _ => (kinds::MINUS, 1),
+        },
+        b'*' => match b1 {
+            Some(b'*') if view.byte_at(cursor + 2) == Some(b'=') => (kinds::STAR_STAR_EQ, 3),
+            Some(b'*') => (kinds::STAR_STAR, 2),
+            Some(b'=') => (kinds::STAR_EQ, 2),
+            _ => (kinds::STAR, 1),
+        },
+        b'%' => match b1 {
+            Some(b'=') => (kinds::PERCENT_EQ, 2),
+            _ => (kinds::PERCENT, 1),
+        },
+        b'&' => match b1 {
+            Some(b'&') if view.byte_at(cursor + 2) == Some(b'=') => (kinds::AMP_AMP_EQ, 3),
+            Some(b'&') => (kinds::AMP_AMP, 2),
+            Some(b'=') => (kinds::AMP_EQ, 2),
+            _ => (kinds::AMP, 1),
+        },
+        b'|' => match b1 {
+            Some(b'|') if view.byte_at(cursor + 2) == Some(b'=') => (kinds::PIPE_PIPE_EQ, 3),
+            Some(b'|') => (kinds::PIPE_PIPE, 2),
+            Some(b'=') => (kinds::PIPE_EQ, 2),
+            _ => (kinds::PIPE, 1),
+        },
+        b'^' => match b1 {
+            Some(b'=') => (kinds::CARET_EQ, 2),
+            _ => (kinds::CARET, 1),
+        },
+        _ => (kinds::ERROR, 1),
     };
-    if let Some(k) = three {
-        return (k, cursor + 3);
-    }
-
-    if let Some(b1) = b1 {
-        let two = match (b0, b1) {
-            (b'=', b'=') => Some(kinds::EQ_EQ),
-            (b'!', b'=') => Some(kinds::BANG_EQ),
-            (b'<', b'=') => Some(kinds::LT_EQ),
-            (b'>', b'=') => Some(kinds::GT_EQ),
-            (b'<', b'<') => Some(kinds::SHL),
-            (b'>', b'>') => Some(kinds::SHR),
-            (b'&', b'&') => Some(kinds::AMP_AMP),
-            (b'|', b'|') => Some(kinds::PIPE_PIPE),
-            (b'?', b'?') => Some(kinds::QUESTION_QUESTION),
-            (b'?', b'.') => Some(kinds::OPTIONAL_CHAIN),
-            (b'=', b'>') => Some(kinds::FAT_ARROW),
-            (b'+', b'+') => Some(kinds::PLUS_PLUS),
-            (b'-', b'-') => Some(kinds::MINUS_MINUS),
-            (b'*', b'*') => Some(kinds::STAR_STAR),
-            (b'+', b'=') => Some(kinds::PLUS_EQ),
-            (b'-', b'=') => Some(kinds::MINUS_EQ),
-            (b'*', b'=') => Some(kinds::STAR_EQ),
-            (b'%', b'=') => Some(kinds::PERCENT_EQ),
-            (b'&', b'=') => Some(kinds::AMP_EQ),
-            (b'|', b'=') => Some(kinds::PIPE_EQ),
-            (b'^', b'=') => Some(kinds::CARET_EQ),
-            _ => None,
-        };
-        if let Some(k) = two {
-            return (k, cursor + 2);
-        }
-    }
-
-    let one = match b0 {
-        b'{' => kinds::OPEN_BRACE,
-        b'}' => kinds::CLOSE_BRACE,
-        b'(' => kinds::OPEN_PAREN,
-        b')' => kinds::CLOSE_PAREN,
-        b'[' => kinds::OPEN_BRACKET,
-        b']' => kinds::CLOSE_BRACKET,
-        b',' => kinds::COMMA,
-        b';' => kinds::SEMI,
-        b':' => kinds::COLON,
-        b'?' => kinds::QUESTION,
-        b'@' => kinds::AT,
-        b'~' => kinds::TILDE,
-        b'=' => kinds::EQ,
-        b'!' => kinds::BANG,
-        b'<' => kinds::LT,
-        b'>' => kinds::GT,
-        b'+' => kinds::PLUS,
-        b'-' => kinds::MINUS,
-        b'*' => kinds::STAR,
-        b'%' => kinds::PERCENT,
-        b'&' => kinds::AMP,
-        b'|' => kinds::PIPE,
-        b'^' => kinds::CARET,
-        _ => kinds::ERROR,
-    };
-    (one, cursor + 1)
+    (kind, cursor + len)
 }
 
 /// Scans a single- or double-quoted string literal. Honors `\`-escape for the

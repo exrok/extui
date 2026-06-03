@@ -224,9 +224,7 @@ fn scan_css_string(view: &mut SourceView<'_>, cursor: u32) -> ScanResult {
                 Some(b'\r') if view.byte_at(end + 2) == Some(b'\n') => end += 3,
                 Some(nb) if is_newline(nb) => end += 2,
                 Some(_) => {
-                    let len = scan::decode_char_at(view, end + 1)
-                        .map(|(_, len)| len)
-                        .unwrap_or(1);
+                    let len = scan::decoded_len_or_one(view, end + 1);
                     end += 1 + len;
                 }
             },
@@ -266,10 +264,8 @@ fn scan_unquoted_url(view: &mut SourceView<'_>, ident_end: u32) -> Option<ScanRe
                     is_error: false,
                 });
             }
-            Some(b'\\') if view.byte_at(cursor + 1).is_some_and(|b| !is_newline(b)) => {
-                let len = scan::decode_char_at(view, cursor + 1)
-                    .map(|(_, len)| len)
-                    .unwrap_or(1);
+            Some(b'\\') if matches!(view.byte_at(cursor + 1), Some(b) if !is_newline(b)) => {
+                let len = scan::decoded_len_or_one(view, cursor + 1);
                 cursor += 1 + len;
             }
             Some(_) => cursor += 1,
@@ -324,18 +320,14 @@ fn scan_name_run(view: &mut SourceView<'_>, cursor: u32) -> u32 {
         if b < 0x80 {
             if is_name_byte(b) {
                 cursor += 1;
-            } else if b == b'\\' && view.byte_at(cursor + 1).is_some_and(|n| !is_newline(n)) {
-                let len = scan::decode_char_at(view, cursor + 1)
-                    .map(|(_, len)| len)
-                    .unwrap_or(1);
+            } else if b == b'\\' && matches!(view.byte_at(cursor + 1), Some(n) if !is_newline(n)) {
+                let len = scan::decoded_len_or_one(view, cursor + 1);
                 cursor += 1 + len;
             } else {
                 return cursor;
             }
         } else {
-            let len = scan::decode_char_at(view, cursor)
-                .map(|(_, len)| len)
-                .unwrap_or(1);
+            let len = scan::decoded_len_or_one(view, cursor);
             cursor += len;
         }
     }
@@ -423,10 +415,7 @@ fn is_newline(b: u8) -> bool {
 }
 
 fn error_end(view: &mut SourceView<'_>, cursor: u32) -> u32 {
-    cursor
-        + scan::decode_char_at(view, cursor)
-            .map(|(_, len)| len)
-            .unwrap_or(1)
+    cursor + scan::decoded_len_or_one(view, cursor)
 }
 
 #[cfg(test)]

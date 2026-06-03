@@ -157,9 +157,7 @@ fn classify(
             (kind, end, false)
         }
         b if b >= 0x80 => {
-            let len = scan::decode_char_at(view, cursor)
-                .map(|(_, n)| n)
-                .unwrap_or(1);
+            let len = scan::decoded_len_or_one(view, cursor);
             (kinds::ERROR, cursor + len, true)
         }
         _ => (kinds::ERROR, cursor + 1, true),
@@ -451,59 +449,51 @@ fn scan_digit_run(view: &mut SourceView<'_>, cursor: u32, pred: fn(u8) -> bool) 
 
 fn scan_operator(view: &mut SourceView<'_>, cursor: u32, b0: u8) -> (u16, u32) {
     let b1 = view.byte_at(cursor + 1);
-    let b2 = view.byte_at(cursor + 2);
-
-    let three = match (b0, b1, b2) {
-        (b'.', Some(b'.'), Some(b'.')) => Some(kinds::ELLIPSIS),
-        _ => None,
+    let (kind, len) = match b0 {
+        b'+' => (kinds::PLUS, 1),
+        b'-' => (kinds::MINUS, 1),
+        b'*' => (kinds::STAR, 1),
+        b'/' => match b1 {
+            Some(b'/') => (kinds::SLASH_SLASH, 2),
+            _ => (kinds::SLASH, 1),
+        },
+        b'%' => (kinds::PERCENT, 1),
+        b'^' => (kinds::CARET, 1),
+        b'#' => (kinds::HASH, 1),
+        b'&' => (kinds::AMP, 1),
+        b'~' => match b1 {
+            Some(b'=') => (kinds::BANG_EQ, 2),
+            _ => (kinds::TILDE, 1),
+        },
+        b'|' => (kinds::PIPE, 1),
+        b'<' => match b1 {
+            Some(b'=') => (kinds::LT_EQ, 2),
+            Some(b'<') => (kinds::SHL, 2),
+            _ => (kinds::LT, 1),
+        },
+        b'>' => match b1 {
+            Some(b'=') => (kinds::GT_EQ, 2),
+            Some(b'>') => (kinds::SHR, 2),
+            _ => (kinds::GT, 1),
+        },
+        b'=' => match b1 {
+            Some(b'=') => (kinds::EQ_EQ, 2),
+            _ => (kinds::EQ, 1),
+        },
+        b':' => match b1 {
+            Some(b':') => (kinds::COLON_COLON, 2),
+            _ => (kinds::COLON, 1),
+        },
+        b',' => (kinds::COMMA, 1),
+        b';' => (kinds::SEMI, 1),
+        b'(' => (kinds::OPEN_PAREN, 1),
+        b')' => (kinds::CLOSE_PAREN, 1),
+        b'{' => (kinds::OPEN_BRACE, 1),
+        b'}' => (kinds::CLOSE_BRACE, 1),
+        b']' => (kinds::CLOSE_BRACKET, 1),
+        _ => (kinds::ERROR, 1),
     };
-    if let Some(k) = three {
-        return (k, cursor + 3);
-    }
-
-    if let Some(b1) = b1 {
-        let two = match (b0, b1) {
-            (b'=', b'=') => Some(kinds::EQ_EQ),
-            (b'~', b'=') => Some(kinds::BANG_EQ),
-            (b'<', b'=') => Some(kinds::LT_EQ),
-            (b'>', b'=') => Some(kinds::GT_EQ),
-            (b'<', b'<') => Some(kinds::SHL),
-            (b'>', b'>') => Some(kinds::SHR),
-            (b'/', b'/') => Some(kinds::SLASH_SLASH),
-            (b':', b':') => Some(kinds::COLON_COLON),
-            (b'.', b'.') => Some(kinds::DOT_DOT),
-            _ => None,
-        };
-        if let Some(k) = two {
-            return (k, cursor + 2);
-        }
-    }
-
-    let one = match b0 {
-        b'+' => kinds::PLUS,
-        b'-' => kinds::MINUS,
-        b'*' => kinds::STAR,
-        b'/' => kinds::SLASH,
-        b'%' => kinds::PERCENT,
-        b'^' => kinds::CARET,
-        b'#' => kinds::HASH,
-        b'&' => kinds::AMP,
-        b'~' => kinds::TILDE,
-        b'|' => kinds::PIPE,
-        b'<' => kinds::LT,
-        b'>' => kinds::GT,
-        b'=' => kinds::EQ,
-        b':' => kinds::COLON,
-        b',' => kinds::COMMA,
-        b';' => kinds::SEMI,
-        b'(' => kinds::OPEN_PAREN,
-        b')' => kinds::CLOSE_PAREN,
-        b'{' => kinds::OPEN_BRACE,
-        b'}' => kinds::CLOSE_BRACE,
-        b']' => kinds::CLOSE_BRACKET,
-        _ => kinds::ERROR,
-    };
-    (one, cursor + 1)
+    (kind, cursor + len)
 }
 
 fn ok(end: u32) -> ScanResult {

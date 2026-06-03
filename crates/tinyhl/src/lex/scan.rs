@@ -632,6 +632,14 @@ pub fn decode_char_at(view: &mut SourceView<'_>, cursor: u32) -> Option<(char, u
     Some((s.chars().next()?, len))
 }
 
+/// Returns the UTF-8 byte length at `cursor`, or one byte on malformed input.
+pub fn decoded_len_or_one(view: &mut SourceView<'_>, cursor: u32) -> u32 {
+    match decode_char_at(view, cursor) {
+        Some((_, len)) => len,
+        None => 1,
+    }
+}
+
 /// Scans a Unicode XID identifier starting at `cursor`.
 ///
 /// Returns `cursor` unchanged if the bytes at `cursor` do not form a

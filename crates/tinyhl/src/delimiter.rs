@@ -115,11 +115,10 @@ impl DelimiterTable {
             .chunks
             .partition_point(|c| c.base_offset < edit.invalidated.offset)
             .saturating_sub(1);
-        let start_offset = self
-            .chunks
-            .get(start_idx)
-            .map(|c| c.base_offset)
-            .unwrap_or(0);
+        let start_offset = match self.chunks.get(start_idx) {
+            Some(chunk) => chunk.base_offset,
+            None => 0,
+        };
         let mut old_stop_idx = self.chunks.len();
         let mut builder = Builder::new(tokens, start_offset);
         let mut new_chunks = Vec::new();
@@ -161,7 +160,7 @@ impl DelimiterTable {
         };
 
         let num_new = new_chunks.len();
-        self.chunks.splice(start_idx..old_stop_idx, new_chunks);
+        replace_chunk_range(&mut self.chunks, start_idx, old_stop_idx, new_chunks);
         let shift_from = start_idx + num_new;
         if delta != 0 {
             for chunk in &mut self.chunks[shift_from..] {
@@ -204,7 +203,11 @@ impl DelimiterTable {
 
     /// Returns the number of stored delimiter entries.
     pub fn token_count(&self) -> usize {
-        self.chunks.iter().map(|c| c.tokens.len()).sum()
+        let mut count = 0usize;
+        for chunk in &self.chunks {
+            count += chunk.tokens.len();
+        }
+        count
     }
 
     #[doc(hidden)]
@@ -290,11 +293,13 @@ impl<'t> Builder<'t> {
     fn new(tokens: &'t TokenTable, start_offset: u32) -> Self {
         let cursor = tokens.cursor_at(start_offset);
         let first = cursor.peek();
+        let (current_lang, current_nest) = match first {
+            Some(token) => (Language::from_tag(kind_lang_tag(token.kind)), token.nest),
+            None => (tokens.root_language(), 0),
+        };
         Self {
-            current_lang: first
-                .map(|t| Language::from_tag(kind_lang_tag(t.kind)))
-                .unwrap_or(tokens.root_language()),
-            current_nest: first.map(|t| t.nest).unwrap_or(0),
+            current_lang,
+            current_nest,
             state: DelimiterState::new(),
             chunk: None,
             cursor,
@@ -320,11 +325,10 @@ impl<'t> Builder<'t> {
             }
 
             let split_for_lang = token_lang != self.current_lang || token.nest != self.current_nest;
-            let split_for_size = self
-                .chunk
-                .as_ref()
-                .map(|chunk| chunk.lex_token_count >= CHUNK_TOKEN_TARGET)
-                .unwrap_or(false);
+            let split_for_size = match self.chunk.as_ref() {
+                Some(chunk) => chunk.lex_token_count >= CHUNK_TOKEN_TARGET,
+                None => false,
+            };
 
             if split_for_lang || split_for_size {
                 return Some(token.span.offset);
@@ -340,7 +344,9 @@ impl<'t> Builder<'t> {
     fn take_chunk(&mut self) -> Option<DelimiterChunk> {
         let next = self.cursor.peek();
         let mut chunk = self.chunk.take()?;
-        chunk.end_offset = next.map(|t| t.span.offset).unwrap_or(chunk.end_offset);
+        if let Some(token) = next {
+            chunk.end_offset = token.span.offset;
+        }
         Some(chunk)
     }
 
@@ -399,4 +405,27 @@ fn classify_delimiter(token: Token) -> Option<(DelimiterKind, bool)> {
         kind::CLOSE_BRACKET | kind::COLON_GT => Some((DelimiterKind::Bracket, false)),
         _ => None,
     }
+}
+
+fn replace_chunk_range(
+    chunks: &mut Vec<DelimiterChunk>,
+    start: usize,
+    stop: usize,
+    mut replacement: Vec<DelimiterChunk>,
+) {
+    if stop - start == replacement.len() {
+        for (dst, src) in chunks[start..stop].iter_mut().zip(replacement) {
+            *dst = src;
+        }
+        return;
+    }
+    if stop == chunks.len() {
+        chunks.truncate(start);
+        chunks.append(&mut replacement);
+        return;
+    }
+    let mut tail = chunks.split_off(stop);
+    chunks.truncate(start);
+    chunks.append(&mut replacement);
+    chunks.append(&mut tail);
 }

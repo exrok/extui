@@ -424,84 +424,100 @@ fn classify_ident(view: &mut SourceView<'_>, cursor: u32, dialect: Dialect) -> (
 
 fn scan_operator(view: &mut SourceView<'_>, cursor: u32, b0: u8, dialect: Dialect) -> (u16, u32) {
     let b1 = view.byte_at(cursor + 1);
-    let b2 = view.byte_at(cursor + 2);
-
-    let three = match (b0, b1, b2) {
-        (b'-', Some(b'>'), Some(b'*')) if dialect.is_cpp() => Some(kinds::ARROW_STAR),
-        (b'<', Some(b'='), Some(b'>')) if dialect.is_cpp() => Some(kinds::SPACESHIP),
-        (b'<', Some(b'<'), Some(b'=')) => Some(kinds::SHL_EQ),
-        (b'>', Some(b'>'), Some(b'=')) => Some(kinds::SHR_EQ),
-        (b'.', Some(b'.'), Some(b'.')) => Some(kinds::ELLIPSIS),
-        _ => None,
+    let (kind, len) = match b0 {
+        b'+' => match b1 {
+            Some(b'+') => (kinds::PLUS_PLUS, 2),
+            Some(b'=') => (kinds::PLUS_EQ, 2),
+            _ => (kinds::PLUS, 1),
+        },
+        b'-' => match b1 {
+            Some(b'>') if dialect.is_cpp() && view.byte_at(cursor + 2) == Some(b'*') => {
+                (kinds::ARROW_STAR, 3)
+            }
+            Some(b'>') => (kinds::THIN_ARROW, 2),
+            Some(b'-') => (kinds::MINUS_MINUS, 2),
+            Some(b'=') => (kinds::MINUS_EQ, 2),
+            _ => (kinds::MINUS, 1),
+        },
+        b'*' => match b1 {
+            Some(b'=') => (kinds::STAR_EQ, 2),
+            _ => (kinds::STAR, 1),
+        },
+        b'/' => match b1 {
+            Some(b'=') => (kinds::SLASH_EQ, 2),
+            _ => (kinds::SLASH, 1),
+        },
+        b'%' => match b1 {
+            Some(b'=') => (kinds::PERCENT_EQ, 2),
+            Some(b'>') => (kinds::PERCENT_GT, 2),
+            _ => (kinds::PERCENT, 1),
+        },
+        b'=' => match b1 {
+            Some(b'=') => (kinds::EQ_EQ, 2),
+            _ => (kinds::EQ, 1),
+        },
+        b'<' => match b1 {
+            Some(b'=') if dialect.is_cpp() && view.byte_at(cursor + 2) == Some(b'>') => {
+                (kinds::SPACESHIP, 3)
+            }
+            Some(b'=') => (kinds::LT_EQ, 2),
+            Some(b'<') if view.byte_at(cursor + 2) == Some(b'=') => (kinds::SHL_EQ, 3),
+            Some(b'<') => (kinds::SHL, 2),
+            Some(b':') => (kinds::LT_COLON, 2),
+            Some(b'%') => (kinds::LT_PERCENT, 2),
+            _ => (kinds::LT, 1),
+        },
+        b'>' => match b1 {
+            Some(b'>') if view.byte_at(cursor + 2) == Some(b'=') => (kinds::SHR_EQ, 3),
+            Some(b'>') => (kinds::SHR, 2),
+            Some(b'=') => (kinds::GT_EQ, 2),
+            _ => (kinds::GT, 1),
+        },
+        b'!' => match b1 {
+            Some(b'=') => (kinds::BANG_EQ, 2),
+            _ => (kinds::BANG, 1),
+        },
+        b'&' => match b1 {
+            Some(b'&') => (kinds::AMP_AMP, 2),
+            Some(b'=') => (kinds::AMP_EQ, 2),
+            _ => (kinds::AMP, 1),
+        },
+        b'|' => match b1 {
+            Some(b'|') => (kinds::PIPE_PIPE, 2),
+            Some(b'=') => (kinds::PIPE_EQ, 2),
+            _ => (kinds::PIPE, 1),
+        },
+        b'^' => match b1 {
+            Some(b'=') => (kinds::CARET_EQ, 2),
+            _ => (kinds::CARET, 1),
+        },
+        b'~' => (kinds::TILDE, 1),
+        b'?' => (kinds::QUESTION, 1),
+        b':' => match b1 {
+            Some(b':') if dialect.is_cpp() => (kinds::COLON_COLON, 2),
+            Some(b'>') => (kinds::COLON_GT, 2),
+            _ => (kinds::COLON, 1),
+        },
+        b',' => (kinds::COMMA, 1),
+        b';' => (kinds::SEMI, 1),
+        b'(' => (kinds::OPEN_PAREN, 1),
+        b')' => (kinds::CLOSE_PAREN, 1),
+        b'{' => (kinds::OPEN_BRACE, 1),
+        b'}' => (kinds::CLOSE_BRACE, 1),
+        b'[' => (kinds::OPEN_BRACKET, 1),
+        b']' => (kinds::CLOSE_BRACKET, 1),
+        b'#' => match b1 {
+            Some(b'#') => (kinds::HASH_HASH, 2),
+            _ => (kinds::HASH, 1),
+        },
+        b'.' => match b1 {
+            Some(b'.') if view.byte_at(cursor + 2) == Some(b'.') => (kinds::ELLIPSIS, 3),
+            Some(b'*') if dialect.is_cpp() => (kinds::DOT_STAR, 2),
+            _ => (kinds::DOT, 1),
+        },
+        _ => (kinds::ERROR, 1),
     };
-    if let Some(k) = three {
-        return (k, cursor + 3);
-    }
-
-    if let Some(b1) = b1 {
-        let two = match (b0, b1) {
-            (b'=', b'=') => Some(kinds::EQ_EQ),
-            (b'!', b'=') => Some(kinds::BANG_EQ),
-            (b'<', b'=') => Some(kinds::LT_EQ),
-            (b'>', b'=') => Some(kinds::GT_EQ),
-            (b'&', b'&') => Some(kinds::AMP_AMP),
-            (b'|', b'|') => Some(kinds::PIPE_PIPE),
-            (b'<', b'<') => Some(kinds::SHL),
-            (b'>', b'>') => Some(kinds::SHR),
-            (b'+', b'+') => Some(kinds::PLUS_PLUS),
-            (b'-', b'-') => Some(kinds::MINUS_MINUS),
-            (b'+', b'=') => Some(kinds::PLUS_EQ),
-            (b'-', b'=') => Some(kinds::MINUS_EQ),
-            (b'*', b'=') => Some(kinds::STAR_EQ),
-            (b'/', b'=') => Some(kinds::SLASH_EQ),
-            (b'%', b'=') => Some(kinds::PERCENT_EQ),
-            (b'&', b'=') => Some(kinds::AMP_EQ),
-            (b'|', b'=') => Some(kinds::PIPE_EQ),
-            (b'^', b'=') => Some(kinds::CARET_EQ),
-            (b'-', b'>') => Some(kinds::THIN_ARROW),
-            (b':', b':') if dialect.is_cpp() => Some(kinds::COLON_COLON),
-            (b'.', b'*') if dialect.is_cpp() => Some(kinds::DOT_STAR),
-            (b'#', b'#') => Some(kinds::HASH_HASH),
-            (b'<', b':') => Some(kinds::LT_COLON),
-            (b':', b'>') => Some(kinds::COLON_GT),
-            (b'<', b'%') => Some(kinds::LT_PERCENT),
-            (b'%', b'>') => Some(kinds::PERCENT_GT),
-            _ => None,
-        };
-        if let Some(k) = two {
-            return (k, cursor + 2);
-        }
-    }
-
-    let one = match b0 {
-        b'+' => kinds::PLUS,
-        b'-' => kinds::MINUS,
-        b'*' => kinds::STAR,
-        b'/' => kinds::SLASH,
-        b'%' => kinds::PERCENT,
-        b'=' => kinds::EQ,
-        b'<' => kinds::LT,
-        b'>' => kinds::GT,
-        b'!' => kinds::BANG,
-        b'&' => kinds::AMP,
-        b'|' => kinds::PIPE,
-        b'^' => kinds::CARET,
-        b'~' => kinds::TILDE,
-        b'?' => kinds::QUESTION,
-        b':' => kinds::COLON,
-        b',' => kinds::COMMA,
-        b';' => kinds::SEMI,
-        b'(' => kinds::OPEN_PAREN,
-        b')' => kinds::CLOSE_PAREN,
-        b'{' => kinds::OPEN_BRACE,
-        b'}' => kinds::CLOSE_BRACE,
-        b'[' => kinds::OPEN_BRACKET,
-        b']' => kinds::CLOSE_BRACKET,
-        b'#' => kinds::HASH,
-        b'.' => kinds::DOT,
-        _ => kinds::ERROR,
-    };
-    (one, cursor + 1)
+    (kind, cursor + len)
 }
 
 #[cfg(test)]
