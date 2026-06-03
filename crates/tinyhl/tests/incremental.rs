@@ -1626,6 +1626,67 @@ fn markdown_ini_conf_embed_sweep() {
 }
 
 #[test]
+fn wgsl_insert_sweep() {
+    let source = "@compute @workgroup_size(1) fn main(@builtin(global_invocation_id) id: vec3u) { var x = 0x1.fp+2f; if (x >= 1.0) { x += 1.0; } }\n";
+    for off in 0..=source.len() {
+        for ins in [
+            "x", "9", "\"", " ", "{", "}", "(", ")", "[", "]", "/", "*", "@", "<", ">", "=", "-",
+            ".",
+        ] {
+            assert_mutate_matches_lang(Language::Wgsl, source, Span::new(off as u32, 0), ins);
+        }
+    }
+}
+
+#[test]
+fn wgsl_delete_sweep() {
+    let source = "@compute @workgroup_size(1) fn main(@builtin(global_invocation_id) id: vec3u) { var x = 0x1.fp+2f; if (x >= 1.0) { x += 1.0; } }\n";
+    for off in 0..source.len() {
+        assert_mutate_matches_lang(Language::Wgsl, source, Span::new(off as u32, 1), "");
+    }
+}
+
+#[test]
+fn wgsl_replace_sweep() {
+    let source = "/* nested /* c */ done */ var<storage, read_write> data: array<vec4f, 4u>; value = (value << 1u) & 0xffu;";
+    for off in 0..source.len() {
+        for rep in [
+            "x", "0", "\"", "/", "*", "@", "<", ">", "=", ".", "+", "-", "&",
+        ] {
+            assert_mutate_matches_lang(Language::Wgsl, source, Span::new(off as u32, 1), rep);
+        }
+    }
+}
+
+#[test]
+fn wgsl_fixture_sweep_over_chunks() {
+    let path = format!(
+        "{}/fixtures/wgsl/simple.wgsl.in",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let source = std::fs::read_to_string(&path).unwrap();
+    let step = (source.len() / 64).max(1);
+    for off in (0..source.len()).step_by(step) {
+        for rep in ["x", " ", "\"", "/*", "//", "0x", "@", "->", "<<"] {
+            assert_mutate_matches_lang(Language::Wgsl, &source, Span::new(off as u32, 0), rep);
+        }
+    }
+}
+
+#[test]
+fn markdown_wgsl_embed_sweep() {
+    let source = "# T\n\n```wgsl\n@compute fn main() { var x = 1u; }\n```\n\nend\n";
+    for off in 0..=source.len() {
+        for ins in ["x", "`", "\n", " ", "\"", "/", "@", "{", "}", "<"] {
+            assert_mutate_matches_lang(Language::Markdown, source, Span::new(off as u32, 0), ins);
+        }
+    }
+    for off in 0..source.len() {
+        assert_mutate_matches_lang(Language::Markdown, source, Span::new(off as u32, 1), "");
+    }
+}
+
+#[test]
 fn chain_of_edits_stays_in_sync() {
     let mut current = String::from("[]");
     let src: &dyn Source = &current.as_str();

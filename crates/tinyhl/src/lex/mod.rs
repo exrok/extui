@@ -29,6 +29,7 @@ pub(crate) mod sql;
 pub(crate) mod toml;
 pub(crate) mod ts;
 pub(crate) mod tsx;
+pub(crate) mod wgsl;
 pub(crate) mod xml;
 pub(crate) mod yaml;
 

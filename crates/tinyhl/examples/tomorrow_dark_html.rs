@@ -414,6 +414,7 @@ fn parse_language(arg: &str) -> Result<Language, String> {
         "proto" | "protobuf" => Ok(Language::Protobuf),
         "ini" | "dosini" => Ok(Language::Ini),
         "conf" | "config" | "cfg" => Ok(Language::Conf),
+        "wgsl" | "wesl" => Ok(Language::Wgsl),
         other => Err(format!("unsupported language: {other}")),
     }
 }

@@ -89,6 +89,7 @@ pub enum Language {
     Protobuf = 21,
     Ini = 22,
     Conf = 23,
+    Wgsl = 24,
 }
 
 impl Language {
@@ -130,6 +131,7 @@ impl Language {
             21 => Self::Protobuf,
             22 => Self::Ini,
             23 => Self::Conf,
+            24 => Self::Wgsl,
             _ => panic!("unknown language tag"),
         }
     }

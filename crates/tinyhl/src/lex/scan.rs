@@ -453,6 +453,30 @@ pub fn scan_block_comment(view: &mut SourceView<'_>, cursor: u32) -> ScanResult 
     }
 }
 
+/// Scans a nestable `/* ... */` block comment starting at `cursor`.
+///
+/// Returns the cursor just past the matching close, or an error if
+/// end-of-source is reached first.
+pub fn scan_nested_block_comment(view: &mut SourceView<'_>, cursor: u32) -> ScanResult {
+    let mut end = cursor + 2;
+    let mut depth = 1u32;
+    while depth > 0 {
+        match view.byte_at(end) {
+            Some(b'/') if view.byte_at(end + 1) == Some(b'*') => {
+                end += 2;
+                depth += 1;
+            }
+            Some(b'*') if view.byte_at(end + 1) == Some(b'/') => {
+                end += 2;
+                depth -= 1;
+            }
+            Some(_) => end += 1,
+            None => return ScanResult::err(end),
+        }
+    }
+    ScanResult::ok(end)
+}
+
 /// Scans a C numeric literal starting at `cursor`.
 ///
 /// Recognises integer literals in hexadecimal (`0x`/`0X`), binary (`0b`/`0B`,

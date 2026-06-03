@@ -110,6 +110,11 @@ fn load_conf(name: &str) -> String {
     std::fs::read_to_string(path).unwrap_or_else(|e| panic!("fixture {name}: {e}"))
 }
 
+fn load_wgsl(name: &str) -> String {
+    let path = format!("{}/fixtures/wgsl/{name}", env!("CARGO_MANIFEST_DIR"));
+    std::fs::read_to_string(path).unwrap_or_else(|e| panic!("fixture {name}: {e}"))
+}
+
 fn tokens_of(language: Language, s: &str) -> Vec<tinyhl::Token> {
     let src: &dyn Source = &s;
     let table = TokenTable::new(language, src);
@@ -1610,6 +1615,77 @@ fn markdown_ini_and_conf_fences_embed() {
     assert!(
         embedded.contains(&Language::Conf.tag()),
         "`conf` and `cfg` fences should embed generic config"
+    );
+}
+
+#[test]
+fn simple_wgsl_coverage_and_tags() {
+    let input = load_wgsl("simple.wgsl.in");
+    let tokens = tokens_of(Language::Wgsl, &input);
+
+    let mut pos = 0u32;
+    for t in &tokens {
+        assert_eq!(t.span.offset, pos, "gap before {pos}");
+        pos += t.span.len;
+        assert_eq!(t.lang_tag(), Language::Wgsl.tag());
+    }
+    assert_eq!(pos as usize, input.len());
+}
+
+#[test]
+fn wgsl_fixture_exercises_expected_kinds() {
+    use tinyhl::kind as kinds;
+
+    let mut seen = std::collections::HashSet::new();
+    let input = load_wgsl("simple.wgsl.in");
+    for t in tokens_of(Language::Wgsl, &input) {
+        seen.insert(t.local_kind());
+    }
+    for required in [
+        kinds::WHITESPACE,
+        kinds::COMMENT,
+        kinds::NUMBER,
+        kinds::KEYWORD,
+        kinds::IDENT,
+        kinds::OPEN_BRACE,
+        kinds::CLOSE_BRACE,
+        kinds::OPEN_PAREN,
+        kinds::CLOSE_PAREN,
+        kinds::COMMA,
+        kinds::SEMI,
+        kinds::COLON,
+        kinds::DOT,
+        kinds::AT,
+        kinds::EQ,
+        kinds::LT,
+        kinds::GT,
+        kinds::THIN_ARROW,
+        kinds::AMP,
+        kinds::SHR,
+        kinds::PERCENT,
+        kinds::MINUS,
+        kinds::STAR,
+    ] {
+        assert!(
+            seen.contains(&required),
+            "wgsl fixture should exercise kind {required}"
+        );
+    }
+}
+
+#[test]
+fn markdown_wgsl_fence_embeds_wgsl() {
+    let source =
+        "intro\n\n```wgsl\n@compute fn main() {}\n```\n\n```wesl\nimport package::shader;\n```\n";
+    let tokens = tokens_of(Language::Markdown, source);
+    let embedded: std::collections::HashSet<u8> = tokens
+        .iter()
+        .filter(|t| t.nest >= 1)
+        .map(|t| t.lang_tag())
+        .collect();
+    assert!(
+        embedded.contains(&Language::Wgsl.tag()),
+        "both `wgsl` and `wesl` fences should embed WGSL"
     );
 }
 

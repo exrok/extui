@@ -622,6 +622,8 @@ const INFO_LANGS: &[(&[u8], Language)] = &[
     (b"ts", Language::Ts),
     (b"tsx", Language::Tsx),
     (b"typescript", Language::Ts),
+    (b"wesl", Language::Wgsl),
+    (b"wgsl", Language::Wgsl),
     (b"xml", Language::Xml),
     (b"yaml", Language::Yaml),
     (b"yml", Language::Yaml),

@@ -215,7 +215,7 @@ fn scan_line_comment(view: &mut SourceView<'_>, cursor: u32) -> (u16, u32, bool)
 }
 
 fn scan_block_comment(view: &mut SourceView<'_>, cursor: u32) -> (u16, u32, bool) {
-    let mut end = cursor + 2;
+    let end = cursor + 2;
     let is_doc = match view.byte_at(end) {
         Some(b'!') => true,
         Some(b'*') => !matches!(view.byte_at(end + 1), Some(b'*') | Some(b'/')),
@@ -227,22 +227,8 @@ fn scan_block_comment(view: &mut SourceView<'_>, cursor: u32) -> (u16, u32, bool
         kinds::COMMENT
     };
 
-    let mut depth: u32 = 1;
-    while depth > 0 {
-        match view.byte_at(end) {
-            Some(b'/') if view.byte_at(end + 1) == Some(b'*') => {
-                end += 2;
-                depth += 1;
-            }
-            Some(b'*') if view.byte_at(end + 1) == Some(b'/') => {
-                end += 2;
-                depth -= 1;
-            }
-            Some(_) => end += 1,
-            None => return (kind, end, true),
-        }
-    }
-    (kind, end, false)
+    let r = scan::scan_nested_block_comment(view, cursor);
+    (kind, r.end, r.is_error)
 }
 
 fn scan_char_or_lifetime(view: &mut SourceView<'_>, cursor: u32) -> (u16, u32, bool) {

@@ -1,0 +1,21 @@
+// WGSL fixture for token coverage.
+enable f16;
+diagnostic(off, derivative_uniformity);
+
+struct VertexOut {
+  @builtin(position) position: vec4f,
+  @location(0) uv: vec2f,
+}
+
+/* nested /* block */ comment */
+@group(0) @binding(0) var<uniform> params: array<vec4f, 2u>;
+const SCALE: f32 = 0x1.fp+2f;
+override TINT: vec4f = vec4f(1.0, .5h, 3i, 4u);
+
+@vertex
+fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOut {
+  var out: VertexOut;
+  out.uv = vec2f(f32(vertex_index & 1u), f32((vertex_index >> 1u) % 2u));
+  out.position = vec4f(out.uv * 2.0 - vec2f(1.0), 0.0, 1.0);
+  return out;
+}
