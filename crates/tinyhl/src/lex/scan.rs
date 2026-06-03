@@ -354,6 +354,80 @@ pub fn scan_hash_comment(view: &mut SourceView<'_>, cursor: u32) -> u32 {
     }
 }
 
+/// Scans from `cursor` to the terminating `\n` or end-of-source. The newline
+/// itself is not consumed.
+pub fn scan_line_to_end(view: &mut SourceView<'_>, cursor: u32) -> u32 {
+    let mut cursor = cursor;
+    loop {
+        let (base, page) = view.window_at(cursor);
+        if page.is_empty() {
+            return cursor;
+        }
+        let rel = (cursor - base) as usize;
+        let mut i = rel;
+        while i < page.len() && page[i] != b'\n' {
+            i += 1;
+        }
+        cursor = base + i as u32;
+        if i < page.len() {
+            return cursor;
+        }
+    }
+}
+
+/// Scans a single-line quoted string starting at `cursor`. Backslash escapes
+/// the quote and another backslash; an unescaped line break or end-of-source
+/// marks the token as an error and leaves the line break for the caller.
+pub fn scan_oneline_quoted(view: &mut SourceView<'_>, cursor: u32, quote: u8) -> ScanResult {
+    let mut cursor = cursor + 1;
+    loop {
+        let (base, page) = view.window_at(cursor);
+        if page.is_empty() {
+            return ScanResult::err(cursor);
+        }
+        let rel = (cursor - base) as usize;
+        let mut i = rel;
+        let mut crossed_page_on_escape = false;
+        while i < page.len() {
+            let b = page[i];
+            if b == quote {
+                return ScanResult::ok(base + i as u32 + 1);
+            }
+            if b == b'\n' || b == b'\r' {
+                return ScanResult::err(base + i as u32);
+            }
+            if b == b'\\' {
+                if i + 1 < page.len() {
+                    let esc = page[i + 1];
+                    if esc == quote || esc == b'\\' {
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                    continue;
+                }
+                i += 1;
+                crossed_page_on_escape = true;
+                break;
+            }
+            i += 1;
+        }
+        cursor = base + i as u32;
+        if crossed_page_on_escape {
+            match view.byte_at(cursor) {
+                None => return ScanResult::err(cursor),
+                Some(b'\n') | Some(b'\r') => return ScanResult::err(cursor),
+                Some(b) if b == quote || b == b'\\' => cursor += 1,
+                Some(_) => {}
+            }
+            continue;
+        }
+        if i == rel {
+            return ScanResult::err(cursor);
+        }
+    }
+}
+
 /// Scans a `/* ... */` block comment starting at `cursor` (which must point
 /// at the leading `/`). Returns the cursor just past the closing `*/`, or an
 /// error if end-of-source is reached first. C block comments don't nest.

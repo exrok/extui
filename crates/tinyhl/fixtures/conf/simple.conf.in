@@ -1,0 +1,10 @@
+# generic config
+server.port = 8080
+feature: ON
+path = /tmp/app#cache # inline note
+url = http://example.test/a?b=c#frag
+// leading slash comment
+[profile.default]
+{legacy}
+quoted = 'single value'
+list = alpha,beta;gamma

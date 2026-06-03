@@ -100,6 +100,16 @@ fn load_protobuf(name: &str) -> String {
     std::fs::read_to_string(path).unwrap_or_else(|e| panic!("fixture {name}: {e}"))
 }
 
+fn load_ini(name: &str) -> String {
+    let path = format!("{}/fixtures/ini/{name}", env!("CARGO_MANIFEST_DIR"));
+    std::fs::read_to_string(path).unwrap_or_else(|e| panic!("fixture {name}: {e}"))
+}
+
+fn load_conf(name: &str) -> String {
+    let path = format!("{}/fixtures/conf/{name}", env!("CARGO_MANIFEST_DIR"));
+    std::fs::read_to_string(path).unwrap_or_else(|e| panic!("fixture {name}: {e}"))
+}
+
 fn tokens_of(language: Language, s: &str) -> Vec<tinyhl::Token> {
     let src: &dyn Source = &s;
     let table = TokenTable::new(language, src);
@@ -1488,6 +1498,118 @@ fn markdown_protobuf_fence_embeds_protobuf() {
     assert!(
         embedded.contains(&Language::Protobuf.tag()),
         "both `proto` and `protobuf` fences should embed Protobuf"
+    );
+}
+
+#[test]
+fn simple_ini_coverage_and_tags() {
+    let input = load_ini("simple.ini.in");
+    let tokens = tokens_of(Language::Ini, &input);
+
+    let mut pos = 0u32;
+    for t in &tokens {
+        assert_eq!(t.span.offset, pos, "gap before {pos}");
+        pos += t.span.len;
+        assert_eq!(t.lang_tag(), Language::Ini.tag());
+    }
+    assert_eq!(pos as usize, input.len());
+}
+
+#[test]
+fn ini_fixture_exercises_expected_kinds() {
+    use tinyhl::kind as kinds;
+
+    let mut seen = std::collections::HashSet::new();
+    let input = load_ini("simple.ini.in");
+    for t in tokens_of(Language::Ini, &input) {
+        seen.insert(t.local_kind());
+    }
+    for required in [
+        kinds::WHITESPACE,
+        kinds::COMMENT,
+        kinds::STRING,
+        kinds::NUMBER,
+        kinds::KEYWORD,
+        kinds::TEXT,
+        kinds::OPEN_BRACKET,
+        kinds::CLOSE_BRACKET,
+        kinds::TAG_NAME,
+        kinds::ATTR_NAME,
+        kinds::EQ,
+        kinds::COLON,
+    ] {
+        assert!(
+            seen.contains(&required),
+            "ini fixture should exercise kind {required}"
+        );
+    }
+}
+
+#[test]
+fn simple_conf_coverage_and_tags() {
+    let input = load_conf("simple.conf.in");
+    let tokens = tokens_of(Language::Conf, &input);
+
+    let mut pos = 0u32;
+    for t in &tokens {
+        assert_eq!(t.span.offset, pos, "gap before {pos}");
+        pos += t.span.len;
+        assert_eq!(t.lang_tag(), Language::Conf.tag());
+    }
+    assert_eq!(pos as usize, input.len());
+}
+
+#[test]
+fn conf_fixture_exercises_expected_kinds() {
+    use tinyhl::kind as kinds;
+
+    let mut seen = std::collections::HashSet::new();
+    let input = load_conf("simple.conf.in");
+    for t in tokens_of(Language::Conf, &input) {
+        seen.insert(t.local_kind());
+    }
+    for required in [
+        kinds::WHITESPACE,
+        kinds::COMMENT,
+        kinds::STRING,
+        kinds::NUMBER,
+        kinds::KEYWORD,
+        kinds::IDENT,
+        kinds::TEXT,
+        kinds::OPEN_BRACKET,
+        kinds::CLOSE_BRACKET,
+        kinds::OPEN_BRACE,
+        kinds::CLOSE_BRACE,
+        kinds::TAG_NAME,
+        kinds::ATTR_NAME,
+        kinds::EQ,
+        kinds::COLON,
+        kinds::COMMA,
+        kinds::SEMI,
+    ] {
+        assert!(
+            seen.contains(&required),
+            "conf fixture should exercise kind {required}"
+        );
+    }
+}
+
+#[test]
+fn markdown_ini_and_conf_fences_embed() {
+    let source = "intro\n\n```ini\n[core]\nname = tinyhl\n```\n\n```conf\nfeature: ON\n```\n\n```cfg\nx = 1\n```\n";
+    let tokens = tokens_of(Language::Markdown, source);
+    let embedded: std::collections::HashSet<u8> = tokens
+        .iter()
+        .filter(|t| t.nest >= 1)
+        .map(|t| t.lang_tag())
+        .collect();
+    assert!(
+        embedded.contains(&Language::Ini.tag()),
+        "`ini` fence should embed INI"
+    );
+    assert!(
+        embedded.contains(&Language::Conf.tag()),
+        "`conf` and `cfg` fences should embed generic config"
     );
 }
 

@@ -1511,6 +1511,121 @@ fn markdown_protobuf_embed_sweep() {
 }
 
 #[test]
+fn ini_insert_sweep() {
+    let source =
+        "; top\n[core]\nname = tinyhl\nport=5432\nenabled: yes\npath = a#b\nratio=-1.5e+2\n";
+    for off in 0..=source.len() {
+        for ins in [
+            "x", "9", " ", "\n", "#", ";", "[", "]", "=", ":", "\"", "'", ".",
+        ] {
+            assert_mutate_matches_lang(Language::Ini, source, Span::new(off as u32, 0), ins);
+        }
+    }
+}
+
+#[test]
+fn ini_delete_sweep() {
+    let source =
+        "; top\n[core]\nname = tinyhl\nport=5432\nenabled: yes\npath = a#b\nratio=-1.5e+2\n";
+    for off in 0..source.len() {
+        assert_mutate_matches_lang(Language::Ini, source, Span::new(off as u32, 1), "");
+    }
+}
+
+#[test]
+fn ini_replace_sweep() {
+    let source = "[database.replica]\nhost = \"db.local\"\nsecret = abc#123\nfeature: OFF\n";
+    for off in 0..source.len() {
+        for rep in ["x", "0", " ", "\n", "#", ";", "=", ":", "\"", "'", "[", "]"] {
+            assert_mutate_matches_lang(Language::Ini, source, Span::new(off as u32, 1), rep);
+        }
+    }
+}
+
+#[test]
+fn ini_fixture_sweep_over_chunks() {
+    let path = format!("{}/fixtures/ini/simple.ini.in", env!("CARGO_MANIFEST_DIR"));
+    let source = std::fs::read_to_string(&path).unwrap();
+    let step = (source.len() / 64).max(1);
+    for off in (0..source.len()).step_by(step) {
+        for rep in ["x", " ", "\n", "#", ";", "[section]", "=", ":", "\""] {
+            assert_mutate_matches_lang(Language::Ini, &source, Span::new(off as u32, 0), rep);
+        }
+    }
+}
+
+#[test]
+fn conf_insert_sweep() {
+    let source = "# top\nserver.port = 8080\nfeature: ON\npath = /tmp/a#b # note\n// cfg\n[profile]\n{legacy}\n";
+    for off in 0..=source.len() {
+        for ins in [
+            "x", "9", " ", "\n", "#", ";", "/", "//", "[", "]", "{", "}", "=", ":", "\"", "'",
+        ] {
+            assert_mutate_matches_lang(Language::Conf, source, Span::new(off as u32, 0), ins);
+        }
+    }
+}
+
+#[test]
+fn conf_delete_sweep() {
+    let source = "# top\nserver.port = 8080\nfeature: ON\npath = /tmp/a#b # note\n// cfg\n[profile]\n{legacy}\n";
+    for off in 0..source.len() {
+        assert_mutate_matches_lang(Language::Conf, source, Span::new(off as u32, 1), "");
+    }
+}
+
+#[test]
+fn conf_replace_sweep() {
+    let source = "url = http://example.test/a#b\nname: value\nlist = alpha,beta;gamma\n";
+    for off in 0..source.len() {
+        for rep in [
+            "x", "0", " ", "\n", "#", ";", "/", "=", ":", "\"", "'", "{", "}",
+        ] {
+            assert_mutate_matches_lang(Language::Conf, source, Span::new(off as u32, 1), rep);
+        }
+    }
+}
+
+#[test]
+fn conf_fixture_sweep_over_chunks() {
+    let path = format!(
+        "{}/fixtures/conf/simple.conf.in",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let source = std::fs::read_to_string(&path).unwrap();
+    let step = (source.len() / 64).max(1);
+    for off in (0..source.len()).step_by(step) {
+        for rep in [
+            "x",
+            " ",
+            "\n",
+            "#",
+            ";",
+            "//",
+            "[section]",
+            "{section}",
+            "=",
+            ": ",
+        ] {
+            assert_mutate_matches_lang(Language::Conf, &source, Span::new(off as u32, 0), rep);
+        }
+    }
+}
+
+#[test]
+fn markdown_ini_conf_embed_sweep() {
+    let source = "# T\n\n```ini\n[core]\nname = tinyhl\n```\n\n```conf\nfeature: ON\n```\n\nend\n";
+    for off in 0..=source.len() {
+        for ins in ["x", "`", "\n", " ", "#", ";", "[", "]", "=", ":"] {
+            assert_mutate_matches_lang(Language::Markdown, source, Span::new(off as u32, 0), ins);
+        }
+    }
+    for off in 0..source.len() {
+        assert_mutate_matches_lang(Language::Markdown, source, Span::new(off as u32, 1), "");
+    }
+}
+
+#[test]
 fn chain_of_edits_stays_in_sync() {
     let mut current = String::from("[]");
     let src: &dyn Source = &current.as_str();

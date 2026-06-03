@@ -1,0 +1,11 @@
+; TinyHL INI sample
+[database.replica]
+host = "db.local"
+port=5432
+enabled: yes
+ratio = -1.5e+2
+secret = abc#123
+path = C:\data\app
+# trailing group
+[features]
+experimental = OFF

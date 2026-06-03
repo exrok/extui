@@ -7,11 +7,13 @@
 pub(crate) mod byteclass;
 pub(crate) mod c;
 pub(crate) mod cmake;
+pub(crate) mod conf;
 pub(crate) mod cpp;
 pub(crate) mod css;
 pub(crate) mod csv;
 pub(crate) mod go;
 pub(crate) mod html;
+pub(crate) mod ini;
 pub(crate) mod json;
 pub(crate) mod jsx;
 pub mod kw;
