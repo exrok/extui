@@ -2462,6 +2462,32 @@ pub fn rgb_supported_from_env() -> bool {
 /// buf.render(&mut term);
 /// # Ok::<(), std::io::Error>(())
 /// ```
+/// Selects how the work buffer is prepared at the end of each render.
+///
+/// A [`DoubleBuffer`] swaps its two frames on every render so the retained frame
+/// matches what is on screen. The post-swap step then readies the work buffer
+/// for the next draw according to this mode.
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
+pub enum Swap {
+    /// Clear the work buffer after the swap. Immediate mode: the caller repaints
+    /// the whole frame every time, and cells it stops drawing are erased from
+    /// the screen. This is the default.
+    #[default]
+    Blank,
+    /// Copy the rendered frame into the work buffer after the swap. Retained
+    /// mode: the next draw may overdraw only the cells that changed, and cells it
+    /// leaves untouched stay on screen and emit nothing. The prep runs after the
+    /// swap, so the first overdraw frame is the one *after* the render that armed
+    /// this mode.
+    Retained,
+}
+
+// Floor for the retained-mode side-arena compaction threshold. The arena is
+// carried forward each retained frame and grown by interned graphemes, so it is
+// compacted once its length exceeds `4 * live_size + this`. The base term keeps
+// small arenas from compacting every frame.
+pub(crate) const SIDEBUFFER_GRAPHEME_COMPACTION_BASE_THRESHOLD: u32 = 8192;
+
 pub struct DoubleBuffer {
     current: Buffer,
     previous: Buffer,
@@ -2489,6 +2515,8 @@ pub struct DoubleBuffer {
     epoch: u64,
     palette: Vec<Vec<u8>>,
     cursor: CursorOutput,
+    swap: Swap,
+    grapheme_compaction_threshold: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -2616,6 +2644,8 @@ impl DoubleBuffer {
             bounded: false,
             palette: Vec::new(),
             cursor: CursorOutput::default(),
+            swap: Swap::Blank,
+            grapheme_compaction_threshold: SIDEBUFFER_GRAPHEME_COMPACTION_BASE_THRESHOLD,
         }
     }
 
@@ -2648,6 +2678,24 @@ impl DoubleBuffer {
     /// state disagrees with the request.
     pub fn hide_cursor(&mut self) {
         self.cursor.mode = CursorMode::Hidden;
+    }
+
+    /// Returns the current [`Swap`] mode.
+    pub fn swap_mode(&self) -> Swap {
+        self.swap
+    }
+
+    /// Selects the [`Swap`] mode applied at the end of each render.
+    ///
+    /// This only records the mode. The work buffer is prepared by the render
+    /// post-step: [`Swap::Blank`] clears it, [`Swap::Retained`] copies the
+    /// rendered frame into it. Because that prep runs after the swap, the mode
+    /// set before a render governs the *next* frame's starting buffer. Arm
+    /// [`Swap::Retained`] on the render before the first overdraw frame, leave it
+    /// set for the session, then set [`Swap::Blank`] before returning to full
+    /// repaints.
+    pub fn set_swap(&mut self, swap: Swap) {
+        self.swap = swap;
     }
 
     /// Returns `true` if the output terminal is assumed to accept 24-bit
@@ -2790,10 +2838,56 @@ impl DoubleBuffer {
             self.diffable = true;
         }
         std::mem::swap(&mut self.current, &mut self.previous);
-        // self.current.cells.fill(Cell::EMPTY);
-        clear_cells(&mut self.current.cells);
-        self.current.side.clear();
+        match self.swap {
+            Swap::Blank => {
+                clear_cells(&mut self.current.cells);
+                self.current.side.clear();
+            }
+            Swap::Retained => self.retain_from_previous(),
+        }
         self.emit_cursor();
+    }
+
+    /// Seeds the work buffer with the on-screen frame for retained-mode drawing.
+    ///
+    /// Cells the caller leaves untouched then compare equal against the previous
+    /// frame and emit nothing. The side arena is carried forward verbatim on the
+    /// common path and compacted once it grows past the threshold.
+    fn retain_from_previous(&mut self) {
+        self.current.cells.copy_from_slice(&self.previous.cells);
+        if self.previous.side.data.len() as u32 > self.grapheme_compaction_threshold {
+            self.compact_side_into_current();
+            let live = self.current.side.data.len() as u32;
+            self.grapheme_compaction_threshold =
+                live * 4 + SIDEBUFFER_GRAPHEME_COMPACTION_BASE_THRESHOLD;
+        } else {
+            self.current.side.data.clone_from(&self.previous.side.data);
+        }
+    }
+
+    /// Rebuilds the work buffer's side arena from only the graphemes still
+    /// referenced by its cells, rewriting handle offsets in place.
+    ///
+    /// Runs after `current.cells` was copied from `previous`, so the handle
+    /// offsets still point into `previous.side`. Cell equality compares grapheme
+    /// bytes rather than offsets, so the rebased offsets stay correct against the
+    /// previous frame in the next diff.
+    fn compact_side_into_current(&mut self) {
+        self.current.side.data.clear();
+        for i in 0..self.current.cells.len() {
+            let cell = self.current.cells[i];
+            if !cell.is_handle() {
+                continue;
+            }
+            let len = cell.handle_len();
+            let Some(bytes) = self.previous.side.get(cell.handle_offset(), len) else {
+                continue;
+            };
+            // SAFETY: handle graphemes are always valid UTF-8 interned by `set_stringn`.
+            let s = unsafe { std::str::from_utf8_unchecked(bytes) };
+            let new_offset = self.current.side.intern(s);
+            self.current.cells[i] = Cell::new_handle(new_offset, len, cell.style());
+        }
     }
 
     fn apply_scroll_optimization(&mut self) {
@@ -4176,6 +4270,155 @@ mod test {
             out.contains("\x1b[J") || out.contains("\x1b[0J"),
             "non-bounded must emit CLEAR_BELOW: {:?}",
             out
+        );
+    }
+
+    /// Retained mode keeps cells the caller stops drawing: the diff emits only
+    /// the overdrawn region and the screen still shows the rest.
+    ///
+    /// `Retained` is armed one render before the first overdraw frame, since the
+    /// post-swap seed runs after that render.
+    #[test]
+    fn retained_preserves_untouched_cells() {
+        let mut db = DoubleBuffer::new(20, 3);
+        let mut term = vt100::Parser::new(3, 20, 0);
+
+        // Arm retained, then a full frame whose post-step seeds the work buffer.
+        db.set_swap(Swap::Retained);
+        db.set_string(0, 0, "hello", Style::DEFAULT);
+        db.set_string(0, 1, "world", Style::DEFAULT);
+        db.set_string(0, 2, "retain", Style::DEFAULT);
+        db.render_internal();
+        term.process(&db.buf);
+
+        // Overdraw only row 1; the rest is retained from the seeded buffer.
+        db.buf.clear();
+        db.set_string(0, 1, "WORLD", Style::DEFAULT);
+        db.render_internal();
+        term.process(&db.buf);
+
+        let out = String::from_utf8_lossy(&db.buf);
+        assert!(
+            out.contains("WORLD"),
+            "overdrawn row not emitted: {:?}",
+            out
+        );
+        assert!(
+            !out.contains("hello"),
+            "untouched row re-emitted: {:?}",
+            out
+        );
+        assert!(
+            !out.contains("retain"),
+            "untouched row re-emitted: {:?}",
+            out
+        );
+
+        let screen = term.screen().contents();
+        let lines: Vec<&str> = screen.lines().collect();
+        assert_eq!(lines[0].trim_end(), "hello");
+        assert_eq!(lines[1].trim_end(), "WORLD");
+        assert_eq!(lines[2].trim_end(), "retain");
+    }
+
+    /// A retained frame that draws nothing emits no content: the work buffer was
+    /// seeded from the on-screen frame, so every cell compares equal.
+    #[test]
+    fn retained_idle_frame_emits_no_content() {
+        let mut db = DoubleBuffer::new(10, 2);
+        db.set_swap(Swap::Retained);
+        db.set_string(0, 0, "abc", Style::DEFAULT);
+        db.set_string(0, 1, "xyz", Style::DEFAULT);
+        db.render_internal(); // seeds the work buffer
+
+        db.buf.clear();
+        db.render_internal(); // idle overdraw frame
+
+        let out = String::from_utf8_lossy(&db.buf);
+        assert!(
+            !out.contains("abc"),
+            "idle retained frame re-emitted: {:?}",
+            out
+        );
+        assert!(
+            !out.contains("xyz"),
+            "idle retained frame re-emitted: {:?}",
+            out
+        );
+    }
+
+    /// After leaving retained mode the post-step clears again, so a later partial
+    /// draw erases cells it no longer paints rather than keeping stale ones.
+    #[test]
+    fn leaving_retained_restores_blank_clearing() {
+        let mut db = DoubleBuffer::new(10, 1);
+        let mut term = vt100::Parser::new(1, 10, 0);
+
+        db.set_swap(Swap::Retained);
+        db.set_string(0, 0, "ABCDE", Style::DEFAULT);
+        db.render_internal(); // seeds
+        term.process(&db.buf);
+
+        // Set Blank: this render still draws over the seeded buffer, but its
+        // post-step clears so the following frame starts empty.
+        db.set_swap(Swap::Blank);
+        db.set_string(0, 0, "ABCDE", Style::DEFAULT);
+        db.render_internal();
+        term.process(&db.buf);
+
+        // Now in blank mode: a partial draw leaves the rest of the row empty.
+        db.set_string(0, 0, "X", Style::DEFAULT);
+        db.render_internal();
+        term.process(&db.buf);
+
+        let screen = term.screen().contents();
+        let line = screen.lines().next().unwrap_or_default();
+        assert_eq!(
+            line.trim_end(),
+            "X",
+            "blank clearing not restored: {:?}",
+            line
+        );
+    }
+
+    /// Over a long retained session the side arena is compacted instead of
+    /// growing with the frame count, and handle graphemes still render.
+    #[test]
+    fn retained_compacts_grapheme_arena() {
+        let flag = "🇨🇦"; // 8 bytes, stored as a handle cell
+        assert!(flag.len() > 7);
+
+        let mut db = DoubleBuffer::new(8, 1);
+        let mut term = vt100::Parser::new(1, 8, 0);
+        db.set_swap(Swap::Retained);
+        db.set_string(0, 0, flag, Style::DEFAULT);
+        db.render_internal(); // seeds
+        term.process(&db.buf);
+
+        let base = SIDEBUFFER_GRAPHEME_COMPACTION_BASE_THRESHOLD as usize;
+        let frames = base / 4; // naive growth would be frames * 8 bytes
+        for _ in 0..frames {
+            db.buf.clear();
+            db.set_string(0, 0, flag, Style::DEFAULT);
+            db.render_internal();
+            term.process(&db.buf);
+        }
+
+        let naive = frames * flag.len();
+        let bound = base + 256;
+        assert!(naive > bound, "test would pass vacuously: tune frame count");
+        assert!(
+            db.previous.side.data.len() <= bound,
+            "arena grew unbounded: {} bytes after {} frames",
+            db.previous.side.data.len(),
+            frames,
+        );
+
+        let screen = term.screen().contents();
+        assert!(
+            screen.contains(flag),
+            "grapheme lost after compaction: {:?}",
+            screen,
         );
     }
 }
