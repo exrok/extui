@@ -1294,9 +1294,6 @@ fn analyze_rust(
             if !rust_type_context_from_turbofish(state) {
                 state.pending_call = None;
             }
-            if option_usize_eq(state.record_expr_value_depth, state.brace_depth) {
-                state.record_expr_value_depth = None;
-            }
         }
         kind::LIFETIME => {
             push_semantic(src, chunk, token, SemanticKind::Lifetime);
@@ -1305,9 +1302,6 @@ fn analyze_rust(
             state.record_expr_candidate = false;
             if !rust_type_context_from_turbofish(state) {
                 state.pending_call = None;
-            }
-            if option_usize_eq(state.record_expr_value_depth, state.brace_depth) {
-                state.record_expr_value_depth = None;
             }
         }
         _ if rust_name_token(src, token) => {
@@ -1486,9 +1480,6 @@ fn analyze_rust(
                 }
             }
             state.can_start_value_path = false;
-            if in_record_expr_value {
-                state.record_expr_value_depth = None;
-            }
         }
         kind::KEYWORD => {
             state.can_start_value_path = false;
@@ -1546,9 +1537,6 @@ fn analyze_rust(
             }
             state.after_dot = false;
             state.record_expr_candidate = false;
-            if option_usize_eq(state.record_expr_value_depth, state.brace_depth) {
-                state.record_expr_value_depth = None;
-            }
         }
         _ => {
             state.after_dot = false;
@@ -1556,9 +1544,6 @@ fn analyze_rust(
             state.record_expr_candidate = false;
             if !rust_type_context_from_turbofish(state) {
                 state.pending_call = None;
-            }
-            if option_usize_eq(state.record_expr_value_depth, state.brace_depth) {
-                state.record_expr_value_depth = None;
             }
         }
     }

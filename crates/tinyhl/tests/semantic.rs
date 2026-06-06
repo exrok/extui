@@ -154,6 +154,25 @@ fn use_it(arg_value: FieldTy) {
 }
 
 #[test]
+fn rust_record_expr_prefixed_value_is_not_a_field() {
+    let src = r#"
+fn main() {
+    let source = NumberedLineSource { lines: &source_lines, len: source_len };
+}
+"#;
+    let pairs = semantic_pairs(Language::Rust, src);
+    // Field keys.
+    assert_has(&pairs, "lines", SemanticKind::Field);
+    assert_has(&pairs, "len", SemanticKind::Field);
+    // `&source_lines` is a value: the leading `&` must not end the value
+    // region and let `source_lines` read as a fresh field key.
+    assert_has(&pairs, "source_lines", SemanticKind::Variable);
+    assert_lacks(&pairs, "source_lines", SemanticKind::Field);
+    assert_has(&pairs, "source_len", SemanticKind::Variable);
+    assert_lacks(&pairs, "source_len", SemanticKind::Field);
+}
+
+#[test]
 fn rust_let_pattern_distinguishes_constructor_from_binding() {
     let src = r#"
 fn main() {
