@@ -12,6 +12,7 @@
 
 use crate::Language;
 use crate::delimiter::{DelimiterQueryIter, DelimiterTable};
+use crate::render::RenderSpans;
 use crate::semantic::{SemanticKind, SemanticQueryIter, SemanticTable};
 use crate::source::Source;
 use crate::table::TokenTable;
@@ -105,6 +106,19 @@ impl Highlighter {
     pub fn delimiters(&self) -> Option<&DelimiterTable> {
         self.delimiters.as_ref()
     }
+
+    /// Returns the [`RenderSpan`]s whose tokens lie in `span`, in source
+    /// order.
+    ///
+    /// This is the highest-level render entry point: each [`RenderSpan`]
+    /// carries the lexical kind, render-ready semantic kind, and delimiter
+    /// depth a theme maps to a style, with the macro `!`, `Self`, and
+    /// lifetime-split policy already applied.
+    ///
+    /// [`RenderSpan`]: crate::RenderSpan
+    pub fn render(&self, span: Span) -> RenderSpans<'_> {
+        RenderSpans::new(self, span)
+    }
 }
 
 /// Iterator pair yielding the semantic kind and delimiter depth at a
@@ -136,8 +150,16 @@ impl<'t> Overlays<'t> {
     /// Returns the semantic kind and delimiter depth whose entries start
     /// at `offset`, or `None` for either side that has no match.
     ///
+    /// The semantic kind is render-ready: it is [`SemanticToken::display_kind`],
+    /// which folds the type-casing convention in so a consumer maps it to a
+    /// color with no further logic. Query [`SemanticTable`] directly for the
+    /// raw structural kind.
+    ///
     /// Each call advances past entries starting before `offset`, so
     /// `offset` must be non-decreasing across successive calls.
+    ///
+    /// [`SemanticToken::display_kind`]: crate::SemanticToken::display_kind
+    /// [`SemanticTable`]: crate::SemanticTable
     pub fn at(&mut self, offset: u32) -> (Option<SemanticKind>, Option<u16>) {
         let sem_kind = match self.sem.as_mut() {
             Some(iter) => {
@@ -149,7 +171,7 @@ impl<'t> Overlays<'t> {
                     }
                 }
                 match iter.peek() {
-                    Some(entry) if entry.span.offset == offset => Some(entry.kind),
+                    Some(entry) if entry.span.offset == offset => Some(entry.display_kind()),
                     _ => None,
                 }
             }

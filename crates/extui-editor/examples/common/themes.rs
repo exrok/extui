@@ -285,14 +285,15 @@ fn semantic_style(syntax: &SyntaxTheme, kind: tinyhl::SemanticKind) -> Option<St
     use tinyhl::SemanticKind::*;
     Some(match kind {
         TypeDefinition | TypeName => syntax.type_name,
-        FunctionDefinition | FunctionCall => syntax.function,
+        FunctionDefinition | FunctionCall | MacroCall => syntax.function,
         MethodDefinition | MethodCall => syntax.method,
         Parameter => syntax.parameter,
         Argument => syntax.argument,
         VariableDefinition => syntax.variable_def,
         FieldDefinition | Field => syntax.field,
         PathComponent => syntax.path,
-        Variable => return None,
+        Lifetime => syntax.lifetime,
+        Variable | FieldAccess | MetaVariable => return None,
     })
 }
 

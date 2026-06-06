@@ -44,10 +44,21 @@ pub enum SemanticKind {
     Variable = 9,
     /// Name introduced by a struct or class field declaration.
     FieldDefinition = 10,
-    /// Reference to a field through member access.
+    /// Name introduced as a struct-literal key or a struct-pattern field.
     Field = 11,
     /// Segment of a path that is neither a final name nor a type.
     PathComponent = 12,
+    /// Reference to a field through member access (`expr.field`).
+    FieldAccess = 13,
+    /// Macro metavariable (`$name`).
+    MetaVariable = 14,
+    /// Macro invocation: both the call name and its `!` punctuation carry
+    /// this kind, so a consumer colors the bang like the macro it belongs to
+    /// without tracking the previous token.
+    MacroCall = 15,
+    /// Rust lifetime or label (`'a`, `'static`). The leading `'` and the name
+    /// share one lexical token; render policy splits them.
+    Lifetime = 16,
 }
 
 /// Semantic classification for a specific source range.
@@ -57,6 +68,10 @@ pub struct SemanticToken {
     pub span: Span,
     /// Assigned category.
     pub kind: SemanticKind,
+    /// Whether the identifier renders as a type by spelling convention: an
+    /// UpperCamel/SCREAMING name in any language, or a Rust primitive name
+    /// that is not a function. [`SemanticToken::display_kind`] folds this in.
+    pub type_styled: bool,
     /// Language tag of the underlying lexical token (see
     /// [`Token::lang_tag`]).
     pub lang_tag: u8,
@@ -64,11 +79,41 @@ pub struct SemanticToken {
     pub nest: u8,
 }
 
+impl SemanticToken {
+    /// Returns the render-ready category, folding [`type_styled`] in so a
+    /// consumer maps it to a color with no further casing logic.
+    ///
+    /// The type color is a spelling convention, not a structural fact: a
+    /// type-cased name (UpperCamel/SCREAMING, or a Rust primitive) renders as
+    /// [`SemanticKind::TypeName`] whatever its structural [`kind`], and a
+    /// type-position name that is *not* type-cased (a lowercase, non-primitive
+    /// identifier the analyzer placed in type position) renders as
+    /// [`SemanticKind::Variable`]. The structural [`kind`] is unchanged.
+    ///
+    /// [`type_styled`]: SemanticToken::type_styled
+    /// [`kind`]: SemanticToken::kind
+    #[inline]
+    pub fn display_kind(self) -> SemanticKind {
+        match self.kind {
+            SemanticKind::TypeName | SemanticKind::TypeDefinition => {
+                if self.type_styled {
+                    self.kind
+                } else {
+                    SemanticKind::Variable
+                }
+            }
+            _ if self.type_styled => SemanticKind::TypeName,
+            other => other,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct RelSemanticToken {
     rel_offset: u32,
     len: u32,
     kind: SemanticKind,
+    type_styled: bool,
     lang_tag: u8,
     nest: u8,
 }
@@ -90,6 +135,19 @@ impl StateSnapshot {
             Language::C | Language::Cpp => Self::C(CState::default()),
             Language::Python => Self::Py(PyState::default()),
             _ => Self::None,
+        }
+    }
+
+    /// Whether a size-driven chunk split should be deferred because a
+    /// chunk-local promotion is still pending. Splitting here would seal the
+    /// name in one chunk and resolve its call `(` in the next, losing the
+    /// turbofish-call promotion. The pending state clears within a few tokens,
+    /// and the decision is a pure function of the token stream, so deferring
+    /// keeps `mutate` convergent.
+    fn defer_size_split(&self) -> bool {
+        match self {
+            Self::Rust(state) => state.pending_call.is_some(),
+            _ => false,
         }
     }
 
@@ -328,6 +386,7 @@ impl Iterator for SemanticQueryIter<'_> {
             return Some(SemanticToken {
                 span: Span::new(abs_offset, rel.len),
                 kind: rel.kind,
+                type_styled: rel.type_styled,
                 lang_tag: rel.lang_tag,
                 nest: rel.nest,
             });
@@ -385,7 +444,7 @@ impl<'t> Builder<'t> {
             let split_for_size = match self.chunk.as_ref() {
                 Some(chunk) => chunk.lex_token_count >= CHUNK_TOKEN_TARGET,
                 None => false,
-            };
+            } && !self.state.defer_size_split();
 
             if split_for_lang || split_for_size {
                 self.state.reset_chunk_local();
@@ -518,11 +577,46 @@ impl<'t> Builder<'t> {
     }
 }
 
-fn push_semantic(chunk: &mut SemanticChunk, token: Token, kind: SemanticKind) -> usize {
+/// Rust primitive type names. The casing convention tans these wherever they
+/// appear (matching the reference renderer), except when one names a function.
+const RUST_PRIMITIVES: &[&[u8]] = &[
+    b"u8", b"u16", b"u32", b"u64", b"u128", b"usize", b"i8", b"i16", b"i32", b"i64", b"i128",
+    b"isize", b"f16", b"f32", b"f64", b"f128", b"bool", b"char", b"str",
+];
+
+fn is_fn_role(kind: SemanticKind) -> bool {
+    matches!(
+        kind,
+        SemanticKind::FunctionDefinition
+            | SemanticKind::FunctionCall
+            | SemanticKind::MethodDefinition
+            | SemanticKind::MethodCall
+            | SemanticKind::MacroCall
+    )
+}
+
+/// Whether the identifier renders as a type by spelling convention: an
+/// UpperCamel/SCREAMING name in any language, or a non-function Rust primitive.
+fn compute_type_styled(src: &dyn Source, token: Token, kind: SemanticKind) -> bool {
+    if token_starts_upper(src, token) {
+        return true;
+    }
+    Language::from_tag(kind_lang_tag(token.kind)) == Language::Rust
+        && !is_fn_role(kind)
+        && matches_keyword_any(src, token, RUST_PRIMITIVES)
+}
+
+fn push_semantic(
+    src: &dyn Source,
+    chunk: &mut SemanticChunk,
+    token: Token,
+    kind: SemanticKind,
+) -> usize {
     chunk.tokens.push(RelSemanticToken {
         rel_offset: token.span.offset - chunk.base_offset,
         len: token.span.len,
         kind,
+        type_styled: compute_type_styled(src, token, kind),
         lang_tag: kind_lang_tag(token.kind),
         nest: token.nest,
     });
@@ -637,6 +731,12 @@ struct RustTypeContext {
     angle_depth: usize,
     allow_plus_bounds: bool,
     from_turbofish: bool,
+    /// The context lives only inside its `<...>`: it is sealed when the
+    /// matching `>` brings `angle_depth` back to zero. Set for turbofish
+    /// (`name::<T>`) and for generic parameter lists on definitions
+    /// (`fn f<T>`, `struct S<T>`). A non-angle-scoped context (`: Type`,
+    /// `as T`, `-> T`) instead ends at a structural terminator.
+    angle_scoped: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -661,9 +761,29 @@ struct RustState {
     type_def_pending: bool,
     type_alias_name_pending: bool,
     type_alias_rhs_pending: bool,
+    /// Armed when a `<` is known to open an angle-scoped type region rather
+    /// than a comparison: after a definition name (`fn`/`struct`/`enum`/
+    /// `union`/`trait`/`type` IDENTIFIER `<`) for its generic parameters, or
+    /// after `match`/`if`/`while` for a qualified-path scrutinee/condition
+    /// (`match <T as Trait>::f() {}`). Only set when the *next* significant
+    /// token is `<`, so it is consumed immediately and never leaks onto a
+    /// later comparison `<`.
+    angle_type_pending: bool,
     record_fields_pending: bool,
     const_pending: bool,
     static_pending: bool,
+    /// Set when `macro_rules` `!` is seen, consumed by the following ident,
+    /// which is the macro being defined. A canonical one-shot flag.
+    macro_def_pending: bool,
+    /// Set by a macro call name, consumed by the immediately following `!`,
+    /// which is tagged [`SemanticKind::MacroCall`] so it renders like the
+    /// call. The bang is always the next significant token, so this never
+    /// leaks past it.
+    macro_bang_pending: bool,
+    /// Bracket depth at which an attribute `#[` (or inner `#![`) opened. While
+    /// `Some`, identifiers inside the bracket region are neutralized so the
+    /// attribute body greys, matching the reference renderer.
+    attr_bracket_depth: Option<usize>,
     after_dot: bool,
     paren_depth: usize,
     brace_depth: usize,
@@ -720,7 +840,41 @@ fn rust_start_type_context(state: &mut RustState, allow_plus_bounds: bool, from_
         angle_depth: usize::from(from_turbofish),
         allow_plus_bounds,
         from_turbofish,
+        angle_scoped: from_turbofish,
     });
+}
+
+/// Open an angle-scoped type context for a `<...>`-delimited type region: a
+/// generic parameter list after a definition name (`fn f<T>`, `struct S<T>`)
+/// or a leading qualified-path type in value position (`<T as Trait>::method`).
+/// The opening `<` is counted, so the context is sealed when the matching `>`
+/// brings `angle_depth` back to zero. Both positions are unambiguous, so this
+/// never has to tell generics apart from a comparison operator.
+fn rust_start_angle_type(state: &mut RustState) {
+    if state.type_context.is_some() {
+        return;
+    }
+    state.type_context = Some(RustTypeContext {
+        base: rust_depth_mark(state),
+        angle_depth: 1,
+        allow_plus_bounds: true,
+        from_turbofish: false,
+        angle_scoped: true,
+    });
+}
+
+/// Whether `next_sig`/`next2_sig` form a `::` path separator. The two colons
+/// must be adjacent in the source, which tells a path (`a::b`) apart from an
+/// annotation colon followed by a leading-`::` absolute path (`x: ::y`).
+fn is_colon_path_sep(next_sig: Option<Token>, next2_sig: Option<Token>) -> bool {
+    match (next_sig, next2_sig) {
+        (Some(a), Some(b)) => {
+            kind_local(a.kind) == kind::COLON
+                && kind_local(b.kind) == kind::COLON
+                && a.span.end() == b.span.offset
+        }
+        _ => false,
+    }
 }
 
 fn rust_name_token(src: &dyn Source, token: Token) -> bool {
@@ -746,9 +900,7 @@ fn rust_classify_pattern_ident(
     next2_sig: Option<Token>,
     state: &RustState,
 ) -> SemanticKind {
-    let path_sep = matches!(local_of(next_sig), Some(kind::COLON))
-        && matches!(local_of(next2_sig), Some(kind::COLON));
-    if path_sep {
+    if is_colon_path_sep(next_sig, next2_sig) {
         return SemanticKind::PathComponent;
     }
     let in_struct_pat = matches!(rust_current_brace_kind(state), Some(RustBraceKind::Pattern));
@@ -773,8 +925,12 @@ fn rust_type_keyword(src: &dyn Source, token: Token) -> bool {
             src,
             token,
             &[
+                // `for` keeps a type context alive only when one is already
+                // open — i.e. the `for` of `impl Trait for Type` (and `for<'a>`
+                // higher-ranked bounds). A loop `for` has no active context, so
+                // this never affects pattern handling.
                 b"Self", b"self", b"super", b"crate", b"dyn", b"impl", b"fn", b"mut", b"const",
-                b"unsafe", b"extern",
+                b"unsafe", b"extern", b"for",
             ],
         )
 }
@@ -812,7 +968,7 @@ fn rust_finish_type_context(
         return;
     };
 
-    if ctx.from_turbofish && ctx.angle_depth == 0 {
+    if ctx.angle_scoped && ctx.angle_depth == 0 {
         state.type_context = None;
         return;
     }
@@ -879,6 +1035,14 @@ fn analyze_rust(
         return;
     }
     let type_root_before = rust_type_context_is_root(state);
+    // A type-alias RHS context (`type X = Type`) is opened by the `=` below and
+    // must survive it: the finish pass would otherwise clear a root context on
+    // `=`. Angle-scoped contexts (generics, turbofish, qualified paths) need no
+    // such exception — `angle_depth >= 1` keeps them non-root, so finish leaves
+    // them alone until their `>`. Plain casts (`as T`) deliberately do *not*
+    // persist: `as u32 * x` is indistinguishable from a pointer type to a flat
+    // lexer, so the cast target falls back to the case rule.
+    let mut started_alias_rhs = false;
 
     match local {
         kind::OPEN_PAREN => {
@@ -921,6 +1085,14 @@ fn analyze_rust(
         }
         kind::OPEN_BRACKET => {
             state.bracket_depth += 1;
+            // `#[` (outer) or `#![` (inner) opens an attribute. A bare `#` only
+            // occurs in attributes, so the preceding token is a reliable signal.
+            let attr_open = matches!(local_of(state.prev_sig), Some(kind::HASH))
+                || (matches!(local_of(state.prev_sig), Some(kind::BANG))
+                    && matches!(local_of(state.prev_prev_sig), Some(kind::HASH)));
+            if attr_open && state.attr_bracket_depth.is_none() {
+                state.attr_bracket_depth = Some(state.bracket_depth);
+            }
             state.after_dot = false;
             state.can_start_value_path = true;
             state.record_expr_candidate = false;
@@ -928,6 +1100,9 @@ fn analyze_rust(
         kind::CLOSE_BRACKET => {
             if state.bracket_depth > 0 {
                 state.bracket_depth -= 1;
+            }
+            if matches!(state.attr_bracket_depth, Some(depth) if depth > state.bracket_depth) {
+                state.attr_bracket_depth = None;
             }
             state.after_dot = false;
             state.can_start_value_path = false;
@@ -973,7 +1148,12 @@ fn analyze_rust(
         }
         kind::COLON => {
             if matches!(local_of(next_sig), Some(kind::COLON)) {
-                if !matches!(local_of(next2_sig), Some(kind::LT)) {
+                // A `::` that is not a turbofish ends the pending call path —
+                // unless it is a type-path separator inside a turbofish
+                // (`name::<a::B>(...)`), which must not disturb the outer call.
+                if !matches!(local_of(next2_sig), Some(kind::LT))
+                    && !rust_type_context_from_turbofish(state)
+                {
                     state.pending_call = None;
                 }
                 state.after_dot = false;
@@ -1019,11 +1199,21 @@ fn analyze_rust(
         kind::LT => {
             if let Some(ctx) = &mut state.type_context {
                 ctx.angle_depth += 1;
+            } else if state.angle_type_pending || state.can_start_value_path {
+                // `angle_type_pending`: a definition's generic parameters, or a
+                // qualified-path scrutinee/condition after `match`/`if`/`while`.
+                // `can_start_value_path`: a `<` in value-start position, which
+                // can only open a qualified-path type (`<T as Trait>::method`)
+                // — a comparison `<` always has a left operand before it, which
+                // clears `can_start_value_path`. Both signals fire only where a
+                // matching `>` is guaranteed, so the angle scope cannot leak.
+                rust_start_angle_type(state);
             } else if matches!(local_of(state.prev_sig), Some(kind::COLON))
                 && matches!(local_of(state.prev_prev_sig), Some(kind::COLON))
             {
                 rust_start_type_context(state, false, true);
             }
+            state.angle_type_pending = false;
             state.after_dot = false;
             state.can_start_value_path = false;
         }
@@ -1067,12 +1257,17 @@ fn analyze_rust(
             state.after_dot = false;
             state.can_start_value_path = true;
             state.record_expr_candidate = false;
-            state.pending_call = None;
+            // A `;` inside a turbofish is an array-type length separator
+            // (`name::<[T; N]>(...)`), not a statement end.
+            if !rust_type_context_from_turbofish(state) {
+                state.pending_call = None;
+            }
         }
         kind::EQ => {
             if state.type_alias_rhs_pending {
                 rust_start_type_context(state, false, false);
                 state.type_alias_rhs_pending = false;
+                started_alias_rhs = true;
             }
             state.pattern_base = None;
             state.let_annotation_base = None;
@@ -1080,15 +1275,50 @@ fn analyze_rust(
             state.after_dot = false;
             state.can_start_value_path = true;
             state.record_expr_candidate = false;
-            state.pending_call = None;
+            // An `=` inside a turbofish is an associated-type binding
+            // (`Trait<Item = T>`), not the end of the call path.
+            if !rust_type_context_from_turbofish(state) {
+                state.pending_call = None;
+            }
+        }
+        kind::BANG => {
+            // A bang armed by a preceding macro call name is part of that
+            // invocation and renders like it.
+            if state.macro_bang_pending {
+                push_semantic(src, chunk, token, SemanticKind::MacroCall);
+                state.macro_bang_pending = false;
+            }
+            state.after_dot = false;
+            state.can_start_value_path = false;
+            state.record_expr_candidate = false;
+            if !rust_type_context_from_turbofish(state) {
+                state.pending_call = None;
+            }
+            if option_usize_eq(state.record_expr_value_depth, state.brace_depth) {
+                state.record_expr_value_depth = None;
+            }
+        }
+        kind::LIFETIME => {
+            push_semantic(src, chunk, token, SemanticKind::Lifetime);
+            state.after_dot = false;
+            state.can_start_value_path = false;
+            state.record_expr_candidate = false;
+            if !rust_type_context_from_turbofish(state) {
+                state.pending_call = None;
+            }
+            if option_usize_eq(state.record_expr_value_depth, state.brace_depth) {
+                state.record_expr_value_depth = None;
+            }
         }
         _ if rust_name_token(src, token) => {
             let in_turbofish = rust_type_context_from_turbofish(state);
             let in_record_expr_value =
                 option_usize_eq(state.record_expr_value_depth, state.brace_depth);
             let direct_call = matches!(local_of(next_sig), Some(kind::OPEN_PAREN));
-            let path_sep = matches!(local_of(next_sig), Some(kind::COLON))
-                && matches!(local_of(next2_sig), Some(kind::COLON));
+            let path_sep = is_colon_path_sep(next_sig, next2_sig);
+            // A `$`-prefixed name is a macro metavariable. `$` lexes standalone,
+            // so the preceding significant token identifies it unambiguously.
+            let is_metavar = matches!(local_of(state.prev_sig), Some(kind::DOLLAR));
             let record_field_def = matches!(
                 rust_current_brace_kind(state),
                 Some(RustBraceKind::RecordFields)
@@ -1105,12 +1335,35 @@ fn analyze_rust(
             let record_ctor = state.can_start_value_path
                 && !state.after_dot
                 && matches!(local_of(next_sig), Some(kind::OPEN_BRACE));
+            // A `!` is a macro bang only when a macro delimiter follows
+            // (`name!(`, `name![`, `name!{`) or it is `macro_rules! name`.
+            // `!` is lexed standalone, so `x != y` would otherwise read as a
+            // macro invocation.
+            let next_is_bang = !state.after_dot && matches!(local_of(next_sig), Some(kind::BANG));
+            let is_macro_rules = next_is_bang
+                && matches!(next2_sig, Some(t) if is_ident(t, Language::Rust))
+                && token_eq(src, token, b"macro_rules");
+            let macro_call = next_is_bang
+                && (is_macro_rules
+                    || matches!(
+                        local_of(next2_sig),
+                        Some(kind::OPEN_PAREN | kind::OPEN_BRACE | kind::OPEN_BRACKET)
+                    ));
 
-            let kind = if state.fn_pending {
-                let idx = push_semantic(chunk, token, SemanticKind::FunctionDefinition);
+            let kind = if state.macro_def_pending {
+                // Name of a `macro_rules!` definition.
+                state.macro_def_pending = false;
+                Some(SemanticKind::FunctionDefinition)
+            } else if state.attr_bracket_depth.is_some() {
+                // Inside `#[...]`: greyed attribute body. Uppercase names still
+                // tan via the case rule downstream.
+                Some(SemanticKind::Variable)
+            } else if state.fn_pending {
+                let idx = push_semantic(src, chunk, token, SemanticKind::FunctionDefinition);
                 state.pending_fn_token = Some(idx);
                 state.fn_pending = false;
                 state.fn_header_pending = true;
+                state.angle_type_pending = matches!(local_of(next_sig), Some(kind::LT));
                 None
             } else if state.type_def_pending {
                 state.type_def_pending = false;
@@ -1118,12 +1371,20 @@ fn analyze_rust(
                     state.type_alias_rhs_pending = true;
                     state.type_alias_name_pending = false;
                 }
+                state.angle_type_pending = matches!(local_of(next_sig), Some(kind::LT));
                 Some(SemanticKind::TypeDefinition)
             } else if state.const_pending || state.static_pending {
                 state.const_pending = false;
                 state.static_pending = false;
-                state.item_annotation_base = Some(rust_depth_mark(state));
-                Some(SemanticKind::VariableDefinition)
+                if path_sep {
+                    // A name followed by `::` is a path segment, not a binding.
+                    // Guards against `*const T::...` pointer types mis-read as a
+                    // `const` item.
+                    Some(SemanticKind::PathComponent)
+                } else {
+                    state.item_annotation_base = Some(rust_depth_mark(state));
+                    Some(SemanticKind::VariableDefinition)
+                }
             } else if state.pattern_base.is_some() {
                 Some(rust_classify_pattern_ident(
                     src, token, next_sig, next2_sig, state,
@@ -1142,13 +1403,13 @@ fn analyze_rust(
                 if direct_call {
                     Some(SemanticKind::MethodCall)
                 } else {
-                    Some(SemanticKind::Field)
+                    Some(SemanticKind::FieldAccess)
                 }
             } else if record_field_use {
                 Some(SemanticKind::Field)
-            } else if !state.after_dot && matches!(local_of(next_sig), Some(kind::BANG)) {
-                // Macro invocation (`name!`); render like a call.
-                Some(SemanticKind::FunctionCall)
+            } else if macro_call {
+                // Macro invocation (`name!(...)`); the bang below inherits it.
+                Some(SemanticKind::MacroCall)
             } else if path_sep {
                 Some(SemanticKind::PathComponent)
             } else if direct_call {
@@ -1160,18 +1421,55 @@ fn analyze_rust(
             } else {
                 Some(SemanticKind::Variable)
             };
+            let is_macro_call_name = kind == Some(SemanticKind::MacroCall);
             if let Some(kind) = kind {
-                let idx = push_semantic(chunk, token, kind);
-                if path_sep {
+                let idx = push_semantic(src, chunk, token, kind);
+                if path_sep && !in_turbofish && !is_metavar {
                     state.pending_call = Some(RustPendingCall {
                         semantic_idx: idx,
                         method: state.after_dot,
                     });
                 } else if !in_turbofish {
+                    // Inside a turbofish, a path segment is a type path, not the
+                    // call target — leave the outer pending call untouched so
+                    // `name::<a::B>(...)` still promotes `name`.
                     state.pending_call = None;
                 }
             } else if !in_turbofish {
                 state.pending_call = None;
+            }
+            // A `$name` metavariable is a macro substitution, not a real
+            // reference: relabel every use role to `MetaVariable`. The full
+            // chain above already ran, so `fn $name` consumed `fn_pending`
+            // rather than leaking it onto the next identifier. Binding sites
+            // keep their structural kind, so the reference still reds `let
+            // $var` and a `$param` declaration.
+            if is_metavar {
+                if let Some(last) = chunk.tokens.last_mut() {
+                    if last.rel_offset == token.span.offset - chunk.base_offset
+                        && matches!(
+                            last.kind,
+                            SemanticKind::FunctionDefinition
+                                | SemanticKind::FunctionCall
+                                | SemanticKind::MethodDefinition
+                                | SemanticKind::MethodCall
+                                | SemanticKind::MacroCall
+                                | SemanticKind::PathComponent
+                                | SemanticKind::Variable
+                                | SemanticKind::Argument
+                        )
+                    {
+                        last.kind = SemanticKind::MetaVariable;
+                    }
+                }
+            }
+            // A macro call name arms the following `!`. A `$name!` metavariable
+            // is a substitution, not a call, so it does not arm the bang.
+            state.macro_bang_pending = is_macro_call_name && !is_metavar;
+            // `macro_rules! name`: arm the one-shot so the following ident is
+            // tagged as the macro definition.
+            if is_macro_rules {
+                state.macro_def_pending = true;
             }
             state.record_expr_candidate = state.pattern_base.is_none()
                 && state.can_start_value_path
@@ -1204,7 +1502,11 @@ fn analyze_rust(
                     state.pattern_base = Some(rust_depth_mark(state));
                 }
             } else if token_eq(src, token, b"fn") {
-                if state.type_context.is_none() {
+                // `fn name(...)` defines a function; `fn(...)` is a function
+                // pointer type with no name — don't expect a definition ident.
+                if state.type_context.is_none()
+                    && !matches!(local_of(next_sig), Some(kind::OPEN_PAREN))
+                {
                     state.fn_pending = true;
                 }
             } else if matches_keyword_any(
@@ -1235,6 +1537,12 @@ fn analyze_rust(
             } else if token_eq(src, token, b"in") {
                 state.pattern_base = None;
                 state.can_start_value_path = true;
+            } else if matches_keyword_any(src, token, &[b"match", b"if", b"while"]) {
+                // A scrutinee/condition is a value position. We cannot set
+                // `can_start_value_path` here without making `match Foo {}` read
+                // `Foo {` as a struct literal, so only arm the leak-proof
+                // angle one-shot for a qualified-path scrutinee (`match <T>::`).
+                state.angle_type_pending = matches!(local_of(next_sig), Some(kind::LT));
             }
             state.after_dot = false;
             state.record_expr_candidate = false;
@@ -1255,7 +1563,9 @@ fn analyze_rust(
         }
     }
 
-    rust_finish_type_context(src, token, next_sig, next2_sig, state);
+    if !started_alias_rhs {
+        rust_finish_type_context(src, token, next_sig, next2_sig, state);
+    }
     state.prev_prev_sig = state.prev_sig;
     state.prev_sig = Some(token);
 }
@@ -1395,7 +1705,12 @@ fn analyze_ts(
                 || state.type_pending
                 || state.enum_pending
             {
-                let emitted = Some(push_semantic(chunk, token, SemanticKind::TypeDefinition));
+                let emitted = Some(push_semantic(
+                    src,
+                    chunk,
+                    token,
+                    SemanticKind::TypeDefinition,
+                ));
                 state.class_pending = false;
                 state.interface_pending = false;
                 state.type_pending = false;
@@ -1403,6 +1718,7 @@ fn analyze_ts(
                 emitted
             } else if state.fn_pending {
                 let emitted = Some(push_semantic(
+                    src,
                     chunk,
                     token,
                     SemanticKind::FunctionDefinition,
@@ -1411,16 +1727,16 @@ fn analyze_ts(
                 state.param_header_pending = true;
                 emitted
             } else if state.var_pending {
-                let idx = push_semantic(chunk, token, SemanticKind::VariableDefinition);
+                let idx = push_semantic(src, chunk, token, SemanticKind::VariableDefinition);
                 state.recent_var_def = Some(idx);
                 state.var_pending = false;
                 Some(idx)
             } else if option_usize_eq(state.param_depth, state.paren_depth) {
-                Some(push_semantic(chunk, token, SemanticKind::Parameter))
+                Some(push_semantic(src, chunk, token, SemanticKind::Parameter))
             } else if state.after_dot {
-                Some(push_semantic(chunk, token, SemanticKind::Field))
+                Some(push_semantic(src, chunk, token, SemanticKind::FieldAccess))
             } else if state.pending_type {
-                Some(push_semantic(chunk, token, SemanticKind::TypeName))
+                Some(push_semantic(src, chunk, token, SemanticKind::TypeName))
             } else if option_usize_eq(state.class_body_depth, state.brace_depth)
                 || option_usize_eq(state.interface_body_depth, state.brace_depth)
             {
@@ -1429,15 +1745,15 @@ fn analyze_ts(
                 } else {
                     SemanticKind::FieldDefinition
                 };
-                let emitted = Some(push_semantic(chunk, token, kind));
+                let emitted = Some(push_semantic(src, chunk, token, kind));
                 if kind == SemanticKind::MethodDefinition {
                     state.param_header_pending = true;
                 }
                 emitted
             } else if state.call_depths.contains(state.paren_depth) {
-                Some(push_semantic(chunk, token, SemanticKind::Argument))
+                Some(push_semantic(src, chunk, token, SemanticKind::Argument))
             } else {
-                Some(push_semantic(chunk, token, SemanticKind::Variable))
+                Some(push_semantic(src, chunk, token, SemanticKind::Variable))
             };
 
             if let Some(idx) = emitted {
@@ -1566,27 +1882,27 @@ fn analyze_c(
         }
         _ if is_ident(token, Language::C) => {
             if state.struct_tag_pending || state.enum_tag_pending {
-                push_semantic(chunk, token, SemanticKind::TypeDefinition);
+                push_semantic(src, chunk, token, SemanticKind::TypeDefinition);
                 state.struct_tag_pending = false;
                 state.enum_tag_pending = false;
             } else if state.after_member {
-                push_semantic(chunk, token, SemanticKind::Field);
+                push_semantic(src, chunk, token, SemanticKind::FieldAccess);
                 state.after_member = false;
             } else if option_usize_eq(state.param_depth, state.paren_depth) {
-                push_semantic(chunk, token, SemanticKind::Parameter);
+                push_semantic(src, chunk, token, SemanticKind::Parameter);
             } else if option_usize_eq(state.struct_body_depth, state.brace_depth) {
-                push_semantic(chunk, token, SemanticKind::FieldDefinition);
+                push_semantic(src, chunk, token, SemanticKind::FieldDefinition);
             } else if state.decl_mode {
                 if matches!(local_of(next_sig), Some(kind::OPEN_PAREN)) {
-                    push_semantic(chunk, token, SemanticKind::FunctionDefinition);
+                    push_semantic(src, chunk, token, SemanticKind::FunctionDefinition);
                 } else {
-                    push_semantic(chunk, token, SemanticKind::VariableDefinition);
+                    push_semantic(src, chunk, token, SemanticKind::VariableDefinition);
                 }
             } else {
                 if matches!(local_of(next_sig), Some(kind::OPEN_PAREN)) {
-                    push_semantic(chunk, token, SemanticKind::FunctionCall);
+                    push_semantic(src, chunk, token, SemanticKind::FunctionCall);
                 } else {
-                    push_semantic(chunk, token, SemanticKind::Variable);
+                    push_semantic(src, chunk, token, SemanticKind::Variable);
                 }
             }
         }
@@ -2065,7 +2381,7 @@ fn analyze_python(
                             } else if next_is_assign {
                                 Some(SemanticKind::FieldDefinition)
                             } else {
-                                Some(SemanticKind::Field)
+                                Some(SemanticKind::FieldAccess)
                             }
                         } else if is_call {
                             Some(SemanticKind::FunctionCall)
@@ -2085,7 +2401,7 @@ fn analyze_python(
                 } else if next_is_assign {
                     Some(SemanticKind::FieldDefinition)
                 } else {
-                    Some(SemanticKind::Field)
+                    Some(SemanticKind::FieldAccess)
                 }
             } else if line_head && py_depth_all_zero(state) {
                 if is_call {
@@ -2112,7 +2428,7 @@ fn analyze_python(
             };
 
             if let Some(kind) = kind {
-                let idx = push_semantic(chunk, token, kind);
+                let idx = push_semantic(src, chunk, token, kind);
                 if collect_assign_candidate {
                     py_push_assign_candidate(state, idx);
                 }

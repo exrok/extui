@@ -8,13 +8,21 @@ fn apply(old: &str, span: Span, new: &str) -> String {
     s
 }
 
-fn semantic_dump(language: Language, src: &str) -> Vec<(Span, tinyhl::SemanticKind, u8, u8)> {
+fn semantic_dump(language: Language, src: &str) -> Vec<(Span, tinyhl::SemanticKind, bool, u8, u8)> {
     let source: &dyn Source = &src;
     let tokens = TokenTable::new(language, source);
     let semantic = SemanticTable::new(&tokens, source);
     semantic
         .query(Span::new(0, semantic.source_len()))
-        .map(|token| (token.span, token.kind, token.lang_tag, token.nest))
+        .map(|token| {
+            (
+                token.span,
+                token.kind,
+                token.type_styled,
+                token.lang_tag,
+                token.nest,
+            )
+        })
         .collect()
 }
 
@@ -32,7 +40,15 @@ fn assert_incremental_semantics(language: Language, old: &str, edit: Span, repla
     let fresh = semantic_dump(language, &new);
     let mutated: Vec<_> = semantic
         .query(Span::new(0, semantic.source_len()))
-        .map(|token| (token.span, token.kind, token.lang_tag, token.nest))
+        .map(|token| {
+            (
+                token.span,
+                token.kind,
+                token.type_styled,
+                token.lang_tag,
+                token.nest,
+            )
+        })
         .collect();
 
     assert_eq!(
@@ -67,6 +83,78 @@ fn rust_pattern_semantic_insert_delete_sweep() {
             continue;
         }
         for ins in ["x", "1", " ", ":", "(", "{", ".", "=", "Some", "let", "\n"] {
+            assert_incremental_semantics(Language::Rust, source, Span::new(off as u32, 0), ins);
+        }
+    }
+    for off in 0..source.len() {
+        if source.is_char_boundary(off) && source.is_char_boundary(off + 1) {
+            assert_incremental_semantics(Language::Rust, source, Span::new(off as u32, 1), "");
+        }
+    }
+}
+
+#[test]
+fn rust_generics_and_qualified_path_semantic_insert_delete_sweep() {
+    // Covers state added for type-position `<...>` regions: generic parameter
+    // lists on definitions (angle_type_pending + angle-scoped type context),
+    // type-alias RHS contexts (started_alias_rhs), `impl Trait for Type`, and
+    // leading qualified-path types `<T as Trait>::method`, including a
+    // `match`-scrutinee qualified path. All introduce canonical state that must
+    // round-trip across chunk boundaries, so a relexed suffix has to converge
+    // to a fresh parse for an edit at every offset.
+    let source = "type Alias<T> = Vec<T>;\nstruct Pair<A: Clone, const N: usize>(A);\ntrait Handler<Req>: Clone {\n    type Out;\n    fn handle<T: Send>(&self, r: Req) -> T;\n}\nimpl Display for Widget {\n    fn fmt(&self) -> Result { Ok(()) }\n}\nfn run<T>(x: T) {\n    let v = <Wrap as Trait>::from(x);\n    let n = size_of::<Item>() as usize * 2;\n    let m = match <Map as Trait>::get(x) { _ => 0 };\n}\n";
+    for off in 0..=source.len() {
+        if !source.is_char_boundary(off) {
+            continue;
+        }
+        for ins in [
+            "x", "1", " ", ":", "<", ">", "(", "{", "as", "::", "for", "T", "\n",
+        ] {
+            assert_incremental_semantics(Language::Rust, source, Span::new(off as u32, 0), ins);
+        }
+    }
+    for off in 0..source.len() {
+        if source.is_char_boundary(off) && source.is_char_boundary(off + 1) {
+            assert_incremental_semantics(Language::Rust, source, Span::new(off as u32, 1), "");
+        }
+    }
+}
+
+#[test]
+fn rust_macro_attr_turbofish_semantic_insert_delete_sweep() {
+    // Covers state added for: `macro_rules!` definition names
+    // (macro_def_pending), metavariables (`$name` -> MetaVariable), member
+    // access (`obj.field` -> FieldAccess), attribute bodies `#[...]`
+    // (attr_bracket_depth), turbofish path-calls whose type args carry inner
+    // `::` paths (`name::<a::B>(...)` pending-call preservation), `fn(T)`
+    // pointer types, and `*const T::path` pointer paths. Every one introduces or
+    // mutates canonical state that must round-trip across chunk boundaries, so a
+    // relexed suffix has to converge to a fresh parse for an edit at every
+    // offset.
+    let source = "macro_rules! mac { ($x:expr, $f:ident) => { $f($x.field) } }\n#[derive(Debug, Clone)]\n#[rustfmt::skip]\nstruct S;\nfn run() {\n    let v = parse::<crate::rpc::Req>(payload);\n    let w = items.collect::<Vec<U::Out>>();\n    let n = parse::<[i64; 2]>(s);\n    let p = &x as *const _ as *const libc::c_void;\n    let q: ::core::cmp::Ordering = z;\n    let f: fn(i32) -> u8 = g;\n}\n";
+    for off in 0..=source.len() {
+        if !source.is_char_boundary(off) {
+            continue;
+        }
+        for ins in [
+            "x",
+            "1",
+            " ",
+            ":",
+            "(",
+            "{",
+            "<",
+            ">",
+            "!",
+            "#",
+            "[",
+            ".",
+            "$",
+            "::",
+            "fn",
+            "macro_rules",
+            "\n",
+        ] {
             assert_incremental_semantics(Language::Rust, source, Span::new(off as u32, 0), ins);
         }
     }

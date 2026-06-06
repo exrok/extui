@@ -15,6 +15,21 @@ fn semantic_pairs(language: Language, src: &str) -> Vec<(String, SemanticKind)> 
         .collect()
 }
 
+fn semantic_display_pairs(language: Language, src: &str) -> Vec<(String, SemanticKind)> {
+    let source: &dyn Source = &src;
+    let tokens = TokenTable::new(language, source);
+    let semantic = SemanticTable::new(&tokens, source);
+    semantic
+        .query(Span::new(0, semantic.source_len()))
+        .map(|token| {
+            (
+                src[token.span.offset as usize..token.span.end() as usize].to_string(),
+                token.display_kind(),
+            )
+        })
+        .collect()
+}
+
 fn assert_has(pairs: &[(String, SemanticKind)], text: &str, kind: SemanticKind) {
     assert!(
         pairs.iter().any(|(t, k)| t == text && *k == kind),
@@ -56,6 +71,53 @@ impl Foo {
     assert_has(&pairs, "local", SemanticKind::VariableDefinition);
     assert_has(&pairs, "local", SemanticKind::Variable);
     assert_has(&pairs, "arg", SemanticKind::Argument);
+}
+
+#[test]
+fn rust_macro_attr_and_path_turbofish_roles() {
+    let src = r#"
+macro_rules! gen { () => {} }
+
+#[derive(Debug, Clone)]
+#[rustfmt::skip]
+struct Holder;
+
+fn run(payload: Bytes) {
+    let a = jsony::from_binary::<crate::rpc::Req>(payload);
+    let b = thing.cast::<Wrap<Inner::Kind>>();
+    let c = parse::<[i64; 2]>(payload);
+    let p = &x as *const _ as *const libc::c_void;
+    let __r: ::std::vec::Vec<u8> = make();
+}
+"#;
+    let pairs = semantic_pairs(Language::Rust, src);
+    // `macro_rules! name` — the defined name is a function definition.
+    assert_has(&pairs, "gen", SemanticKind::FunctionDefinition);
+    // Attribute bodies are neutral: `derive`/`rustfmt`/`skip` are not calls or
+    // path segments. (`Debug`/`Clone` stay as-is — the case rule tans them.)
+    assert_has(&pairs, "derive", SemanticKind::Variable);
+    assert_lacks(&pairs, "derive", SemanticKind::FunctionCall);
+    assert_has(&pairs, "rustfmt", SemanticKind::Variable);
+    assert_lacks(&pairs, "rustfmt", SemanticKind::PathComponent);
+    assert_has(&pairs, "skip", SemanticKind::Variable);
+    // A turbofish call whose type args carry inner `::` paths still promotes
+    // the call name, and the inner segments stay path components / types.
+    assert_has(&pairs, "from_binary", SemanticKind::FunctionCall);
+    assert_lacks(&pairs, "from_binary", SemanticKind::PathComponent);
+    assert_has(&pairs, "rpc", SemanticKind::PathComponent);
+    assert_has(&pairs, "Req", SemanticKind::TypeName);
+    // Method turbofish with a nested path argument.
+    assert_has(&pairs, "cast", SemanticKind::MethodCall);
+    assert_has(&pairs, "Inner", SemanticKind::PathComponent);
+    // A `;` inside an array-type turbofish arg must not break the promotion.
+    assert_has(&pairs, "parse", SemanticKind::FunctionCall);
+    // `*const T::path`: a pointer path, not a `const` binding name.
+    assert_has(&pairs, "libc", SemanticKind::PathComponent);
+    assert_lacks(&pairs, "libc", SemanticKind::VariableDefinition);
+    // `let __r: ::std::...`: the leading-`::` absolute path in the annotation
+    // must not make the binding read as a path segment.
+    assert_has(&pairs, "__r", SemanticKind::VariableDefinition);
+    assert_lacks(&pairs, "__r", SemanticKind::PathComponent);
 }
 
 #[test]
@@ -173,6 +235,130 @@ fn main() {
 }
 
 #[test]
+fn rust_generic_params_are_type_positions() {
+    // `GenericParams` after a definition name open a type-position region: the
+    // parameters and their bounds are types, not value expressions.
+    let src = r#"
+fn convert<Item: Iterator, Out>(x: Item) -> Out where Out: Clone { todo!() }
+struct Pair<Lhs: Clone, Rhs>(Lhs, Rhs);
+trait Sink<Msg>: Clone { type Output; }
+type Alias<Elem> = Container<Elem>;
+"#;
+    let pairs = semantic_pairs(Language::Rust, src);
+    // Function generics + their bounds.
+    assert_has(&pairs, "Item", SemanticKind::TypeName);
+    assert_has(&pairs, "Iterator", SemanticKind::TypeName);
+    assert_has(&pairs, "Out", SemanticKind::TypeName);
+    assert_lacks(&pairs, "Item", SemanticKind::Variable);
+    assert_lacks(&pairs, "Iterator", SemanticKind::Variable);
+    // Struct / trait generics.
+    assert_has(&pairs, "Lhs", SemanticKind::TypeName);
+    assert_has(&pairs, "Rhs", SemanticKind::TypeName);
+    assert_has(&pairs, "Msg", SemanticKind::TypeName);
+    // Type-alias generics and RHS.
+    assert_has(&pairs, "Elem", SemanticKind::TypeName);
+    assert_has(&pairs, "Container", SemanticKind::TypeName);
+    assert_lacks(&pairs, "Container", SemanticKind::Variable);
+}
+
+#[test]
+fn rust_impl_for_and_qualified_path_roles() {
+    let src = r#"
+impl Display for Widget {
+    fn fmt(&self) -> Result { Ok(()) }
+}
+fn run(x: Input) {
+    let v = <Wrap as Convert>::from(x);
+    let n = core::mem::size_of::<Cell>() as usize * 2;
+    let m = match <Map as Lookup>::get(x) { _ => 0 };
+}
+"#;
+    let pairs = semantic_pairs(Language::Rust, src);
+    // The implementing type after `for` is a type, not a value.
+    assert_has(&pairs, "Widget", SemanticKind::TypeName);
+    assert_lacks(&pairs, "Widget", SemanticKind::Variable);
+    // A leading qualified-path type `<Wrap as Convert>::from(..)`: the angle
+    // body is types, and the trailing segment is the call.
+    assert_has(&pairs, "Wrap", SemanticKind::TypeName);
+    assert_has(&pairs, "Convert", SemanticKind::TypeName);
+    assert_has(&pairs, "from", SemanticKind::FunctionCall);
+    assert_lacks(&pairs, "from", SemanticKind::TypeName);
+    // A cast target does not bleed into the following multiplication: the
+    // turbofish call still promotes.
+    assert_has(&pairs, "size_of", SemanticKind::FunctionCall);
+    assert_has(&pairs, "Cell", SemanticKind::TypeName);
+    // A qualified path in `match` scrutinee position works too.
+    assert_has(&pairs, "Map", SemanticKind::TypeName);
+    assert_has(&pairs, "get", SemanticKind::FunctionCall);
+    assert_lacks(&pairs, "get", SemanticKind::TypeName);
+}
+
+#[test]
+fn rust_field_access_vs_field_key() {
+    let src = r#"
+struct P { field: u8 }
+fn main() {
+    let p = P { field: 1 };
+    let z = p.field;
+}
+"#;
+    let pairs = semantic_pairs(Language::Rust, src);
+    // The same name fills three distinct roles, each its own kind.
+    assert_has(&pairs, "field", SemanticKind::FieldDefinition);
+    assert_has(&pairs, "field", SemanticKind::Field); // struct-literal key
+    assert_has(&pairs, "field", SemanticKind::FieldAccess); // member access
+}
+
+#[test]
+fn rust_macro_metavariables() {
+    let src = r#"
+macro_rules! m {
+    ($val:expr, $f:ident, $Ty:ty) => {
+        $f($val);
+        $Ty::new()
+    };
+}
+"#;
+    let pairs = semantic_pairs(Language::Rust, src);
+    // Every `$name` is a metavariable, never a call/argument/path.
+    assert_has(&pairs, "val", SemanticKind::MetaVariable);
+    assert_has(&pairs, "f", SemanticKind::MetaVariable);
+    assert_has(&pairs, "Ty", SemanticKind::MetaVariable);
+    assert_lacks(&pairs, "f", SemanticKind::FunctionCall);
+    assert_lacks(&pairs, "val", SemanticKind::Argument);
+    assert_lacks(&pairs, "Ty", SemanticKind::PathComponent);
+
+    // Casing folds in via `display_kind`: uppercase metavariable renders as a
+    // type, lowercase stays neutral.
+    let display = semantic_display_pairs(Language::Rust, src);
+    assert_has(&display, "val", SemanticKind::MetaVariable);
+    assert_has(&display, "Ty", SemanticKind::TypeName);
+}
+
+#[test]
+fn rust_type_styled_display_kind() {
+    let src = r#"
+fn main() {
+    let x = Foo;
+    let y = Some(1);
+    let z = u32;
+    let w = local;
+}
+"#;
+    let display = semantic_display_pairs(Language::Rust, src);
+    // UpperCamel and primitive names render as a type by spelling...
+    assert_has(&display, "Foo", SemanticKind::TypeName);
+    assert_has(&display, "Some", SemanticKind::TypeName);
+    assert_has(&display, "u32", SemanticKind::TypeName);
+    // ...while a lowercase local stays neutral.
+    assert_has(&display, "local", SemanticKind::Variable);
+    // The structural kind is preserved: a constructor is still a call.
+    let structural = semantic_pairs(Language::Rust, src);
+    assert_has(&structural, "Some", SemanticKind::FunctionCall);
+    assert_lacks(&structural, "Foo", SemanticKind::TypeName);
+}
+
+#[test]
 fn ts_semantic_categories() {
     let src = r#"
 class Counter {
@@ -222,8 +408,8 @@ int main(void) {
     assert_has(&pairs, "distance", SemanticKind::FunctionDefinition);
     assert_has(&pairs, "a", SemanticKind::Parameter);
     assert_has(&pairs, "b", SemanticKind::Parameter);
-    assert_has(&pairs, "x", SemanticKind::Field);
-    assert_has(&pairs, "y", SemanticKind::Field);
+    assert_has(&pairs, "x", SemanticKind::FieldAccess);
+    assert_has(&pairs, "y", SemanticKind::FieldAccess);
     assert_has(&pairs, "main", SemanticKind::FunctionDefinition);
     assert_has(&pairs, "p", SemanticKind::VariableDefinition);
     assert_has(&pairs, "distance", SemanticKind::FunctionCall);
@@ -248,7 +434,7 @@ static int distance(struct point *a, struct point *b) {
     assert_has(&pairs, "x", SemanticKind::FieldDefinition);
     assert_has(&pairs, "distance", SemanticKind::FunctionDefinition);
     assert_has(&pairs, "a", SemanticKind::Parameter);
-    assert_has(&pairs, "x", SemanticKind::Field);
+    assert_has(&pairs, "x", SemanticKind::FieldAccess);
 }
 
 #[test]
@@ -292,7 +478,7 @@ print(result, system)
     assert_has(&pairs, "Base", SemanticKind::TypeName);
     // Fields through member access.
     assert_has(&pairs, "x", SemanticKind::FieldDefinition);
-    assert_has(&pairs, "x", SemanticKind::Field);
+    assert_has(&pairs, "x", SemanticKind::FieldAccess);
     // Calls.
     assert_has(&pairs, "Point", SemanticKind::FunctionCall);
     assert_has(&pairs, "make", SemanticKind::FunctionCall);

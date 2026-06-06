@@ -463,13 +463,16 @@ fn semantic_class(kind: SemanticKind) -> Option<&'static str> {
         SemanticKind::FunctionDefinition
         | SemanticKind::FunctionCall
         | SemanticKind::MethodDefinition
-        | SemanticKind::MethodCall => Some("sem-fn"),
+        | SemanticKind::MethodCall
+        | SemanticKind::MacroCall => Some("sem-fn"),
         SemanticKind::Parameter => Some("sem-param"),
         SemanticKind::Argument => Some("sem-arg"),
         SemanticKind::VariableDefinition => Some("sem-var-def"),
         SemanticKind::FieldDefinition | SemanticKind::Field => Some("sem-field"),
+        SemanticKind::FieldAccess => Some("sem-field-access"),
         SemanticKind::PathComponent => Some("sem-path"),
-        SemanticKind::Variable => None,
+        SemanticKind::Lifetime => Some("sem-lifetime"),
+        SemanticKind::Variable | SemanticKind::MetaVariable => None,
     }
 }
 
@@ -487,7 +490,11 @@ fn semantic_kind_name(kind: SemanticKind) -> &'static str {
         SemanticKind::Variable => "variable",
         SemanticKind::FieldDefinition => "field-definition",
         SemanticKind::Field => "field",
+        SemanticKind::FieldAccess => "field-access",
         SemanticKind::PathComponent => "path-component",
+        SemanticKind::MetaVariable => "meta-variable",
+        SemanticKind::MacroCall => "macro-call",
+        SemanticKind::Lifetime => "lifetime",
     }
 }
 

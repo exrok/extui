@@ -37,6 +37,7 @@ pub(crate) mod dispatch;
 mod highlighter;
 pub mod kind;
 pub mod lex;
+pub mod render;
 pub mod semantic;
 pub mod source;
 pub mod state;
@@ -45,6 +46,7 @@ pub mod token;
 
 pub use delimiter::{DelimiterKind, DelimiterTable, RainbowDelimiter};
 pub use highlighter::{Highlighter, Overlays};
+pub use render::{RenderSpan, RenderSpans};
 pub use semantic::{SemanticKind, SemanticTable, SemanticToken};
 pub use source::Source;
 pub(crate) use source::SourceView;
