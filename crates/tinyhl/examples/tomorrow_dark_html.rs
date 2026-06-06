@@ -1,17 +1,35 @@
-use std::collections::BTreeMap;
+//! HTML preview that mirrors the giallo-verify color mapping.
+//!
+//! This renders a source file through tinyhl's [`RenderSpans`] and colors each
+//! span with the exact base16-tomorrow palette and mapping the `giallo-verify`
+//! harness uses. The statistical harness reports *where* tinyhl and giallo
+//! disagree. This preview lets you *see* tinyhl's own output under the same
+//! palette, so a suspected mis-color can be confirmed by eye. Click any token
+//! to inspect the lexical kind, semantic role, delimiter depth, and resolved
+//! color that produced it.
+//!
+//! ```text
+//! cargo run --example tomorrow_dark_html -- rust src/lib.rs > preview.html
+//! ```
+
 use std::env;
 use std::fs;
 use std::io::{self, Read};
 
-use tinyhl::{
-    DelimiterTable, Language, SemanticKind, SemanticTable, Source, Span, Token, TokenTable,
-};
+use tinyhl::{Highlighter, Language, RenderSpan, RenderSpans, SemanticKind, Source, Span, kind};
 
-#[derive(Clone, Copy)]
-struct SpanInfo {
-    semantic: Option<SemanticKind>,
-    delimiter: Option<(u16, bool)>,
-}
+// base16-tomorrow palette, identical to `giallo-verify`'s constants (as
+// `Color::as_hex` emits them: uppercase, 6-digit). Keep these in sync with
+// `crates/giallo-verify/src/main.rs` so the preview matches the harness.
+const FG: &str = "#B5B8B6"; // editor.foreground / default text
+const TYPE: &str = "#E6C890"; // entity.name.type (any UpperCamel / primitive / const)
+const FUNC: &str = "#92AABC"; // entity.name.function
+const BINDING: &str = "#C47D7A"; // variable.declaration / variable.field / parameter
+const NAMESPACE: &str = "#D4A07A"; // entity.name.namespace (lowercase path segments)
+const KEYWORD: &str = "#B6A2BA"; // keyword / storage / self / crate
+const STRING: &str = "#BBBE85"; // string
+const NUMBER: &str = "#CCCCCC"; // constant.numeric
+const COMMENT: &str = "#7E7F7E"; // comment
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = env::args().skip(1);
@@ -38,18 +56,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 fn render_html(language: Language, src: &str) -> String {
     let source: &dyn Source = &src;
-    let tokens = TokenTable::new(language, source);
-    let semantic = SemanticTable::new(&tokens, source);
-    let delimiters = DelimiterTable::new(&tokens);
-
-    let semantic_by_offset: BTreeMap<u32, SemanticKind> = semantic
-        .query(Span::new(0, semantic.source_len()))
-        .map(|token| (token.span.offset, token.kind))
-        .collect();
-    let delimiter_by_offset: BTreeMap<u32, (u16, bool)> = delimiters
-        .query(Span::new(0, delimiters.source_len()))
-        .map(|token| (token.span.offset, (token.depth, token.is_open)))
-        .collect();
+    let mut hl = Highlighter::new(language);
+    hl.rebuild(source);
+    let full = Span::new(0, hl.table().map(|t| t.source_len()).unwrap_or(0));
 
     let mut html = String::new();
     html.push_str(
@@ -58,20 +67,12 @@ fn render_html(language: Language, src: &str) -> String {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>TinyHL Preview</title>
+  <title>TinyHL base16-tomorrow Preview</title>
   <style>
     :root {
-      --bg: #1d1f21;
-      --fg: #c5c8c6;
+      --bg: #1e1e1f;
+      --fg: #b5b8b6;
       --gutter: #969896;
-      --comment: #969896;
-      --red: #cc6666;
-      --orange: #de935f;
-      --yellow: #f0c674;
-      --green: #b5bd68;
-      --aqua: #8abeb7;
-      --blue: #81a2be;
-      --purple: #b294bb;
       --selection: #373b41;
     }
     * { box-sizing: border-box; }
@@ -87,16 +88,13 @@ fn render_html(language: Language, src: &str) -> String {
       display: grid;
       grid-template-columns: minmax(0, 1fr) 320px;
       gap: 24px;
-      background:
-        radial-gradient(circle at top left, rgba(129,162,190,0.16), transparent 28rem),
-        radial-gradient(circle at bottom right, rgba(178,148,187,0.12), transparent 24rem),
-        var(--bg);
+      background: var(--bg);
     }
     .frame {
       max-width: 1100px;
       margin: 0 auto;
       border: 1px solid #282a2e;
-      background: #151618;
+      background: #161617;
       box-shadow: 0 24px 60px rgba(0,0,0,0.35);
       overflow: hidden;
     }
@@ -105,7 +103,7 @@ fn render_html(language: Language, src: &str) -> String {
       position: sticky;
       top: 24px;
       border: 1px solid #282a2e;
-      background: rgba(21,22,24,0.94);
+      background: rgba(22,22,23,0.94);
       box-shadow: 0 24px 60px rgba(0,0,0,0.28);
       backdrop-filter: blur(8px);
     }
@@ -127,9 +125,9 @@ fn render_html(language: Language, src: &str) -> String {
       border-radius: 50%;
       background: #373b41;
     }
-    .toolbar .dot:nth-child(1) { background: var(--red); }
-    .toolbar .dot:nth-child(2) { background: var(--yellow); }
-    .toolbar .dot:nth-child(3) { background: var(--green); }
+    .toolbar .dot:nth-child(1) { background: #cc6666; }
+    .toolbar .dot:nth-child(2) { background: #f0c674; }
+    .toolbar .dot:nth-child(3) { background: #b5bd68; }
     pre {
       margin: 0;
       padding: 24px;
@@ -149,29 +147,6 @@ fn render_html(language: Language, src: &str) -> String {
       background: rgba(129,162,190,0.18);
       box-shadow: inset 0 0 0 1px rgba(129,162,190,0.55);
     }
-    .tok-comment { color: var(--comment); font-style: italic; }
-    .tok-string { color: var(--green); }
-    .tok-number { color: var(--orange); }
-    .tok-keyword { color: var(--purple); }
-    .tok-error { color: var(--red); background: rgba(204,102,102,0.16); }
-    .tok-punct { color: #c5c8c6; }
-    .tok-markup { color: var(--blue); }
-    .tok-entity { color: var(--orange); }
-    .tok-heading { color: var(--blue); font-weight: 700; }
-    .tok-link { color: var(--aqua); text-decoration: underline; text-decoration-color: rgba(138,190,183,0.45); }
-    .sem-type { color: var(--yellow); }
-    .sem-fn { color: var(--blue); }
-    .sem-param { color: #d7ba7d; }
-    .sem-arg { color: #e5c07b; }
-    .sem-var-def { color: #cc6666; }
-    .sem-field { color: var(--aqua); }
-    .sem-path { color: #d19a66; }
-    .rainbow-0 { color: var(--purple); font-weight: 700; }
-    .rainbow-1 { color: var(--blue); font-weight: 700; }
-    .rainbow-2 { color: var(--green); font-weight: 700; }
-    .rainbow-3 { color: var(--orange); font-weight: 700; }
-    .rainbow-4 { color: var(--aqua); font-weight: 700; }
-    .rainbow-5 { color: var(--red); font-weight: 700; }
     .panel {
       padding: 18px 20px 20px;
     }
@@ -203,6 +178,15 @@ fn render_html(language: Language, src: &str) -> String {
       border-radius: 4px;
       background: var(--selection);
     }
+    .swatch {
+      display: inline-block;
+      width: 11px;
+      height: 11px;
+      border-radius: 3px;
+      margin-right: 6px;
+      vertical-align: -1px;
+      border: 1px solid rgba(255,255,255,0.2);
+    }
     .panel-list {
       margin: 0;
       padding-left: 18px;
@@ -230,65 +214,55 @@ fn render_html(language: Language, src: &str) -> String {
         <span class="dot"></span>
 "#,
     );
-    html.push_str(&escape_html(&format!(
-        "{language:?} - TinyHL Tomorrow Dark Preview"
-    )));
+    html.push_str(&escape_html(&format!("{language:?} - TinyHL base16-tomorrow")));
     html.push_str(
         r#"
       </div>
       <pre><code id="code-view">"#,
     );
 
-    for token in tokens.query(Span::new(0, tokens.source_len())) {
-        let text = &src[token.span.offset as usize..token.span.end() as usize];
-        if is_whitespace(token) {
+    for rspan in RenderSpans::new(&hl, full) {
+        let text = &src[rspan.span.offset as usize..rspan.span.end() as usize];
+        if rspan.local_kind == kind::WHITESPACE {
             html.push_str(&escape_html(text));
             continue;
         }
 
-        let info = SpanInfo {
-            semantic: semantic_by_offset.get(&token.span.offset).copied(),
-            delimiter: delimiter_by_offset.get(&token.span.offset).copied(),
+        let color = render_color(&rspan).unwrap_or(FG);
+        let role = color_name(color);
+        let lang = Language::from_tag(rspan.lang_tag);
+        let semantic_name = match rspan.semantic {
+            Some(kind) => semantic_kind_name(kind),
+            None => "none",
         };
-        let mut classes = Vec::new();
-        classes.push("token");
-        classes.push(base_class(token));
-        if let Some(kind) = info.semantic {
-            if let Some(class) = semantic_class(kind) {
-                classes.push(class);
-            }
-        }
-        if let Some((depth, _is_open)) = info.delimiter {
-            classes.push(rainbow_class(depth));
-        }
+        let delimiter = match rspan.delimiter {
+            Some(depth) => format!("rainbow depth {depth}"),
+            None => "none".to_string(),
+        };
+        let explanation = explanation_lines(&rspan, color, role, lang);
 
-        let explanation = explanation_lines(token, info);
-        html.push_str(r#"<span tabindex="0" class=""#);
-        html.push_str(classes.join(" ").as_str());
+        html.push_str(r#"<span tabindex="0" class="token" style="color: "#);
+        html.push_str(color);
         html.push_str(r#"" data-text=""#);
         html.push_str(&escape_html_attr(text));
         html.push_str(r#"" data-language=""#);
-        html.push_str(token.language().tag().to_string().as_str());
+        html.push_str(rspan.lang_tag.to_string().as_str());
         html.push_str(r#"" data-language-name=""#);
-        html.push_str(&escape_html_attr(&format!("{:?}", token.language())));
+        html.push_str(&escape_html_attr(&format!("{lang:?}")));
         html.push_str(r#"" data-offset=""#);
-        html.push_str(token.span.offset.to_string().as_str());
+        html.push_str(rspan.span.offset.to_string().as_str());
         html.push_str(r#"" data-len=""#);
-        html.push_str(token.span.len.to_string().as_str());
-        html.push_str(r#"" data-base=""#);
-        html.push_str(&escape_html_attr(base_label(token)));
+        html.push_str(rspan.span.len.to_string().as_str());
+        html.push_str(r#"" data-color=""#);
+        html.push_str(color);
+        html.push_str(r#"" data-role=""#);
+        html.push_str(role);
         html.push_str(r#"" data-local-kind=""#);
-        html.push_str(&escape_html_attr(local_kind_name(token)));
+        html.push_str(&escape_html_attr(local_kind_name(rspan.local_kind)));
         html.push_str(r#"" data-semantic=""#);
-        html.push_str(&escape_html_attr(
-            &info
-                .semantic
-                .map(semantic_kind_name)
-                .unwrap_or("none")
-                .to_string(),
-        ));
+        html.push_str(&escape_html_attr(semantic_name));
         html.push_str(r#"" data-delimiter=""#);
-        html.push_str(&escape_html_attr(&delimiter_label(info.delimiter)));
+        html.push_str(&escape_html_attr(&delimiter));
         html.push_str(r#"" data-explanation=""#);
         html.push_str(&escape_html_attr(&explanation.join("\n")));
         html.push_str(r#"">"#);
@@ -321,11 +295,15 @@ fn render_html(language: Language, src: &str) -> String {
           <div class="panel-value" id="inspector-span">-</div>
         </div>
         <div class="panel-row">
-          <div class="panel-label">Lexical Class</div>
+          <div class="panel-label">Resolved Color</div>
+          <div class="panel-value" id="inspector-color">-</div>
+        </div>
+        <div class="panel-row">
+          <div class="panel-label">Lexical Kind</div>
           <div class="panel-value" id="inspector-base">-</div>
         </div>
         <div class="panel-row">
-          <div class="panel-label">Semantic Class</div>
+          <div class="panel-label">Semantic Role</div>
           <div class="panel-value" id="inspector-semantic">-</div>
         </div>
         <div class="panel-row">
@@ -347,6 +325,7 @@ fn render_html(language: Language, src: &str) -> String {
       const text = document.getElementById('inspector-text');
       const language = document.getElementById('inspector-language');
       const span = document.getElementById('inspector-span');
+      const color = document.getElementById('inspector-color');
       const base = document.getElementById('inspector-base');
       const semantic = document.getElementById('inspector-semantic');
       const delimiter = document.getElementById('inspector-delimiter');
@@ -364,8 +343,10 @@ fn render_html(language: Language, src: &str) -> String {
         text.textContent = node.dataset.text;
         language.textContent = `${node.dataset.languageName} (tag ${node.dataset.language})`;
         span.textContent = `offset ${node.dataset.offset}, len ${node.dataset.len}`;
-        base.textContent = `${node.dataset.base} via lexical kind ${node.dataset.localKind}`;
-        semantic.textContent = node.dataset.semantic === 'none' ? 'none' : node.dataset.semantic;
+        const hex = node.dataset.color;
+        color.innerHTML = `<span class="swatch" style="background:${hex}"></span>${node.dataset.role} (${hex})`;
+        base.textContent = node.dataset.localKind;
+        semantic.textContent = node.dataset.semantic;
         delimiter.textContent = node.dataset.delimiter;
         why.innerHTML = '';
         for (const line of node.dataset.explanation.split('\n')) {
@@ -394,6 +375,66 @@ fn render_html(language: Language, src: &str) -> String {
     html
 }
 
+/// Maps a tinyhl [`RenderSpan`] onto the base16-tomorrow palette. This is the
+/// exact mapping `giallo-verify`'s `render_color` uses: base16 has no rainbow
+/// brackets and no distinct operator color, so delimiters, punctuation, errors,
+/// and plain text all take the default foreground.
+fn render_color(span: &RenderSpan) -> Option<&'static str> {
+    if span.delimiter.is_some() {
+        return Some(FG);
+    }
+    Some(match span.local_kind {
+        kind::COMMENT | kind::DOC_COMMENT => COMMENT,
+        kind::STRING | kind::CHAR | kind::TEMPLATE_STRING | kind::REGEX => STRING,
+        kind::NUMBER => NUMBER,
+        kind::KEYWORD => match span.semantic {
+            Some(SemanticKind::TypeName | SemanticKind::TypeDefinition) => TYPE,
+            _ => KEYWORD,
+        },
+        // Identifiers, the lifetime name, and the macro `!` take their color
+        // from the semantic role. Untagged ones fall back to plain text.
+        _ => semantic_color(span.semantic).unwrap_or(FG),
+    })
+}
+
+/// Maps a render-ready [`SemanticKind`] to its base16 color, or [`None`] for
+/// the roles base16 leaves as plain text.
+fn semantic_color(semantic: Option<SemanticKind>) -> Option<&'static str> {
+    Some(match semantic? {
+        SemanticKind::TypeDefinition | SemanticKind::TypeName => TYPE,
+        SemanticKind::FunctionDefinition
+        | SemanticKind::FunctionCall
+        | SemanticKind::MethodDefinition
+        | SemanticKind::MethodCall
+        | SemanticKind::MacroCall => FUNC,
+        SemanticKind::PathComponent => NAMESPACE,
+        SemanticKind::VariableDefinition
+        | SemanticKind::Parameter
+        | SemanticKind::FieldDefinition
+        | SemanticKind::Field
+        | SemanticKind::Lifetime => BINDING,
+        SemanticKind::FieldAccess
+        | SemanticKind::Variable
+        | SemanticKind::Argument
+        | SemanticKind::MetaVariable => return None,
+    })
+}
+
+/// Human-readable palette role for a resolved color, for the inspector.
+fn color_name(color: &str) -> &'static str {
+    match color {
+        TYPE => "type",
+        FUNC => "function",
+        BINDING => "binding",
+        NAMESPACE => "namespace",
+        KEYWORD => "keyword",
+        STRING => "string",
+        NUMBER => "number",
+        COMMENT => "comment",
+        _ => "default",
+    }
+}
+
 fn parse_language(arg: &str) -> Result<Language, String> {
     match arg.to_ascii_lowercase().as_str() {
         "json" => Ok(Language::Json),
@@ -419,61 +460,35 @@ fn parse_language(arg: &str) -> Result<Language, String> {
     }
 }
 
-fn is_whitespace(token: Token) -> bool {
-    token.local_kind() == tinyhl::kind::WHITESPACE
-}
-
-fn base_class(token: Token) -> &'static str {
-    use tinyhl::kind;
-    match token.local_kind() {
-        kind::STRING | kind::TEMPLATE_STRING | kind::REGEX | kind::CHAR => "tok-string",
-        kind::NUMBER => "tok-number",
-        kind::KEYWORD => "tok-keyword",
-        kind::COMMENT | kind::DOC_COMMENT => "tok-comment",
-        kind::ERROR => "tok-error",
-        kind::TAG_NAME | kind::ATTR_NAME => "tok-markup",
-        kind::ENTITY_REF => "tok-entity",
-        kind::CDATA => "tok-string",
-        kind::DOCTYPE => "tok-keyword",
-        kind::HEADING_MARKER | kind::HEADING_TEXT => "tok-heading",
-        kind::LINK_URL | kind::LINK_TEXT => "tok-link",
-        kind::CODE_INLINE | kind::CODE_FENCE | kind::CODE_BLOCK => "tok-string",
-        _ => "tok-punct",
+fn explanation_lines(span: &RenderSpan, color: &str, role: &str, lang: Language) -> Vec<String> {
+    let mut lines = Vec::new();
+    lines.push(format!(
+        "Lexical kind {}.",
+        local_kind_name(span.local_kind)
+    ));
+    match span.semantic {
+        Some(kind) => lines.push(format!(
+            "Semantic overlay marks this token '{}', which drives the color.",
+            semantic_kind_name(kind)
+        )),
+        None => lines.push(
+            "No semantic overlay applies, so the lexical kind drives the color.".to_string(),
+        ),
     }
-}
-
-fn base_label(token: Token) -> &'static str {
-    match base_class(token) {
-        "tok-comment" => "comment",
-        "tok-string" => "string",
-        "tok-number" => "number",
-        "tok-keyword" => "keyword",
-        "tok-error" => "error",
-        "tok-markup" => "markup name",
-        "tok-entity" => "entity reference",
-        "tok-heading" => "heading",
-        "tok-link" => "link",
-        _ => "punctuation / plain token",
+    if let Some(depth) = span.delimiter {
+        lines.push(format!(
+            "Bracket at rainbow depth {depth}. base16-tomorrow has no rainbow brackets, so it stays default text."
+        ));
     }
-}
-
-fn semantic_class(kind: SemanticKind) -> Option<&'static str> {
-    match kind {
-        SemanticKind::TypeDefinition | SemanticKind::TypeName => Some("sem-type"),
-        SemanticKind::FunctionDefinition
-        | SemanticKind::FunctionCall
-        | SemanticKind::MethodDefinition
-        | SemanticKind::MethodCall
-        | SemanticKind::MacroCall => Some("sem-fn"),
-        SemanticKind::Parameter => Some("sem-param"),
-        SemanticKind::Argument => Some("sem-arg"),
-        SemanticKind::VariableDefinition => Some("sem-var-def"),
-        SemanticKind::FieldDefinition | SemanticKind::Field => Some("sem-field"),
-        SemanticKind::FieldAccess => Some("sem-field-access"),
-        SemanticKind::PathComponent => Some("sem-path"),
-        SemanticKind::Lifetime => Some("sem-lifetime"),
-        SemanticKind::Variable | SemanticKind::MetaVariable => None,
-    }
+    lines.push(format!(
+        "Resolved to the {role} color {color} under the base16-tomorrow mapping."
+    ));
+    lines.push(format!(
+        "Language {lang:?}, byte span [{}..{}).",
+        span.span.offset,
+        span.span.end()
+    ));
+    lines
 }
 
 fn semantic_kind_name(kind: SemanticKind) -> &'static str {
@@ -498,63 +513,8 @@ fn semantic_kind_name(kind: SemanticKind) -> &'static str {
     }
 }
 
-fn delimiter_label(info: Option<(u16, bool)>) -> String {
-    match info {
-        Some((depth, true)) => format!("opening delimiter, rainbow depth {depth}"),
-        Some((depth, false)) => format!("closing delimiter, rainbow depth {depth}"),
-        None => "none".to_string(),
-    }
-}
-
-fn rainbow_class(depth: u16) -> &'static str {
-    match depth % 6 {
-        0 => "rainbow-0",
-        1 => "rainbow-1",
-        2 => "rainbow-2",
-        3 => "rainbow-3",
-        4 => "rainbow-4",
-        _ => "rainbow-5",
-    }
-}
-
-fn explanation_lines(token: Token, info: SpanInfo) -> Vec<String> {
-    let mut lines = Vec::new();
-    lines.push(format!(
-        "Base color comes from lexical class '{}' mapped from token kind '{}'.",
-        base_label(token),
-        local_kind_name(token)
-    ));
-
-    if let Some(kind) = info.semantic {
-        lines.push(format!(
-            "Semantic overlay marks this token as '{}', which refines the base lexical color.",
-            semantic_kind_name(kind)
-        ));
-    } else {
-        lines.push(
-            "No semantic overlay applies here, so the lexical class drives the color.".to_string(),
-        );
-    }
-
-    if let Some((depth, is_open)) = info.delimiter {
-        let direction = if is_open { "opening" } else { "closing" };
-        lines.push(format!(
-            "Rainbow delimiter coloring is active because this token is a {direction} delimiter at nesting depth {depth}."
-        ));
-    }
-
-    lines.push(format!(
-        "Rendered in language {:?} at byte span [{}..{}).",
-        token.language(),
-        token.span.offset,
-        token.span.end()
-    ));
-    lines
-}
-
-fn local_kind_name(token: Token) -> &'static str {
-    use tinyhl::kind;
-    match token.local_kind() {
+fn local_kind_name(local: u16) -> &'static str {
+    match local {
         kind::WHITESPACE => "WHITESPACE",
         kind::COMMENT => "COMMENT",
         kind::DOC_COMMENT => "DOC_COMMENT",
@@ -602,6 +562,7 @@ fn local_kind_name(token: Token) -> &'static str {
         kind::COLON_GT => "COLON_GT",
         kind::LT_PERCENT => "LT_PERCENT",
         kind::PERCENT_GT => "PERCENT_GT",
+        kind::COLON_COLON => "COLON_COLON",
         kind::TEXT => "TEXT",
         kind::HEADING_MARKER => "HEADING_MARKER",
         kind::HEADING_TEXT => "HEADING_TEXT",
@@ -618,6 +579,8 @@ fn local_kind_name(token: Token) -> &'static str {
         kind::ENTITY_REF => "ENTITY_REF",
         kind::CDATA => "CDATA",
         kind::DOCTYPE => "DOCTYPE",
+        kind::AT_KEYWORD => "AT_KEYWORD",
+        kind::HASH_TOKEN => "HASH_TOKEN",
         _ => "<other>",
     }
 }
