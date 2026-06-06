@@ -56,6 +56,28 @@ fn rust_semantic_incremental_matches_fresh() {
 }
 
 #[test]
+fn rust_pattern_semantic_insert_delete_sweep() {
+    // Pattern regions add state (pattern_base, Pattern braces) that must stay
+    // canonical across chunk boundaries, so a relexed suffix converges to a
+    // fresh parse for an edit at every offset. Covers let/let-else, tuple,
+    // slice, struct, scoped-path patterns, if-let, while-let, and for.
+    let source = "fn main() {\n    let Some(binding) = Some(22) else { return; };\n    let crate::path::Type { name: [a, b] } = make();\n    let (x, y): (u8, u8) = pair();\n    for (k, v) in items() {}\n    if let Ok(value) = result() {}\n    while let None = opt() {}\n}\n";
+    for off in 0..=source.len() {
+        if !source.is_char_boundary(off) {
+            continue;
+        }
+        for ins in ["x", "1", " ", ":", "(", "{", ".", "=", "Some", "let", "\n"] {
+            assert_incremental_semantics(Language::Rust, source, Span::new(off as u32, 0), ins);
+        }
+    }
+    for off in 0..source.len() {
+        if source.is_char_boundary(off) && source.is_char_boundary(off + 1) {
+            assert_incremental_semantics(Language::Rust, source, Span::new(off as u32, 1), "");
+        }
+    }
+}
+
+#[test]
 fn ts_semantic_incremental_matches_fresh() {
     let source = "class Counter { value: number; inc(step: number): number { return this.value + step; } } const build = (name: Name) => factory.make(name);";
     for (off, len, rep) in [

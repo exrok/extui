@@ -92,6 +92,87 @@ fn use_it(arg_value: FieldTy) {
 }
 
 #[test]
+fn rust_let_pattern_distinguishes_constructor_from_binding() {
+    let src = r#"
+fn main() {
+    let Some(binding) = Some(22) else {
+        return;
+    };
+}
+"#;
+    let pairs = semantic_pairs(Language::Rust, src);
+    // `Some` in pattern position is an enum-variant constructor, not a binding.
+    assert_has(&pairs, "Some", SemanticKind::TypeName);
+    assert_lacks(&pairs, "Some", SemanticKind::VariableDefinition);
+    // `binding` is the real binding.
+    assert_has(&pairs, "binding", SemanticKind::VariableDefinition);
+    assert_lacks(&pairs, "binding", SemanticKind::TypeName);
+    // RHS `Some(22)` is a constructor call (kept distinct from the pattern).
+    assert_has(&pairs, "Some", SemanticKind::FunctionCall);
+}
+
+#[test]
+fn rust_nested_struct_slice_path_pattern() {
+    let src = r#"
+fn main() {
+    let crate::path::Type { name: [binding_1, binding_2] } = make();
+}
+"#;
+    let pairs = semantic_pairs(Language::Rust, src);
+    assert_has(&pairs, "crate", SemanticKind::PathComponent);
+    assert_has(&pairs, "path", SemanticKind::PathComponent);
+    assert_has(&pairs, "Type", SemanticKind::TypeName);
+    // `name` is a field, not a binding.
+    assert_has(&pairs, "name", SemanticKind::Field);
+    assert_lacks(&pairs, "name", SemanticKind::VariableDefinition);
+    // The slice sub-patterns are the bindings.
+    assert_has(&pairs, "binding_1", SemanticKind::VariableDefinition);
+    assert_has(&pairs, "binding_2", SemanticKind::VariableDefinition);
+}
+
+#[test]
+fn rust_assorted_pattern_positions() {
+    let src = r#"
+fn main() {
+    let (a, b) = pair();
+    let None = opt() else { return; };
+    for (k, v) in items() {}
+    if let Ok(value) = result() {}
+    while let Some(item) = next() {}
+}
+"#;
+    let pairs = semantic_pairs(Language::Rust, src);
+    assert_has(&pairs, "a", SemanticKind::VariableDefinition);
+    assert_has(&pairs, "b", SemanticKind::VariableDefinition);
+    // Unit variant in pattern position is a constructor, not a binding.
+    assert_has(&pairs, "None", SemanticKind::TypeName);
+    assert_lacks(&pairs, "None", SemanticKind::VariableDefinition);
+    assert_has(&pairs, "k", SemanticKind::VariableDefinition);
+    assert_has(&pairs, "v", SemanticKind::VariableDefinition);
+    assert_has(&pairs, "Ok", SemanticKind::TypeName);
+    assert_has(&pairs, "value", SemanticKind::VariableDefinition);
+    assert_has(&pairs, "Some", SemanticKind::TypeName);
+    assert_has(&pairs, "item", SemanticKind::VariableDefinition);
+    // Constructors in patterns are never bindings.
+    assert_lacks(&pairs, "Ok", SemanticKind::VariableDefinition);
+    assert_lacks(&pairs, "Some", SemanticKind::VariableDefinition);
+}
+
+#[test]
+fn rust_let_type_annotation_after_pattern() {
+    let src = r#"
+fn main() {
+    let value: Vec<u8> = make();
+}
+"#;
+    let pairs = semantic_pairs(Language::Rust, src);
+    assert_has(&pairs, "value", SemanticKind::VariableDefinition);
+    // The annotation after the pattern is still a type position.
+    assert_has(&pairs, "Vec", SemanticKind::TypeName);
+    assert_lacks(&pairs, "Vec", SemanticKind::VariableDefinition);
+}
+
+#[test]
 fn ts_semantic_categories() {
     let src = r#"
 class Counter {

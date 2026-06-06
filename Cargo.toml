@@ -32,6 +32,7 @@ members = [
     "crates/benchmark",
     "crates/extui-editor",
     "crates/extui-bindings",
+    "crates/giallo-verify",
 ]
 exclude = []
 

@@ -627,6 +627,8 @@ enum RustBraceKind {
     Block,
     RecordFields,
     RecordExpr,
+    /// Braces of a struct pattern, e.g. `Type { field: subpat }`.
+    Pattern,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -647,10 +649,13 @@ struct RustPendingCall {
 struct RustState {
     prev_sig: Option<Token>,
     prev_prev_sig: Option<Token>,
-    let_pending: bool,
+    /// Active pattern region (set by `let`/`for`). While `Some`, identifiers
+    /// are classified as pattern constructors, fields, paths, or bindings
+    /// rather than value expressions. Cleared by a terminator (`=`, `:`, `in`,
+    /// `;`) observed at the region's base depth.
+    pattern_base: Option<RustDepthMark>,
     let_annotation_base: Option<RustDepthMark>,
     item_annotation_base: Option<RustDepthMark>,
-    for_pending: bool,
     fn_pending: bool,
     fn_header_pending: bool,
     type_def_pending: bool,
@@ -722,6 +727,44 @@ fn rust_name_token(src: &dyn Source, token: Token) -> bool {
     is_ident(token, Language::Rust)
         || (kind_local(token.kind) == kind::KEYWORD
             && matches_keyword_any(src, token, &[b"self", b"Self", b"super", b"crate"]))
+}
+
+/// Whether the token's first byte is an ASCII uppercase letter. Used as the
+/// Rust convention for distinguishing a type/constructor (`Some`, `Point`)
+/// from a binding (`x`) in pattern position.
+fn token_starts_upper(src: &dyn Source, token: Token) -> bool {
+    let (base, page) = src.page(token.span.offset);
+    let rel = (token.span.offset - base) as usize;
+    matches!(page.get(rel), Some(b) if b.is_ascii_uppercase())
+}
+
+/// Classify an identifier appearing inside an active pattern region.
+fn rust_classify_pattern_ident(
+    src: &dyn Source,
+    token: Token,
+    next_sig: Option<Token>,
+    next2_sig: Option<Token>,
+    state: &RustState,
+) -> SemanticKind {
+    let path_sep = matches!(local_of(next_sig), Some(kind::COLON))
+        && matches!(local_of(next2_sig), Some(kind::COLON));
+    if path_sep {
+        return SemanticKind::PathComponent;
+    }
+    let in_struct_pat = matches!(rust_current_brace_kind(state), Some(RustBraceKind::Pattern));
+    if in_struct_pat && matches!(local_of(next_sig), Some(kind::COLON)) {
+        return SemanticKind::Field;
+    }
+    if matches!(
+        local_of(next_sig),
+        Some(kind::OPEN_PAREN | kind::OPEN_BRACE)
+    ) {
+        return SemanticKind::TypeName;
+    }
+    if token_starts_upper(src, token) {
+        return SemanticKind::TypeName;
+    }
+    SemanticKind::VariableDefinition
 }
 
 fn rust_type_keyword(src: &dyn Source, token: Token) -> bool {
@@ -854,7 +897,7 @@ fn analyze_rust(
                     state.call_depths.insert(state.paren_depth);
                 }
             } else if let Some(prev) = state.prev_sig {
-                if rust_name_token(src, prev) {
+                if rust_name_token(src, prev) && state.pattern_base.is_none() {
                     state.call_depths.insert(state.paren_depth);
                 }
             }
@@ -895,7 +938,9 @@ fn analyze_rust(
                 state.type_context = None;
             }
             state.brace_depth += 1;
-            let brace_kind = if state.record_fields_pending {
+            let brace_kind = if state.pattern_base.is_some() {
+                RustBraceKind::Pattern
+            } else if state.record_fields_pending {
                 state.record_fields_pending = false;
                 RustBraceKind::RecordFields
             } else if state.record_expr_candidate {
@@ -932,6 +977,11 @@ fn analyze_rust(
                     state.pending_call = None;
                 }
                 state.after_dot = false;
+            } else if matches!(local_of(state.prev_sig), Some(kind::COLON)) {
+                // Second colon of a `::` path separator, not an annotation colon.
+                state.after_dot = false;
+                state.can_start_value_path = false;
+                state.record_expr_candidate = false;
             } else if matches!(
                 rust_current_brace_kind(state),
                 Some(RustBraceKind::RecordFields)
@@ -948,7 +998,14 @@ fn analyze_rust(
                 state.can_start_value_path = true;
                 state.record_expr_candidate = false;
                 state.record_expr_value_depth = Some(state.brace_depth);
+            } else if matches!(rust_current_brace_kind(state), Some(RustBraceKind::Pattern)) {
+                // Struct-pattern field separator (`field: subpat`): the value is
+                // another pattern, not a type. Keep the pattern region open.
+                state.after_dot = false;
+                state.can_start_value_path = false;
+                state.record_expr_candidate = false;
             } else if rust_should_start_annotation_type(state) {
+                state.pattern_base = None;
                 rust_start_type_context(state, false, false);
                 state.after_dot = false;
                 state.can_start_value_path = false;
@@ -1000,6 +1057,7 @@ fn analyze_rust(
             }
         }
         kind::SEMI => {
+            state.pattern_base = None;
             state.let_annotation_base = None;
             state.item_annotation_base = None;
             state.type_alias_rhs_pending = false;
@@ -1016,6 +1074,7 @@ fn analyze_rust(
                 rust_start_type_context(state, false, false);
                 state.type_alias_rhs_pending = false;
             }
+            state.pattern_base = None;
             state.let_annotation_base = None;
             state.item_annotation_base = None;
             state.after_dot = false;
@@ -1065,15 +1124,12 @@ fn analyze_rust(
                 state.static_pending = false;
                 state.item_annotation_base = Some(rust_depth_mark(state));
                 Some(SemanticKind::VariableDefinition)
+            } else if state.pattern_base.is_some() {
+                Some(rust_classify_pattern_ident(
+                    src, token, next_sig, next2_sig, state,
+                ))
             } else if record_field_def {
                 Some(SemanticKind::FieldDefinition)
-            } else if state.let_pending || state.for_pending {
-                if state.let_pending {
-                    state.let_annotation_base = Some(rust_depth_mark(state));
-                }
-                state.let_pending = false;
-                state.for_pending = false;
-                Some(SemanticKind::VariableDefinition)
             } else if state.type_context.is_some() {
                 if path_sep {
                     Some(SemanticKind::PathComponent)
@@ -1090,6 +1146,9 @@ fn analyze_rust(
                 }
             } else if record_field_use {
                 Some(SemanticKind::Field)
+            } else if !state.after_dot && matches!(local_of(next_sig), Some(kind::BANG)) {
+                // Macro invocation (`name!`); render like a call.
+                Some(SemanticKind::FunctionCall)
             } else if path_sep {
                 Some(SemanticKind::PathComponent)
             } else if direct_call {
@@ -1114,8 +1173,10 @@ fn analyze_rust(
             } else if !in_turbofish {
                 state.pending_call = None;
             }
-            state.record_expr_candidate =
-                state.can_start_value_path && !state.after_dot && (path_sep || record_ctor);
+            state.record_expr_candidate = state.pattern_base.is_none()
+                && state.can_start_value_path
+                && !state.after_dot
+                && (path_sep || record_ctor);
             state.after_dot = false;
             if matches!(
                 chunk.tokens.last(),
@@ -1134,13 +1195,13 @@ fn analyze_rust(
         kind::KEYWORD => {
             state.can_start_value_path = false;
             if token_eq(src, token, b"let") {
-                state.let_pending = true;
-                state.let_annotation_base = None;
+                state.pattern_base = Some(rust_depth_mark(state));
+                state.let_annotation_base = Some(rust_depth_mark(state));
             } else if token_eq(src, token, b"for") {
                 if rust_type_context_is_root(state) {
                     rust_start_type_context(state, false, false);
                 } else {
-                    state.for_pending = true;
+                    state.pattern_base = Some(rust_depth_mark(state));
                 }
             } else if token_eq(src, token, b"fn") {
                 if state.type_context.is_none() {
@@ -1172,7 +1233,7 @@ fn analyze_rust(
             } else if matches_keyword_any(src, token, &[b"return", b"break"]) {
                 state.can_start_value_path = true;
             } else if token_eq(src, token, b"in") {
-                state.for_pending = false;
+                state.pattern_base = None;
                 state.can_start_value_path = true;
             }
             state.after_dot = false;
