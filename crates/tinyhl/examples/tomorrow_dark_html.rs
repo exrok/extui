@@ -58,7 +58,7 @@ fn render_html(language: Language, src: &str) -> String {
     let source: &dyn Source = &src;
     let mut hl = Highlighter::new(language);
     hl.rebuild(source);
-    let full = Span::new(0, hl.table().map(|t| t.source_len()).unwrap_or(0));
+    let full = Span::new(0, hl.source_len().unwrap_or(0));
 
     let mut html = String::new();
     html.push_str(
@@ -214,7 +214,9 @@ fn render_html(language: Language, src: &str) -> String {
         <span class="dot"></span>
 "#,
     );
-    html.push_str(&escape_html(&format!("{language:?} - TinyHL base16-tomorrow")));
+    html.push_str(&escape_html(&format!(
+        "{language:?} - TinyHL base16-tomorrow"
+    )));
     html.push_str(
         r#"
       </div>
@@ -471,9 +473,8 @@ fn explanation_lines(span: &RenderSpan, color: &str, role: &str, lang: Language)
             "Semantic overlay marks this token '{}', which drives the color.",
             semantic_kind_name(kind)
         )),
-        None => lines.push(
-            "No semantic overlay applies, so the lexical kind drives the color.".to_string(),
-        ),
+        None => lines
+            .push("No semantic overlay applies, so the lexical kind drives the color.".to_string()),
     }
     if let Some(depth) = span.delimiter {
         lines.push(format!(

@@ -58,9 +58,12 @@ pub struct RenderSpan {
 /// Iterator over the [`RenderSpan`]s of a [`Highlighter`] within a query span.
 ///
 /// Construct with [`RenderSpans::new`] or [`Highlighter::render`] and feed the
-/// whole document span for a full repaint. Spans arrive in source order and
-/// cover every lexical token. A lifetime yields two.
+/// whole document span for a full repaint. Spans arrive in source order. The
+/// generic table-backed path covers every lexical token; Rust's cached render
+/// path omits whitespace spans because they carry no highlight data. A lifetime
+/// yields two.
 pub struct RenderSpans<'t> {
+    cached: Option<core::slice::Iter<'t, RenderSpan>>,
     tokens: Option<QueryIter<'t>>,
     overlays: Overlays<'t>,
     pending: Option<RenderSpan>,
@@ -69,7 +72,16 @@ pub struct RenderSpans<'t> {
 impl<'t> RenderSpans<'t> {
     /// Returns the render spans of `highlighter` whose tokens lie in `span`.
     pub fn new(highlighter: &'t Highlighter, span: Span) -> Self {
+        if let Some(cache) = highlighter.cached_render(span) {
+            return Self {
+                cached: Some(cache.iter()),
+                tokens: None,
+                overlays: Overlays::empty(),
+                pending: None,
+            };
+        }
         Self {
+            cached: None,
             tokens: highlighter.table().map(|table| table.query(span)),
             overlays: Overlays::new(highlighter, span),
             pending: None,
@@ -81,6 +93,9 @@ impl Iterator for RenderSpans<'_> {
     type Item = RenderSpan;
 
     fn next(&mut self) -> Option<RenderSpan> {
+        if let Some(iter) = self.cached.as_mut() {
+            return iter.next().copied();
+        }
         if let Some(pending) = self.pending.take() {
             return Some(pending);
         }

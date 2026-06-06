@@ -10,10 +10,12 @@
 //! tailored analyzers. Other languages emit no semantic tokens.
 
 use crate::kind;
+use crate::lex::rust as rust_lex;
+use crate::render::RenderSpan;
 use crate::source::Source;
 use crate::table::{TokenCursor, TokenMutation};
 use crate::token::{kind_lang_tag, kind_local};
-use crate::{Language, Span, Token, TokenTable};
+use crate::{Language, LexState, Span, Token, TokenTable};
 
 const CHUNK_TOKEN_TARGET: usize = 128;
 
@@ -195,7 +197,7 @@ impl SemanticChunk {
             nest,
             state_in,
             lex_token_count: 0,
-            tokens: Vec::new(),
+            tokens: Vec::with_capacity(CHUNK_TOKEN_TARGET / 2),
         }
     }
 }
@@ -397,6 +399,7 @@ impl Iterator for SemanticQueryIter<'_> {
 struct Builder<'t> {
     cursor: TokenCursor<'t>,
     src: &'t dyn Source,
+    text: TextCache<'t>,
     current_lang: Language,
     current_nest: u8,
     state: StateSnapshot,
@@ -415,6 +418,7 @@ impl<'t> Builder<'t> {
         Self {
             cursor,
             src,
+            text: TextCache::new(src),
             current_lang,
             current_nest,
             state,
@@ -480,15 +484,40 @@ impl<'t> Builder<'t> {
             chunk.end_offset = token.span.end();
         }
 
-        let (next_sig, next2_sig) = match &self.state {
-            StateSnapshot::Py(state) => self.peek_next_sig_pair_python(state, token),
-            _ => self.peek_next_sig_pair(),
+        let local = kind_local(token.kind);
+        match &self.state {
+            StateSnapshot::None => return,
+            StateSnapshot::Rust(_) | StateSnapshot::Ts(_) | StateSnapshot::C(_)
+                if is_trivia_for_lang(self.current_lang, local) =>
+            {
+                return;
+            }
+            StateSnapshot::Py(_) if matches!(local, kind::WHITESPACE | kind::COMMENT) => {
+                if let StateSnapshot::Py(state) = &mut self.state {
+                    analyze_python(
+                        &mut self.text,
+                        token,
+                        None,
+                        None,
+                        state,
+                        self.chunk.as_mut().unwrap(),
+                    );
+                }
+                return;
+            }
+            _ => {}
+        }
+
+        let (next_sig, next2_sig) = if let StateSnapshot::Py(state) = &self.state {
+            self.peek_next_sig_pair_python(state, token)
+        } else {
+            self.peek_next_sig_pair()
         };
 
         match &mut self.state {
             StateSnapshot::None => {}
             StateSnapshot::Rust(state) => analyze_rust(
-                self.src,
+                &mut self.text,
                 token,
                 next_sig,
                 next2_sig,
@@ -496,21 +525,21 @@ impl<'t> Builder<'t> {
                 self.chunk.as_mut().unwrap(),
             ),
             StateSnapshot::Ts(state) => analyze_ts(
-                self.src,
+                &mut self.text,
                 token,
                 next_sig,
                 state,
                 self.chunk.as_mut().unwrap(),
             ),
             StateSnapshot::C(state) => analyze_c(
-                self.src,
+                &mut self.text,
                 token,
                 next_sig,
                 state,
                 self.chunk.as_mut().unwrap(),
             ),
             StateSnapshot::Py(state) => analyze_python(
-                self.src,
+                &mut self.text,
                 token,
                 next_sig,
                 next2_sig,
@@ -525,7 +554,7 @@ impl<'t> Builder<'t> {
         let mut out = [None, None];
         let mut seen = 0usize;
         while let Some(token) = cursor.next() {
-            if !is_trivia(token) {
+            if !is_trivia_token(token) {
                 out[seen] = Some(token);
                 seen += 1;
                 if seen == 2 {
@@ -577,12 +606,285 @@ impl<'t> Builder<'t> {
     }
 }
 
+struct TextCache<'s> {
+    src: &'s dyn Source,
+    page_base: u32,
+    page_end: u32,
+    page: &'s [u8],
+}
+
+impl<'s> TextCache<'s> {
+    fn new(src: &'s dyn Source) -> Self {
+        Self {
+            src,
+            page_base: u32::MAX,
+            page_end: u32::MAX,
+            page: &[],
+        }
+    }
+
+    #[inline]
+    fn in_page(&self, offset: u32) -> bool {
+        offset >= self.page_base && offset < self.page_end
+    }
+
+    #[inline]
+    fn refresh(&mut self, offset: u32) {
+        if !self.in_page(offset) {
+            let (base, page) = if offset == self.page_end {
+                self.src.next_page(offset)
+            } else {
+                self.src.page(offset)
+            };
+            self.page_base = base;
+            self.page_end = base + page.len() as u32;
+            self.page = page;
+        }
+    }
+
+    #[inline]
+    fn token_slice(&mut self, token: Token) -> Option<&[u8]> {
+        self.refresh(token.span.offset);
+        let rel = token.span.offset.checked_sub(self.page_base)? as usize;
+        let len = token.span.len as usize;
+        let end = rel.checked_add(len)?;
+        self.page.get(rel..end)
+    }
+}
+
+pub(crate) fn render_rust_fast(src: &dyn Source) -> (u32, Vec<RenderSpan>) {
+    let source_len = src.len();
+    let tokens = lex_rust_flat(src, source_len);
+
+    let mut text = TextCache::new(src);
+    let mut rust_state = RustState::default();
+    let mut semantic_chunk = SemanticChunk::new(
+        0,
+        Language::Rust.tag(),
+        0,
+        StateSnapshot::Rust(RustState::default()),
+    );
+    semantic_chunk.tokens.reserve(tokens.len() / 2);
+
+    let mut lex_tokens_in_semantic_chunk = 0usize;
+    for idx in 0..tokens.len() {
+        if lex_tokens_in_semantic_chunk >= CHUNK_TOKEN_TARGET && rust_state.pending_call.is_none() {
+            rust_state.pending_fn_token = None;
+            lex_tokens_in_semantic_chunk = 0;
+        }
+        let flat = tokens[idx];
+        let token = flat.to_token();
+        lex_tokens_in_semantic_chunk += 1;
+        let local = flat.local;
+        if !is_rust_trivia(local) {
+            let (next_sig, next2_sig) = next_sig_pair_flat(&tokens, idx + 1);
+            analyze_rust(
+                &mut text,
+                token,
+                next_sig,
+                next2_sig,
+                &mut rust_state,
+                &mut semantic_chunk,
+            );
+        }
+    }
+
+    let mut render = Vec::with_capacity(tokens.len());
+    let mut delimiter_stack: Vec<u8> = Vec::new();
+    let mut sem_idx = 0usize;
+    for flat in &tokens {
+        let span = flat.span;
+        let local = flat.local;
+        if local == kind::WHITESPACE {
+            continue;
+        }
+        let mut semantic = None;
+        if let Some(entry) = semantic_chunk.tokens.get(sem_idx) {
+            if semantic_chunk.base_offset + entry.rel_offset == span.offset {
+                semantic = Some(display_semantic_kind(entry.kind, entry.type_styled));
+                sem_idx += 1;
+            }
+        }
+        let delimiter = if let Some((kind, is_open)) = delimiter_shape(local) {
+            let depth = if is_open {
+                delimiter_stack.len() as u16
+            } else {
+                match delimiter_stack.last().copied() {
+                    Some(top) if top == kind => delimiter_stack.len().saturating_sub(1) as u16,
+                    Some(_) => delimiter_stack.len() as u16,
+                    None => 0,
+                }
+            };
+            if is_open {
+                delimiter_stack.push(kind);
+            } else if matches!(delimiter_stack.last().copied(), Some(top) if top == kind) {
+                delimiter_stack.pop();
+            }
+            Some(depth)
+        } else {
+            None
+        };
+
+        if local == kind::LIFETIME && span.len > 1 {
+            render.push(RenderSpan {
+                span: Span::new(span.offset, 1),
+                lang_tag: Language::Rust.tag(),
+                local_kind: kind::LIFETIME,
+                semantic: None,
+                delimiter: None,
+            });
+            render.push(RenderSpan {
+                span: Span::new(span.offset + 1, span.len - 1),
+                lang_tag: Language::Rust.tag(),
+                local_kind: kind::LIFETIME,
+                semantic,
+                delimiter: None,
+            });
+        } else {
+            render.push(RenderSpan {
+                span,
+                lang_tag: Language::Rust.tag(),
+                local_kind: local,
+                semantic,
+                delimiter,
+            });
+        }
+    }
+
+    (source_len, render)
+}
+
+#[derive(Clone, Copy)]
+struct RustFlatToken {
+    span: Span,
+    local: u16,
+    meta: u16,
+}
+
+impl RustFlatToken {
+    fn to_token(self) -> Token {
+        Token {
+            span: self.span,
+            kind: self.local,
+            state_out: LexState::INITIAL.bits(),
+            flags: 0,
+            nest: 0,
+            _reserved: self.meta,
+        }
+    }
+}
+
+fn lex_rust_flat(src: &dyn Source, source_len: u32) -> Vec<RustFlatToken> {
+    let mut lexer = rust_lex::FlatLexer::new(src);
+    let mut tokens = Vec::with_capacity((source_len as usize / 4).max(16));
+    while let Some((span, local, meta)) = lexer.next_parts() {
+        tokens.push(RustFlatToken { span, local, meta });
+    }
+    tokens
+}
+
+fn next_sig_pair_flat(tokens: &[RustFlatToken], mut idx: usize) -> (Option<Token>, Option<Token>) {
+    let mut out = [None, None];
+    let mut seen = 0usize;
+    while let Some(&token) = tokens.get(idx) {
+        idx += 1;
+        if is_rust_trivia(token.local) {
+            continue;
+        }
+        out[seen] = Some(token.to_token());
+        seen += 1;
+        if seen == 2 {
+            break;
+        }
+    }
+    (out[0], out[1])
+}
+
+#[inline]
+fn is_rust_trivia(local: u16) -> bool {
+    matches!(local, kind::WHITESPACE | kind::COMMENT | kind::DOC_COMMENT)
+}
+
+fn delimiter_shape(local: u16) -> Option<(u8, bool)> {
+    match local {
+        kind::OPEN_BRACE | kind::LT_PERCENT => Some((0, true)),
+        kind::CLOSE_BRACE | kind::PERCENT_GT => Some((0, false)),
+        kind::OPEN_PAREN => Some((1, true)),
+        kind::CLOSE_PAREN => Some((1, false)),
+        kind::OPEN_BRACKET | kind::LT_COLON => Some((2, true)),
+        kind::CLOSE_BRACKET | kind::COLON_GT => Some((2, false)),
+        _ => None,
+    }
+}
+
+fn display_semantic_kind(kind: SemanticKind, type_styled: bool) -> SemanticKind {
+    match kind {
+        SemanticKind::TypeName | SemanticKind::TypeDefinition => {
+            if type_styled {
+                kind
+            } else {
+                SemanticKind::Variable
+            }
+        }
+        _ if type_styled => SemanticKind::TypeName,
+        other => other,
+    }
+}
+
 /// Rust primitive type names. The casing convention tans these wherever they
 /// appear (matching the reference renderer), except when one names a function.
 const RUST_PRIMITIVES: &[&[u8]] = &[
     b"u8", b"u16", b"u32", b"u64", b"u128", b"usize", b"i8", b"i16", b"i32", b"i64", b"i128",
     b"isize", b"f16", b"f32", b"f64", b"f128", b"bool", b"char", b"str",
 ];
+
+#[inline]
+fn rust_token_meta(token: Token) -> Option<u16> {
+    if rust_lex::meta_ready(token._reserved) {
+        Some(token._reserved)
+    } else {
+        None
+    }
+}
+
+#[inline]
+fn rust_token_word(token: Token) -> Option<u16> {
+    rust_token_meta(token).map(rust_lex::meta_word)
+}
+
+#[inline]
+fn rust_word_eq_or_text(src: &mut TextCache<'_>, token: Token, word: u16, text: &[u8]) -> bool {
+    match rust_token_word(token) {
+        Some(token_word) => token_word == word,
+        None => token_eq(src, token, text),
+    }
+}
+
+#[inline]
+fn rust_token_eq_meta(token: Token, expected: &[u8]) -> Option<bool> {
+    let expected_word = rust_lex::word_id(expected);
+    if expected_word == 0 {
+        return None;
+    }
+    rust_token_word(token).map(|word| word == expected_word)
+}
+
+#[inline]
+fn rust_token_matches_meta_set(token: Token, set: &[&[u8]]) -> Option<bool> {
+    let token_word = rust_token_word(token)?;
+    let mut all_known = true;
+    for &kw in set {
+        let expected = rust_lex::word_id(kw);
+        if expected == 0 {
+            all_known = false;
+            break;
+        }
+        if token_word == expected {
+            return Some(true);
+        }
+    }
+    if all_known { Some(false) } else { None }
+}
 
 fn is_fn_role(kind: SemanticKind) -> bool {
     matches!(
@@ -597,7 +899,17 @@ fn is_fn_role(kind: SemanticKind) -> bool {
 
 /// Whether the identifier renders as a type by spelling convention: an
 /// UpperCamel/SCREAMING name in any language, or a non-function Rust primitive.
-fn compute_type_styled(src: &dyn Source, token: Token, kind: SemanticKind) -> bool {
+fn compute_type_styled(src: &mut TextCache<'_>, token: Token, kind: SemanticKind) -> bool {
+    let local = kind_local(token.kind);
+    if !matches!(local, kind::IDENT | kind::KEYWORD) {
+        return false;
+    }
+    if let Some(meta) = rust_token_meta(token) {
+        if rust_lex::meta_upper(meta) {
+            return true;
+        }
+        return !is_fn_role(kind) && rust_lex::word_is_primitive(rust_lex::meta_word(meta));
+    }
     if token_starts_upper(src, token) {
         return true;
     }
@@ -607,7 +919,7 @@ fn compute_type_styled(src: &dyn Source, token: Token, kind: SemanticKind) -> bo
 }
 
 fn push_semantic(
-    src: &dyn Source,
+    src: &mut TextCache<'_>,
     chunk: &mut SemanticChunk,
     token: Token,
     kind: SemanticKind,
@@ -623,14 +935,20 @@ fn push_semantic(
     chunk.tokens.len() - 1
 }
 
-fn token_eq(src: &dyn Source, token: Token, expected: &[u8]) -> bool {
+fn token_eq(src: &mut TextCache<'_>, token: Token, expected: &[u8]) -> bool {
     if token.span.len as usize != expected.len() {
         return false;
+    }
+    if let Some(matches) = rust_token_eq_meta(token, expected) {
+        return matches;
+    }
+    if let Some(bytes) = src.token_slice(token) {
+        return bytes == expected;
     }
     let mut copied = 0usize;
     let mut offset = token.span.offset;
     while copied < expected.len() {
-        let (base, page) = src.page(offset);
+        let (base, page) = src.src.page(offset);
         if page.is_empty() {
             return false;
         }
@@ -671,21 +989,21 @@ fn option_usize_eq(value: Option<usize>, expected: usize) -> bool {
     matches!(value, Some(value) if value == expected)
 }
 
-fn is_trivia(token: Token) -> bool {
-    match Language::from_tag(kind_lang_tag(token.kind)) {
-        Language::Rust => matches!(
-            kind_local(token.kind),
-            kind::WHITESPACE | kind::COMMENT | kind::DOC_COMMENT
-        ),
-        Language::Ts | Language::Tsx => {
-            matches!(kind_local(token.kind), kind::WHITESPACE | kind::COMMENT)
-        }
-        Language::C | Language::Cpp => {
-            matches!(kind_local(token.kind), kind::WHITESPACE | kind::COMMENT)
-        }
-        Language::Python => matches!(kind_local(token.kind), kind::WHITESPACE | kind::COMMENT),
+fn is_trivia_for_lang(lang: Language, local: u16) -> bool {
+    match lang {
+        Language::Rust => matches!(local, kind::WHITESPACE | kind::COMMENT | kind::DOC_COMMENT),
+        Language::Ts | Language::Tsx => matches!(local, kind::WHITESPACE | kind::COMMENT),
+        Language::C | Language::Cpp => matches!(local, kind::WHITESPACE | kind::COMMENT),
+        Language::Python => matches!(local, kind::WHITESPACE | kind::COMMENT),
         _ => false,
     }
+}
+
+fn is_trivia_token(token: Token) -> bool {
+    is_trivia_for_lang(
+        Language::from_tag(kind_lang_tag(token.kind)),
+        kind_local(token.kind),
+    )
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -877,24 +1195,45 @@ fn is_colon_path_sep(next_sig: Option<Token>, next2_sig: Option<Token>) -> bool 
     }
 }
 
-fn rust_name_token(src: &dyn Source, token: Token) -> bool {
-    is_ident(token, Language::Rust)
-        || (kind_local(token.kind) == kind::KEYWORD
-            && matches_keyword_any(src, token, &[b"self", b"Self", b"super", b"crate"]))
+fn rust_name_token(src: &mut TextCache<'_>, token: Token) -> bool {
+    if is_ident(token, Language::Rust) {
+        return true;
+    }
+    if kind_local(token.kind) != kind::KEYWORD {
+        return false;
+    }
+    if let Some(word) = rust_token_word(token) {
+        return matches!(
+            word,
+            rust_lex::WORD_SELF
+                | rust_lex::WORD_SELF_UPPER
+                | rust_lex::WORD_SUPER
+                | rust_lex::WORD_CRATE
+        );
+    }
+    matches_keyword_any(src, token, &[b"self", b"Self", b"super", b"crate"])
 }
 
 /// Whether the token's first byte is an ASCII uppercase letter. Used as the
 /// Rust convention for distinguishing a type/constructor (`Some`, `Point`)
 /// from a binding (`x`) in pattern position.
-fn token_starts_upper(src: &dyn Source, token: Token) -> bool {
-    let (base, page) = src.page(token.span.offset);
-    let rel = (token.span.offset - base) as usize;
-    matches!(page.get(rel), Some(b) if b.is_ascii_uppercase())
+fn token_starts_upper(src: &mut TextCache<'_>, token: Token) -> bool {
+    if let Some(meta) = rust_token_meta(token) {
+        return rust_lex::meta_upper(meta);
+    }
+    match src.token_slice(token) {
+        Some(bytes) => matches!(bytes.first(), Some(b) if b.is_ascii_uppercase()),
+        None => {
+            let (base, page) = src.src.page(token.span.offset);
+            let rel = (token.span.offset - base) as usize;
+            matches!(page.get(rel), Some(b) if b.is_ascii_uppercase())
+        }
+    }
 }
 
 /// Classify an identifier appearing inside an active pattern region.
 fn rust_classify_pattern_ident(
-    src: &dyn Source,
+    src: &mut TextCache<'_>,
     token: Token,
     next_sig: Option<Token>,
     next2_sig: Option<Token>,
@@ -919,20 +1258,39 @@ fn rust_classify_pattern_ident(
     SemanticKind::VariableDefinition
 }
 
-fn rust_type_keyword(src: &dyn Source, token: Token) -> bool {
-    kind_local(token.kind) == kind::KEYWORD
-        && matches_keyword_any(
-            src,
-            token,
-            &[
-                // `for` keeps a type context alive only when one is already
-                // open — i.e. the `for` of `impl Trait for Type` (and `for<'a>`
-                // higher-ranked bounds). A loop `for` has no active context, so
-                // this never affects pattern handling.
-                b"Self", b"self", b"super", b"crate", b"dyn", b"impl", b"fn", b"mut", b"const",
-                b"unsafe", b"extern", b"for",
-            ],
-        )
+fn rust_type_keyword(src: &mut TextCache<'_>, token: Token) -> bool {
+    if kind_local(token.kind) != kind::KEYWORD {
+        return false;
+    }
+    if let Some(word) = rust_token_word(token) {
+        return matches!(
+            word,
+            rust_lex::WORD_SELF_UPPER
+                | rust_lex::WORD_SELF
+                | rust_lex::WORD_SUPER
+                | rust_lex::WORD_CRATE
+                | rust_lex::WORD_DYN
+                | rust_lex::WORD_IMPL
+                | rust_lex::WORD_FN
+                | rust_lex::WORD_MUT
+                | rust_lex::WORD_CONST
+                | rust_lex::WORD_UNSAFE
+                | rust_lex::WORD_EXTERN
+                | rust_lex::WORD_FOR
+        );
+    }
+    matches_keyword_any(
+        src,
+        token,
+        &[
+            // `for` keeps a type context alive only when one is already
+            // open — i.e. the `for` of `impl Trait for Type` (and `for<'a>`
+            // higher-ranked bounds). A loop `for` has no active context, so
+            // this never affects pattern handling.
+            b"Self", b"self", b"super", b"crate", b"dyn", b"impl", b"fn", b"mut", b"const",
+            b"unsafe", b"extern", b"for",
+        ],
+    )
 }
 
 fn rust_in_param_root(state: &RustState) -> bool {
@@ -958,7 +1316,7 @@ fn rust_should_start_annotation_type(state: &RustState) -> bool {
 }
 
 fn rust_finish_type_context(
-    src: &dyn Source,
+    src: &mut TextCache<'_>,
     token: Token,
     next_sig: Option<Token>,
     next2_sig: Option<Token>,
@@ -1023,7 +1381,7 @@ fn rust_finish_type_context(
 }
 
 fn analyze_rust(
-    src: &dyn Source,
+    src: &mut TextCache<'_>,
     token: Token,
     next_sig: Option<Token>,
     next2_sig: Option<Token>,
@@ -1031,9 +1389,6 @@ fn analyze_rust(
     chunk: &mut SemanticChunk,
 ) {
     let local = kind_local(token.kind);
-    if is_trivia(token) {
-        return;
-    }
     let type_root_before = rust_type_context_is_root(state);
     // A type-alias RHS context (`type X = Type`) is opened by the `=` below and
     // must survive it: the finish pass would otherwise clear a root context on
@@ -1473,7 +1828,7 @@ fn analyze_rust(
             if matches!(
                 chunk.tokens.last(),
                 Some(last) if last.kind == SemanticKind::Parameter
-            ) && token_eq(src, token, b"self")
+            ) && rust_word_eq_or_text(src, token, rust_lex::WORD_SELF, b"self")
             {
                 if let Some(idx) = state.pending_fn_token {
                     chunk.tokens[idx].kind = SemanticKind::MethodDefinition;
@@ -1483,16 +1838,23 @@ fn analyze_rust(
         }
         kind::KEYWORD => {
             state.can_start_value_path = false;
-            if token_eq(src, token, b"let") {
+            let word = rust_token_word(token);
+            if matches!(word, Some(rust_lex::WORD_LET))
+                || (word.is_none() && token_eq(src, token, b"let"))
+            {
                 state.pattern_base = Some(rust_depth_mark(state));
                 state.let_annotation_base = Some(rust_depth_mark(state));
-            } else if token_eq(src, token, b"for") {
+            } else if matches!(word, Some(rust_lex::WORD_FOR))
+                || (word.is_none() && token_eq(src, token, b"for"))
+            {
                 if rust_type_context_is_root(state) {
                     rust_start_type_context(state, false, false);
                 } else {
                     state.pattern_base = Some(rust_depth_mark(state));
                 }
-            } else if token_eq(src, token, b"fn") {
+            } else if matches!(word, Some(rust_lex::WORD_FN))
+                || (word.is_none() && token_eq(src, token, b"fn"))
+            {
                 // `fn name(...)` defines a function; `fn(...)` is a function
                 // pointer type with no name — don't expect a definition ident.
                 if state.type_context.is_none()
@@ -1500,35 +1862,66 @@ fn analyze_rust(
                 {
                     state.fn_pending = true;
                 }
-            } else if matches_keyword_any(
-                src,
-                token,
-                &[b"struct", b"enum", b"trait", b"type", b"union"],
-            ) {
+            } else if matches!(
+                word,
+                Some(
+                    rust_lex::WORD_STRUCT
+                        | rust_lex::WORD_ENUM
+                        | rust_lex::WORD_TRAIT
+                        | rust_lex::WORD_TYPE
+                        | rust_lex::WORD_UNION
+                )
+            ) || (word.is_none()
+                && matches_keyword_any(
+                    src,
+                    token,
+                    &[b"struct", b"enum", b"trait", b"type", b"union"],
+                ))
+            {
                 if state.type_context.is_none() {
                     state.type_def_pending = true;
-                    state.type_alias_name_pending = token_eq(src, token, b"type");
+                    state.type_alias_name_pending = matches!(word, Some(rust_lex::WORD_TYPE))
+                        || (word.is_none() && token_eq(src, token, b"type"));
                     state.record_fields_pending =
-                        matches_keyword_any(src, token, &[b"struct", b"union"]);
+                        matches!(word, Some(rust_lex::WORD_STRUCT | rust_lex::WORD_UNION))
+                            || (word.is_none()
+                                && matches_keyword_any(src, token, &[b"struct", b"union"]));
                 }
-            } else if token_eq(src, token, b"const") {
+            } else if matches!(word, Some(rust_lex::WORD_CONST))
+                || (word.is_none() && token_eq(src, token, b"const"))
+            {
                 if state.type_context.is_none() {
                     state.const_pending = true;
                 }
-            } else if token_eq(src, token, b"static") {
+            } else if matches!(word, Some(rust_lex::WORD_STATIC))
+                || (word.is_none() && token_eq(src, token, b"static"))
+            {
                 if state.type_context.is_none() {
                     state.static_pending = true;
                 }
-            } else if matches_keyword_any(src, token, &[b"as", b"impl"]) {
+            } else if matches!(word, Some(rust_lex::WORD_AS | rust_lex::WORD_IMPL))
+                || (word.is_none() && matches_keyword_any(src, token, &[b"as", b"impl"]))
+            {
                 rust_start_type_context(state, false, false);
-            } else if token_eq(src, token, b"dyn") {
+            } else if matches!(word, Some(rust_lex::WORD_DYN))
+                || (word.is_none() && token_eq(src, token, b"dyn"))
+            {
                 rust_start_type_context(state, true, false);
-            } else if matches_keyword_any(src, token, &[b"return", b"break"]) {
+            } else if matches!(word, Some(rust_lex::WORD_RETURN | rust_lex::WORD_BREAK))
+                || (word.is_none() && matches_keyword_any(src, token, &[b"return", b"break"]))
+            {
                 state.can_start_value_path = true;
-            } else if token_eq(src, token, b"in") {
+            } else if matches!(word, Some(rust_lex::WORD_IN))
+                || (word.is_none() && token_eq(src, token, b"in"))
+            {
                 state.pattern_base = None;
                 state.can_start_value_path = true;
-            } else if matches_keyword_any(src, token, &[b"match", b"if", b"while"]) {
+            } else if matches!(
+                word,
+                Some(rust_lex::WORD_MATCH | rust_lex::WORD_IF | rust_lex::WORD_WHILE)
+            ) || (word.is_none()
+                && matches_keyword_any(src, token, &[b"match", b"if", b"while"]))
+            {
                 // A scrutinee/condition is a value position. We cannot set
                 // `can_start_value_path` here without making `match Foo {}` read
                 // `Foo {` as a struct literal, so only arm the leak-proof
@@ -1555,7 +1948,29 @@ fn analyze_rust(
     state.prev_sig = Some(token);
 }
 
-fn matches_keyword_any(src: &dyn Source, token: Token, set: &[&[u8]]) -> bool {
+fn matches_keyword_any(src: &mut TextCache<'_>, token: Token, set: &[&[u8]]) -> bool {
+    let len = token.span.len as usize;
+    let mut possible = false;
+    for &kw in set {
+        if kw.len() == len {
+            possible = true;
+            break;
+        }
+    }
+    if !possible {
+        return false;
+    }
+    if let Some(matches) = rust_token_matches_meta_set(token, set) {
+        return matches;
+    }
+    if let Some(bytes) = src.token_slice(token) {
+        for &kw in set {
+            if bytes == kw {
+                return true;
+            }
+        }
+        return false;
+    }
     for &kw in set {
         if token_eq(src, token, kw) {
             return true;
@@ -1588,16 +2003,13 @@ struct TsState {
 }
 
 fn analyze_ts(
-    src: &dyn Source,
+    src: &mut TextCache<'_>,
     token: Token,
     next_sig: Option<Token>,
     state: &mut TsState,
     chunk: &mut SemanticChunk,
 ) {
     let local = kind_local(token.kind);
-    if is_trivia(token) {
-        return;
-    }
 
     match local {
         kind::OPEN_BRACE => {
@@ -1784,16 +2196,13 @@ struct CState {
 }
 
 fn analyze_c(
-    src: &dyn Source,
+    src: &mut TextCache<'_>,
     token: Token,
     next_sig: Option<Token>,
     state: &mut CState,
     chunk: &mut SemanticChunk,
 ) {
     let local = kind_local(token.kind);
-    if is_trivia(token) {
-        return;
-    }
 
     match local {
         kind::OPEN_BRACE if state.struct_body_pending => {
@@ -2100,7 +2509,7 @@ fn py_depth_after_local(
 }
 
 fn analyze_python(
-    src: &dyn Source,
+    src: &mut TextCache<'_>,
     token: Token,
     next_sig: Option<Token>,
     next2_sig: Option<Token>,
@@ -2113,7 +2522,7 @@ fn analyze_python(
     // new logical line — record it for the next real token without disturbing
     // any other state.
     if local == kind::WHITESPACE {
-        if py_depth_all_zero(state) && py_whitespace_has_logical_newline(src, token) {
+        if py_depth_all_zero(state) && py_whitespace_has_logical_newline(src.src, token) {
             state.at_line_start = true;
             py_reset_statement(state);
         }

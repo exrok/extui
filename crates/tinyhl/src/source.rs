@@ -41,6 +41,14 @@ pub trait Source {
     /// At or past end-of-source the returned slice is empty and `page_base`
     /// equals [`Source::len`].
     fn page(&self, offset: u32) -> (u32, &[u8]);
+
+    /// Returns the page beginning at `offset` when a cursor advances exactly
+    /// past the previous page. Implementors with cheap sequential paging can
+    /// override this to avoid a fresh random lookup.
+    #[inline]
+    fn next_page(&self, offset: u32) -> (u32, &[u8]) {
+        self.page(offset)
+    }
 }
 
 impl Source for &str {
@@ -78,6 +86,7 @@ impl Source for &[u8] {
 pub struct SourceView<'s> {
     src: &'s dyn Source,
     page_base: u32,
+    page_end: u32,
     page: &'s [u8],
     src_len: u32,
 }
@@ -86,9 +95,11 @@ impl<'s> SourceView<'s> {
     pub(crate) fn new(src: &'s dyn Source, at: u32) -> Self {
         let src_len = src.len();
         let (page_base, page) = src.page(at);
+        let page_end = page_base + page.len() as u32;
         Self {
             src,
             page_base,
+            page_end,
             page,
             src_len,
         }
@@ -120,14 +131,19 @@ impl<'s> SourceView<'s> {
 
     #[inline]
     pub(crate) fn in_window(&self, offset: u32) -> bool {
-        offset >= self.page_base && offset < self.page_base + self.page.len() as u32
+        offset >= self.page_base && offset < self.page_end
     }
 
     #[inline]
     pub(crate) fn refresh(&mut self, offset: u32) {
         if !self.in_window(offset) {
-            let (base, page) = self.src.page(offset);
+            let (base, page) = if offset == self.page_end {
+                self.src.next_page(offset)
+            } else {
+                self.src.page(offset)
+            };
             self.page_base = base;
+            self.page_end = base + page.len() as u32;
             self.page = page;
         }
     }
@@ -148,7 +164,7 @@ impl<'s> SourceView<'s> {
             self.refresh(offset);
         }
         let rel = (offset - self.page_base) as usize;
-        self.page.get(rel).copied()
+        Some(self.page[rel])
     }
 
     #[inline]
@@ -161,7 +177,7 @@ impl<'s> SourceView<'s> {
         }
         let rel = (offset - self.page_base) as usize;
         let visible = (self.src_len - offset) as usize;
-        let avail = self.page.len().saturating_sub(rel);
+        let avail = (self.page_end - offset) as usize;
         let take = visible.min(avail);
         (offset, &self.page[rel..rel + take])
     }

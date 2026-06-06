@@ -5,3 +5,6 @@ edition = "2024"
 
 [dependencies]
 unicode-ident = "1"
+
+[dev-dependencies]
+foldhash = "0.2"

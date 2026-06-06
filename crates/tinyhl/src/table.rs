@@ -38,7 +38,7 @@ impl Chunk {
             state_in,
             language,
             nest,
-            tokens: Vec::new(),
+            tokens: Vec::with_capacity(CHUNK_TOKEN_TARGET),
         }
     }
 }
@@ -517,7 +517,7 @@ impl<'t> TokenCursor<'t> {
                 state_out: rt.state_out,
                 flags: rt.flags,
                 nest: rt.nest,
-                _reserved: 0,
+                _reserved: rt._reserved,
             });
         }
     }
@@ -597,7 +597,7 @@ impl Iterator for QueryIter<'_> {
                 state_out: rt.state_out,
                 flags: rt.flags,
                 nest: rt.nest,
-                _reserved: 0,
+                _reserved: rt._reserved,
             });
         }
     }

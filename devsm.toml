@@ -1,0 +1,47 @@
+
+[action.bench-tinyhl]
+pwd = "crates/tinyhl"
+sh = '''
+set -e
+echo "> cargo build --release --example rust_semantic_bench"
+DECODER=$(cargo --config "target.'cfg(unix)'.runner = 'echo'" run -q --example rust_semantic_bench --release)
+perf stat -r3 -e instructions,branches,cpu-cycles $DECODER
+'''
+allow_multiple = true
+
+[action.profile-tinyhl]
+pwd = "crates/tinyhl"
+sh = '''
+set -e
+echo "> cargo build --release --example rust_semantic_bench"
+BIN=$(cargo --config "target.'cfg(unix)'.runner = 'echo'" run -q --example rust_semantic_bench --release)
+samply record -r 5000 --save-only --output /tmp/profile.json.gz $BIN -i 150 "$@"
+echo "Profile output to /tmp/profile.json.gz for: rust_semantic_bench -i 150" "$@"
+samply inspect /tmp/profile.json.gz top-leaf --limit 10
+'''
+cli.forward_arguments = true
+allow_multiple = true
+
+[action.bench-exgit-syntax]
+pwd = "../exgit"
+sh = '''
+set -e
+echo "/code/exgit> cargo build --release --example bench-exgit-syntax"
+BENCH=$(cargo --config "target.'cfg(unix)'.runner = 'echo'" run -q --example bench-exgit-syntax --release)
+perf stat -r3 -e instructions,branches,cpu-cycles $BENCH "$@"
+'''
+cli.forward_arguments = true
+allow_multiple = true
+
+[action.profile-exgit-syntax]
+pwd = "../exgit"
+sh = '''
+set -e
+echo "/code/exgit> cargo build --release --example bench-exgit-syntax"
+BENCH=$(cargo --config "target.'cfg(unix)'.runner = 'echo'" run -q --example bench-exgit-syntax --release)
+samply record -r 5000 --save-only --output /tmp/profile-exgit-syntax.json.gz $BENCH -i 100 "$@"
+echo "Profile output to /tmp/profile-exgit-syntax.json.gz for: bench-exgit-syntax" -i 100 "$@"
+samply inspect /tmp/profile-exgit-syntax.json.gz top-leaf --limit 10
+'''
+cli.forward_arguments = true
+allow_multiple = true

@@ -82,7 +82,7 @@ impl DelimiterChunk {
             nest,
             state_in,
             lex_token_count: 0,
-            tokens: Vec::new(),
+            tokens: Vec::with_capacity(CHUNK_TOKEN_TARGET / 6),
         }
     }
 }
