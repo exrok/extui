@@ -2111,6 +2111,27 @@ impl Buffer {
             }
         }
     }
+    /// Replaces all cells inside `area` with styled spaces.
+    ///
+    /// This is intended for overlay regions that need to obscure content
+    /// already drawn earlier in the same frame.
+    pub fn clear_rect(&mut self, area: Rect, style: Style) {
+        if area.is_empty() {
+            return;
+        }
+        let style = if self.quantize_rgb {
+            style.quantize_rgb()
+        } else {
+            style
+        };
+        // SAFETY: ASCII space is valid one-byte UTF-8 and has width one.
+        let blank = unsafe { Cell::new_ascii(b' ', style) };
+        for y in area.y..area.bottom() {
+            if let Some(row) = self.row_remaining_mut(area.x, y) {
+                row.iter_mut().take(area.w as usize).for_each(|cell| *cell = blank);
+            }
+        }
+    }
     /// Writes `string` at `(x, y)` using `style`.
     ///
     /// Writing stops at the right edge of the buffer or when `string`
@@ -2602,6 +2623,11 @@ impl DoubleBuffer {
     /// Applies a style to all cells within the given area.
     pub fn set_style(&mut self, area: Rect, style: Style) {
         self.current.set_style(area, style)
+    }
+
+    /// Replaces all cells within `area` with styled spaces.
+    pub fn clear_rect(&mut self, area: Rect, style: Style) {
+        self.current.clear_rect(area, style)
     }
 
     /// Writes `string` at `(x, y)` using `style`.
