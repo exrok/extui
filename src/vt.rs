@@ -759,9 +759,11 @@ pub const POP_KEYBOARD_ENABLEMENT: &[u8] = b"\x1b[<1u";
 
 impl BufferWrite for KeyboardEnhancementFlags {
     fn write_to_buffer(&self, buffer: &mut Vec<u8>) {
-        buffer.extend_from_slice(b"\x1b[>4;");
+        // Kitty progressive keyboard enhancement push: CSI > flags u.
+        // The matching pop is `POP_KEYBOARD_ENABLEMENT` (CSI < 1 u).
+        buffer.extend_from_slice(b"\x1b[>");
         itoap::write_to_vec(buffer, self.bits());
-        buffer.extend_from_slice(b"m");
+        buffer.extend_from_slice(b"u");
     }
 }
 

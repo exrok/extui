@@ -747,7 +747,16 @@ fn parse_csi_keyboard_enhancement_flags(event_buffer: &[u8]) -> ParseResult {
         };
     }
 
-    let bits = event_buffer[3];
+    // Response is `CSI ? flags u`, where `flags` is a decimal ASCII number.
+    let bits = std::str::from_utf8(&event_buffer[3..event_buffer.len() - 1])
+        .ok()
+        .and_then(|digits| digits.parse::<u8>().ok());
+    let Some(bits) = bits else {
+        return ParseResult::Error {
+            consumed,
+            error: ParseError::InvalidNumber,
+        };
+    };
     let flags = KeyboardEnhancementFlags::from_bits_truncate(bits);
 
     ParseResult::Event {
@@ -1382,6 +1391,45 @@ mod tests {
                     KeyCode::Char('t'),
                     KeyModifiers::ALT | KeyModifiers::CONTROL
                 )))
+            },
+        );
+    }
+
+    #[test]
+    fn test_keyboard_enhancement_flags_response() {
+        // `CSI ? flags u`, where `flags` is a decimal ASCII number. The digits
+        // must be parsed as a number, not read as a single raw byte.
+        let single = parse_event(b"\x1B[?5u", false);
+        assert_eq!(
+            single,
+            ParseResult::Event {
+                consumed: 5,
+                event: InternalEvent::KeyboardEnhancementFlags(
+                    KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                        | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
+                ),
+            },
+        );
+
+        let multi = parse_event(b"\x1B[?15u", false);
+        assert_eq!(
+            multi,
+            ParseResult::Event {
+                consumed: 6,
+                event: InternalEvent::KeyboardEnhancementFlags(
+                    KeyboardEnhancementFlags::all()
+                ),
+            },
+        );
+
+        let zero = parse_event(b"\x1B[?0u", false);
+        assert_eq!(
+            zero,
+            ParseResult::Event {
+                consumed: 5,
+                event: InternalEvent::KeyboardEnhancementFlags(
+                    KeyboardEnhancementFlags::empty()
+                ),
             },
         );
     }
