@@ -2128,7 +2128,9 @@ impl Buffer {
         let blank = unsafe { Cell::new_ascii(b' ', style) };
         for y in area.y..area.bottom() {
             if let Some(row) = self.row_remaining_mut(area.x, y) {
-                row.iter_mut().take(area.w as usize).for_each(|cell| *cell = blank);
+                row.iter_mut()
+                    .take(area.w as usize)
+                    .for_each(|cell| *cell = blank);
             }
         }
     }
@@ -2485,9 +2487,10 @@ pub fn rgb_supported_from_env() -> bool {
 /// ```
 /// Selects how the work buffer is prepared at the end of each render.
 ///
-/// A [`DoubleBuffer`] swaps its two frames on every render so the retained frame
-/// matches what is on screen. The post-swap step then readies the work buffer
-/// for the next draw according to this mode.
+/// A [`DoubleBuffer`] normally swaps its two frames on every render so the
+/// retained frame matches what is on screen. The post-swap step then readies the
+/// work buffer for the next draw according to this mode. [`Swap::Deferred`]
+/// leaves that swap and preparation for the caller to complete explicitly.
 #[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
 pub enum Swap {
     /// Clear the work buffer after the swap. Immediate mode: the caller repaints
@@ -2501,6 +2504,14 @@ pub enum Swap {
     /// swap, so the first overdraw frame is the one *after* the render that armed
     /// this mode.
     Retained,
+    /// Leave the render post-step for the caller to complete later.
+    ///
+    /// The rendered bytes are produced immediately, but the frame swap and work
+    /// buffer preparation are deferred until [`DoubleBuffer::swap`] is called
+    /// with either [`Swap::Blank`] or [`Swap::Retained`]. This lets callers pick
+    /// the next frame's starting buffer after processing input that arrives
+    /// between renders.
+    Deferred,
 }
 
 // Floor for the retained-mode side-arena compaction threshold. The arena is
@@ -2537,6 +2548,7 @@ pub struct DoubleBuffer {
     palette: Vec<Vec<u8>>,
     cursor: CursorOutput,
     swap: Swap,
+    deferred_swap_pending: bool,
     grapheme_compaction_threshold: u32,
 }
 
@@ -2671,6 +2683,7 @@ impl DoubleBuffer {
             palette: Vec::new(),
             cursor: CursorOutput::default(),
             swap: Swap::Blank,
+            deferred_swap_pending: false,
             grapheme_compaction_threshold: SIDEBUFFER_GRAPHEME_COMPACTION_BASE_THRESHOLD,
         }
     }
@@ -2711,17 +2724,50 @@ impl DoubleBuffer {
         self.swap
     }
 
+    /// Returns `true` after a [`Swap::Deferred`] render has produced output but
+    /// before [`swap`](Self::swap) has completed the frame swap and work buffer
+    /// preparation.
+    pub fn deferred_swap_pending(&self) -> bool {
+        self.deferred_swap_pending
+    }
+
     /// Selects the [`Swap`] mode applied at the end of each render.
     ///
-    /// This only records the mode. The work buffer is prepared by the render
-    /// post-step: [`Swap::Blank`] clears it, [`Swap::Retained`] copies the
-    /// rendered frame into it. Because that prep runs after the swap, the mode
-    /// set before a render governs the *next* frame's starting buffer. Arm
-    /// [`Swap::Retained`] on the render before the first overdraw frame, leave it
-    /// set for the session, then set [`Swap::Blank`] before returning to full
-    /// repaints.
+    /// This only records the mode. In [`Swap::Blank`] and [`Swap::Retained`],
+    /// the work buffer is prepared by the render post-step: [`Swap::Blank`]
+    /// clears it, [`Swap::Retained`] copies the rendered frame into it. Because
+    /// that prep runs after the swap, the mode set before a render governs the
+    /// *next* frame's starting buffer.
+    ///
+    /// [`Swap::Deferred`] leaves the post-step pending; call [`swap`](Self::swap)
+    /// before drawing again to choose [`Swap::Blank`] or [`Swap::Retained`] for
+    /// the next frame based on state observed after the render.
     pub fn set_swap(&mut self, swap: Swap) {
         self.swap = swap;
+    }
+
+    /// Completes a pending [`Swap::Deferred`] render.
+    ///
+    /// Pass [`Swap::Blank`] to make the next frame start from an empty work
+    /// buffer, or [`Swap::Retained`] to seed it from the frame that was just
+    /// rendered. Passing [`Swap::Deferred`] is invalid because this method is the
+    /// explicit completion point for a deferred render.
+    ///
+    /// # Panics
+    ///
+    /// Panics if no deferred render is pending, or if `swap` is
+    /// [`Swap::Deferred`].
+    pub fn swap(&mut self, swap: Swap) {
+        assert!(
+            self.deferred_swap_pending,
+            "DoubleBuffer::swap called without a pending deferred render"
+        );
+        assert!(
+            swap != Swap::Deferred,
+            "DoubleBuffer::swap requires Blank or Retained"
+        );
+        self.deferred_swap_pending = false;
+        self.finish_render_swap(swap);
     }
 
     /// Returns `true` if the output terminal is assumed to accept 24-bit
@@ -2762,6 +2808,7 @@ impl DoubleBuffer {
         self.diffable = false;
         self.scroll = 0;
         self.scroll_region = None;
+        self.deferred_swap_pending = false;
         self.epoch = self.epoch.wrapping_add(1);
         self.cursor.invalidate();
     }
@@ -2776,6 +2823,7 @@ impl DoubleBuffer {
             self.diffable = false;
             self.scroll = 0;
             self.scroll_region = None;
+            self.deferred_swap_pending = false;
             self.epoch = self.epoch.wrapping_add(1);
             self.cursor.invalidate();
         }
@@ -2840,6 +2888,10 @@ impl DoubleBuffer {
     ///
     /// Use [`write_buffer`](Self::write_buffer) to access the output.
     pub fn render_internal(&mut self) {
+        assert!(
+            !self.deferred_swap_pending,
+            "previous Swap::Deferred render must be completed with DoubleBuffer::swap before rendering again"
+        );
         if self.diffable {
             self.apply_scroll_optimization();
             self.current.render_diff(
@@ -2863,15 +2915,24 @@ impl DoubleBuffer {
             );
             self.diffable = true;
         }
+        if self.swap == Swap::Deferred {
+            self.deferred_swap_pending = true;
+        } else {
+            self.finish_render_swap(self.swap);
+        }
+        self.emit_cursor();
+    }
+
+    fn finish_render_swap(&mut self, swap: Swap) {
         std::mem::swap(&mut self.current, &mut self.previous);
-        match self.swap {
+        match swap {
             Swap::Blank => {
                 clear_cells(&mut self.current.cells);
                 self.current.side.clear();
             }
             Swap::Retained => self.retain_from_previous(),
+            Swap::Deferred => unreachable!("deferred swap is handled before finish_render_swap"),
         }
-        self.emit_cursor();
     }
 
     /// Seeds the work buffer with the on-screen frame for retained-mode drawing.
@@ -3020,6 +3081,10 @@ impl DoubleBuffer {
     ///
     /// Propagates any I/O error from writing to the terminal.
     pub fn render_inline(&mut self, term: &mut Terminal, prev_height: u16) -> std::io::Result<u16> {
+        assert!(
+            !self.deferred_swap_pending,
+            "previous Swap::Deferred render must be completed with DoubleBuffer::swap before rendering inline"
+        );
         if prev_height > 0 {
             MoveCursorUp(prev_height).write_to_buffer(&mut self.buf);
         }
@@ -4405,6 +4470,66 @@ mod test {
             "blank clearing not restored: {:?}",
             line
         );
+    }
+
+    /// Deferred mode lets the caller choose the next frame's starting buffer
+    /// after the previous frame was already rendered. Choosing Blank before the
+    /// next draw fixes the retained-exit case where a partial full-path draw
+    /// must erase cells immediately rather than one frame later.
+    #[test]
+    fn deferred_swap_can_blank_next_frame_after_render() {
+        let mut db = DoubleBuffer::new(10, 1);
+        let mut term = vt100::Parser::new(1, 10, 0);
+
+        db.set_swap(Swap::Deferred);
+        db.set_string(0, 0, "ABCDE", Style::DEFAULT);
+        db.render_internal();
+        term.process(&db.buf);
+
+        db.swap(Swap::Blank);
+        db.buf.clear();
+        db.set_string(0, 0, "X", Style::DEFAULT);
+        db.render_internal();
+        term.process(&db.buf);
+
+        let screen = term.screen().contents();
+        let line = screen.lines().next().unwrap_or_default();
+        assert_eq!(line.trim_end(), "X");
+    }
+
+    /// Completing a deferred render with Retained seeds the next work buffer
+    /// from the on-screen frame, so a partial overdraw can keep untouched cells.
+    #[test]
+    fn deferred_swap_can_retain_next_frame_after_render() {
+        let mut db = DoubleBuffer::new(10, 2);
+        let mut term = vt100::Parser::new(2, 10, 0);
+
+        db.set_swap(Swap::Deferred);
+        db.set_string(0, 0, "hello", Style::DEFAULT);
+        db.set_string(0, 1, "world", Style::DEFAULT);
+        db.render_internal();
+        term.process(&db.buf);
+
+        db.swap(Swap::Retained);
+        db.buf.clear();
+        db.set_string(0, 1, "WORLD", Style::DEFAULT);
+        db.render_internal();
+        term.process(&db.buf);
+
+        let screen = term.screen().contents();
+        let lines: Vec<&str> = screen.lines().collect();
+        assert_eq!(lines[0].trim_end(), "hello");
+        assert_eq!(lines[1].trim_end(), "WORLD");
+    }
+
+    #[test]
+    #[should_panic(expected = "previous Swap::Deferred render must be completed")]
+    fn deferred_swap_must_be_completed_before_next_render() {
+        let mut db = DoubleBuffer::new(4, 1);
+        db.set_swap(Swap::Deferred);
+        db.set_string(0, 0, "abcd", Style::DEFAULT);
+        db.render_internal();
+        db.render_internal();
     }
 
     /// Over a long retained session the side arena is compacted instead of
