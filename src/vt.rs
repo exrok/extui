@@ -413,9 +413,9 @@ pub const CLEAR_LINE_TO_LEFT: &[u8] = b"\x1b[1K";
 /// Each variant maps 1:1 to the numeric argument of `ESC[<n> q`, so encoding
 /// a shape into a byte stream is just a single-digit lookup. Use
 /// [`SetCursorStyle`] to emit the escape directly, or pass a shape through
-/// [`DoubleBuffer::set_cursor`] to have it managed alongside the cell diff.
+/// [`Buffer::set_cursor`] to have it managed alongside the cell diff.
 ///
-/// [`DoubleBuffer::set_cursor`]: crate::DoubleBuffer::set_cursor
+/// [`Buffer::set_cursor`]: crate::Buffer::set_cursor
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum CursorShape {

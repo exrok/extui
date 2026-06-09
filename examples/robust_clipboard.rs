@@ -6,7 +6,7 @@ use std::{
 };
 
 use extui::{
-    AnsiColor, DoubleBuffer, Style, Terminal, TerminalFeatures, TerminalFlags,
+    AnsiColor, Buffer, Style, Terminal, TerminalFeatures, TerminalFlags,
     event::{self, Event, Events, KeyCode, KeyModifiers},
     vt::{BufferWrite, ClipboardSelection, SetClipboard},
 };
@@ -22,7 +22,7 @@ fn main() -> io::Result<()> {
     let mut term = Terminal::open(flags)?;
     let stdin = std::io::stdin();
     let (w, h) = term.size()?;
-    let mut buf = DoubleBuffer::new(w, h);
+    let mut buf = Buffer::new(w, h);
     let mut events = Events::default();
     let mut app = App::default();
 
@@ -83,7 +83,7 @@ struct CopyReport {
     note: String,
 }
 
-fn render(app: &App, buf: &mut DoubleBuffer) {
+fn render(app: &App, buf: &mut Buffer) {
     buf.rect().with(AnsiColor::Black.as_bg()).fill(buf);
 
     let mut rect = buf.rect();

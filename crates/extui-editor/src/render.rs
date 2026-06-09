@@ -1,4 +1,4 @@
-use extui::{DoubleBuffer, Rect, Style};
+use extui::{Buffer, Rect, Style};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -104,7 +104,7 @@ fn next_tab_stop(col: u16, tabstop: u16) -> u16 {
 ///
 /// - `\t` expands to the next `tabstop` boundary.
 /// - Other control-char graphemes contribute zero width (matching
-///   `DoubleBuffer::set_stringn`, which drops them entirely).
+///   `Buffer::set_stringn`, which drops them entirely).
 /// - Everything else contributes its `unicode-width`.
 ///
 /// Returns the column *at the start of* the grapheme at `byte_col`
@@ -157,7 +157,7 @@ pub fn cursor_display_col(line: &str, byte_col: usize, mode: Mode, tabstop: u16)
 
 /// Render the full editor widget into `rect` on `buf`.
 pub fn render(
-    buf: &mut DoubleBuffer,
+    buf: &mut Buffer,
     rect: Rect,
     text: &TextBuffer,
     theme: &EditorTheme,
@@ -245,7 +245,7 @@ pub fn render(
 /// boundaries and emits each sub-segment with the run's style. Gaps
 /// between runs get [`EditorTheme::text`].
 fn render_nowrap(
-    buf: &mut DoubleBuffer,
+    buf: &mut Buffer,
     rect: Rect,
     text: &TextBuffer,
     theme: &EditorTheme,
@@ -274,7 +274,7 @@ fn render_nowrap(
 }
 
 fn render_wrapped(
-    buf: &mut DoubleBuffer,
+    buf: &mut Buffer,
     rect: Rect,
     text: &TextBuffer,
     theme: &EditorTheme,
@@ -314,7 +314,7 @@ fn render_wrapped(
 /// into the visible segments `[first_seg, last_seg)` directly at their
 /// screen rows.
 fn render_wrapped_line(
-    buf: &mut DoubleBuffer,
+    buf: &mut Buffer,
     rect: Rect,
     line: &str,
     line_base: u32,
@@ -476,7 +476,7 @@ fn render_wrapped_line(
 /// visible wrap segments `[first_seg, last_seg)`. `chunk.len()` must
 /// equal the number of display columns the run occupies.
 fn emit_wrapped_ascii_run(
-    buf: &mut DoubleBuffer,
+    buf: &mut Buffer,
     rect: Rect,
     base_y: u16,
     first_seg: u32,
@@ -508,7 +508,7 @@ fn emit_wrapped_ascii_run(
 }
 
 fn render_line_window(
-    buf: &mut DoubleBuffer,
+    buf: &mut Buffer,
     rect: Rect,
     y: u16,
     line: &str,
@@ -589,7 +589,7 @@ fn render_line_window(
 /// written to. Tab padding inherits `style` so a styled run reads as
 /// a single visual band.
 fn emit_run_window(
-    buf: &mut DoubleBuffer,
+    buf: &mut Buffer,
     rect: Rect,
     y: u16,
     text: &str,
@@ -663,7 +663,7 @@ fn emit_run_window(
 
 #[inline]
 fn emit_ascii_chunk(
-    buf: &mut DoubleBuffer,
+    buf: &mut Buffer,
     rect: Rect,
     y: u16,
     chunk: &str,
@@ -691,7 +691,7 @@ fn emit_ascii_chunk(
 }
 
 fn emit_grapheme_chunk(
-    buf: &mut DoubleBuffer,
+    buf: &mut Buffer,
     rect: Rect,
     y: u16,
     chunk: &str,
@@ -733,7 +733,7 @@ fn clip_run_to_line(
 }
 
 fn paint_selection(
-    buf: &mut DoubleBuffer,
+    buf: &mut Buffer,
     rect: Rect,
     text: &TextBuffer,
     theme: &EditorTheme,
@@ -871,7 +871,7 @@ pub fn char_range(text: &TextBuffer, sel: &Selection) -> (Cursor, Cursor) {
 /// `1` and is clipped horizontally to `rect`.
 ///
 /// Intended for post-[`render`] overlays (search highlights, spellcheck
-/// underlines) applied via [`DoubleBuffer::set_style`], which layers a
+/// underlines) applied via [`Buffer::set_style`], which layers a
 /// style on top of existing cells without overwriting text or syntax
 /// colors.
 pub(crate) fn visible_range_rects(
@@ -939,7 +939,7 @@ fn screen_row(row: usize, scroll_offset: u16, rect: Rect) -> Option<u16> {
 }
 
 fn place_cursor(
-    buf: &mut DoubleBuffer,
+    buf: &mut Buffer,
     rect: Rect,
     text: &TextBuffer,
     tabstop: u16,
@@ -1117,7 +1117,7 @@ fn display_span_rects(
 mod tests {
     use super::*;
     use crate::EditorTheme;
-    use extui::{Color, DoubleBuffer, Style, vt::Modifier};
+    use extui::{Buffer, Color, Style, vt::Modifier};
 
     fn rect(x: u16, y: u16, w: u16, h: u16) -> Rect {
         Rect { x, y, w, h }
@@ -1218,7 +1218,7 @@ mod tests {
             head: Cursor { row: 0, col: 1 },
             kind: VisualKind::Char,
         };
-        let mut db = DoubleBuffer::new(8, 1);
+        let mut db = Buffer::new(8, 1);
         render(
             &mut db,
             rect(0, 0, 8, 1),
@@ -1257,7 +1257,7 @@ mod tests {
             head: Cursor { row: 0, col: 2 },
             kind: VisualKind::Char,
         };
-        let mut db = DoubleBuffer::new(16, 1);
+        let mut db = Buffer::new(16, 1);
         render(
             &mut db,
             rect(0, 0, 16, 1),
@@ -1289,7 +1289,7 @@ mod tests {
             head: Cursor { row: 1, col: 0 },
             kind: VisualKind::Line,
         };
-        let mut db = DoubleBuffer::new(4, 2);
+        let mut db = Buffer::new(4, 2);
         render(
             &mut db,
             rect(0, 0, 4, 2),
@@ -1309,7 +1309,7 @@ mod tests {
         assert_eq!(cells[4].style().bg(), Some(Color::rgb(1, 2, 3)));
     }
 
-    fn row_text(db: &mut DoubleBuffer, width: u16, y: u16) -> String {
+    fn row_text(db: &mut Buffer, width: u16, y: u16) -> String {
         let cells = db.current().cells();
         (0..width)
             .map(|x| {
@@ -1321,7 +1321,7 @@ mod tests {
             .collect()
     }
 
-    fn render_wrapped_to(db: &mut DoubleBuffer, r: Rect, text: &TextBuffer, tabstop: u16) {
+    fn render_wrapped_to(db: &mut Buffer, r: Rect, text: &TextBuffer, tabstop: u16) {
         render(
             db,
             r,
@@ -1341,7 +1341,7 @@ mod tests {
     #[test]
     fn wrap_plain_line_splits_at_width() {
         let text = TextBuffer::from_str("abcdefgh");
-        let mut db = DoubleBuffer::new(4, 2);
+        let mut db = Buffer::new(4, 2);
         render_wrapped_to(&mut db, rect(0, 0, 4, 2), &text, 4);
         assert_eq!(row_text(&mut db, 4, 0), "abcd");
         assert_eq!(row_text(&mut db, 4, 1), "efgh");
@@ -1354,7 +1354,7 @@ mod tests {
         //   cols 2 and 3. Col 2 is row 0 last cell; col 3 is row 1 first
         //   cell. c lands at col 4 = row 1 col 1.
         let text = TextBuffer::from_str("ab\tc");
-        let mut db = DoubleBuffer::new(3, 2);
+        let mut db = Buffer::new(3, 2);
         render_wrapped_to(&mut db, rect(0, 0, 3, 2), &text, 4);
         assert_eq!(row_text(&mut db, 3, 0), "ab ");
         assert_eq!(row_text(&mut db, 3, 1), " c ");
@@ -1366,7 +1366,7 @@ mod tests {
         // cols 1..=2, straddling the segment boundary — dropped. Row 0
         // ends up "a " and row 1 is empty.
         let text = TextBuffer::from_str("a世");
-        let mut db = DoubleBuffer::new(2, 2);
+        let mut db = Buffer::new(2, 2);
         render_wrapped_to(&mut db, rect(0, 0, 2, 2), &text, 4);
         assert_eq!(row_text(&mut db, 2, 0), "a ");
         assert_eq!(row_text(&mut db, 2, 1), "  ");
@@ -1401,7 +1401,7 @@ mod tests {
             head: Cursor { row: 0, col: 0 },
             kind: VisualKind::Line,
         };
-        let mut db = DoubleBuffer::new(4, 3);
+        let mut db = Buffer::new(4, 3);
         render(
             &mut db,
             rect(0, 0, 4, 3),
@@ -1458,7 +1458,7 @@ mod tests {
                 style: Style::DEFAULT.with_fg(number_fg()),
             },
         ];
-        let mut db = DoubleBuffer::new(8, 2);
+        let mut db = Buffer::new(8, 2);
         render(
             &mut db,
             rect(0, 0, 8, 2),

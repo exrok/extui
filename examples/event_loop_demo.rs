@@ -1,6 +1,6 @@
 use extui::event::polling::GlobalWakerConfig;
 use extui::event::{self, Event, Events, KeyCode, KeyEvent};
-use extui::{AnsiColor, DoubleBuffer, Style, Terminal, TerminalFlags};
+use extui::{AnsiColor, Buffer, Style, Terminal, TerminalFlags};
 
 fn main() -> std::io::Result<()> {
     // Setup signal handlers
@@ -14,7 +14,7 @@ fn main() -> std::io::Result<()> {
     )?;
 
     let (w, h) = term.size()?;
-    let mut buf = DoubleBuffer::new(w, h);
+    let mut buf = Buffer::new(w, h);
     let mut events = Events::default();
     let stdin = std::io::stdin();
     let mut last_key = None::<KeyEvent>;

@@ -2,16 +2,16 @@
 
 A configurable text editor widget for
 [`extui`](https://github.com/exrok/extui). Embed it into any
-`DoubleBuffer` region; the host owns the terminal and event loop.
+`Buffer` region; the host owns the terminal and event loop.
 
 ```rust
-use extui::{DoubleBuffer, Rect, Terminal, TerminalFlags};
+use extui::{Buffer, Rect, Terminal, TerminalFlags};
 use extui::event::{Event, Events};
 use extui_editor::Editor;
 
 let mut term = Terminal::open(TerminalFlags::RAW_MODE | TerminalFlags::ALT_SCREEN)?;
 let (w, h) = term.size()?;
-let mut buf = DoubleBuffer::new(w, h);
+let mut buf = Buffer::new(w, h);
 
 let mut editor = Editor::new();
 editor.set_height_bounds(2, 10);   // min 2 rows, max 10; beyond max → scroll

@@ -7,7 +7,7 @@ use std::process::Command;
 
 use extui::event::polling::GlobalWakerConfig;
 use extui::event::{self, Event, Events, KeyCode, KeyModifiers};
-use extui::{DoubleBuffer, Rect, Terminal, TerminalFlags};
+use extui::{Buffer, Rect, Terminal, TerminalFlags};
 use extui_neovim::{NeovimEmbed, NeovimWaker};
 
 fn main() -> std::io::Result<()> {
@@ -21,7 +21,7 @@ fn main() -> std::io::Result<()> {
     )?;
 
     let (w, h) = term.size()?;
-    let mut buf = DoubleBuffer::new(w, h);
+    let mut buf = Buffer::new(w, h);
     buf.set_rgb_supported(true);
     let mut events = Events::default();
     let stdin = std::io::stdin();

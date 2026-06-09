@@ -1,8 +1,8 @@
-//! Embed a headless Neovim instance inside an [`extui::DoubleBuffer`] region.
+//! Embed a headless Neovim instance inside an [`extui::Buffer`] region.
 //!
 //! [`NeovimEmbed`] spawns `nvim --embed`, attaches a UI of the given size,
 //! and mirrors Neovim's `ext_linegrid` redraws into an internal grid that
-//! can be painted into any [`Rect`] of a [`DoubleBuffer`]. Input events
+//! can be painted into any [`Rect`] of a [`Buffer`]. Input events
 //! from the host's main loop can be translated and forwarded back to
 //! Neovim with [`NeovimEmbed::send_key`] and [`NeovimEmbed::send_mouse`].
 //!
@@ -27,13 +27,13 @@
 //! already decided whether RGB should be enabled, call
 //! [`NeovimEmbed::set_termguicolors`] explicitly.
 //!
-//! A typical setup keeps the host [`DoubleBuffer`] and Neovim in sync:
+//! A typical setup keeps the host [`Buffer`] and Neovim in sync:
 //!
 //! ```ignore
-//! use extui::{DoubleBuffer, rgb_supported_from_env};
+//! use extui::{Buffer, rgb_supported_from_env};
 //! use extui_neovim::NeovimEmbed;
 //!
-//! let mut buf = DoubleBuffer::new(width, height);
+//! let mut buf = Buffer::new(width, height);
 //! let rgb = rgb_supported_from_env();
 //! buf.set_rgb_supported(rgb);
 //!
@@ -55,7 +55,7 @@ use std::time::Duration;
 
 use extui::event::polling;
 use extui::event::{KeyEvent, MouseEvent};
-use extui::{DoubleBuffer, Rect};
+use extui::{Buffer, Rect};
 
 pub mod grid;
 pub mod input;
@@ -139,7 +139,7 @@ impl NeovimWaker {
 }
 
 /// An embedded Neovim instance that renders into a sub-rect of an extui
-/// [`DoubleBuffer`].
+/// [`Buffer`].
 pub struct NeovimEmbed {
     child: Option<Child>,
     stdin: Option<ChildStdin>,
@@ -388,7 +388,7 @@ impl NeovimEmbed {
     ///
     /// Reserves the palette slot range
     /// `palette_offset..palette_offset + MAX_DECORATIONS` on the host
-    /// [`DoubleBuffer`] for the embed's exclusive use. Each distinct
+    /// [`Buffer`] for the embed's exclusive use. Each distinct
     /// combination of underline variant and color that Neovim asks for
     /// is assigned one slot from that range, and styled underlines
     /// render in the terminal with their intended color.
@@ -402,10 +402,10 @@ impl NeovimEmbed {
     /// # Examples
     ///
     /// ```ignore
-    /// use extui::DoubleBuffer;
+    /// use extui::Buffer;
     /// use extui_neovim::NeovimEmbed;
     ///
-    /// let mut buf = DoubleBuffer::new(80, 24);
+    /// let mut buf = Buffer::new(80, 24);
     /// let mut nvim = NeovimEmbed::spawn(80, 24)?;
     /// nvim.enable_decorations(0);
     /// # Ok::<(), std::io::Error>(())
@@ -420,7 +420,7 @@ impl NeovimEmbed {
     ///
     /// Use this after you decide RGB support in the host.
     ///
-    /// Keep this aligned with [`DoubleBuffer::set_rgb_supported`]. If the host
+    /// Keep this aligned with [`Buffer::set_rgb_supported`]. If the host
     /// buffer is quantizing colors then leave `termguicolors` off. If the host
     /// buffer supports RGB then enable both.
     pub fn set_termguicolors(&mut self, enabled: bool) -> io::Result<()> {
@@ -475,9 +475,9 @@ impl NeovimEmbed {
     /// Cells are clipped to `rect`'s dimensions if the embedded grid is
     /// larger, and the remaining area is left untouched if smaller. The
     /// call also forwards Neovim's cursor position, shape, and busy
-    /// state into [`DoubleBuffer::set_cursor`] / [`DoubleBuffer::hide_cursor`],
+    /// state into [`Buffer::set_cursor`] / [`Buffer::hide_cursor`],
     /// so the host does not need to emit cursor escapes by hand.
-    pub fn render(&self, rect: Rect, buf: &mut DoubleBuffer) {
+    pub fn render(&self, rect: Rect, buf: &mut Buffer) {
         let Ok(mut guard) = self.state.lock() else {
             return;
         };

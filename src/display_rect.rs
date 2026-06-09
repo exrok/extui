@@ -109,7 +109,7 @@ impl DisplayRect {
     }
 
     /// Fills the rectangle with the current style.
-    pub fn fill<'a>(self, buf: &mut DoubleBuffer) -> DisplayRect {
+    pub fn fill<'a>(self, buf: &mut Buffer) -> DisplayRect {
         if self.rect.is_empty() {
             return self;
         }
@@ -133,7 +133,7 @@ impl DisplayRect {
         self
     }
     /// Renders formatted content using [`Display`](std::fmt::Display).
-    pub fn fmt<'a>(self, buf: &mut DoubleBuffer, content: impl std::fmt::Display) -> DisplayRect {
+    pub fn fmt<'a>(self, buf: &mut Buffer, content: impl std::fmt::Display) -> DisplayRect {
         if self.rect.is_empty() {
             return self;
         }
@@ -147,10 +147,10 @@ impl DisplayRect {
         rect
     }
     /// Renders the given text string.
-    pub fn text(self, buf: &mut DoubleBuffer, text: &str) -> DisplayRect {
+    pub fn text(self, buf: &mut Buffer, text: &str) -> DisplayRect {
         self.text_inner(&mut buf.current, text)
     }
-    pub(crate) fn text_inner(mut self, buf: &mut Buffer, text: &str) -> DisplayRect {
+    pub(crate) fn text_inner(mut self, buf: &mut Grid, text: &str) -> DisplayRect {
         if self.rect.is_empty() {
             return self;
         }
@@ -245,8 +245,8 @@ impl DisplayRect {
 mod tests {
     use super::*;
 
-    /// Helper to render a DoubleBuffer and parse the VT output
-    fn render_and_parse(db: &mut DoubleBuffer) -> vt100::Parser {
+    /// Helper to render a Buffer and parse the VT output
+    fn render_and_parse(db: &mut Buffer) -> vt100::Parser {
         let mut parser = vt100::Parser::new(db.height(), db.width(), 0);
         db.render_internal();
         parser.process(&db.buf);
@@ -256,8 +256,8 @@ mod tests {
 
     // Helper for aquiring the contents directly from blank terminal size,
     // a function.
-    fn render(w: u16, h: u16, mut func: impl FnMut(Rect, &mut DoubleBuffer)) -> String {
-        let mut db = DoubleBuffer::new(w, h);
+    fn render(w: u16, h: u16, mut func: impl FnMut(Rect, &mut Buffer)) -> String {
+        let mut db = Buffer::new(w, h);
         let rect = db.rect();
         func(rect, &mut db);
         let parser = render_and_parse(&mut db);
@@ -266,7 +266,7 @@ mod tests {
 
     #[test]
     fn halign_right_offset() {
-        let mut buffer = Buffer::new(10, 1);
+        let mut buffer = Grid::new(10, 1);
         let rect = Rect {
             x: 0,
             y: 0,
@@ -284,7 +284,7 @@ mod tests {
         assert_eq!(result.properties.right_offset, 3);
 
         // Test chaining: add more text before the existing text
-        let mut buffer2 = Buffer::new(10, 1);
+        let mut buffer2 = Grid::new(10, 1);
         let rect2 = Rect {
             x: 0,
             y: 0,
@@ -306,7 +306,7 @@ mod tests {
 
     #[test]
     fn halign_center_offset() {
-        let mut buffer = Buffer::new(10, 1);
+        let mut buffer = Grid::new(10, 1);
         let rect = Rect {
             x: 0,
             y: 0,

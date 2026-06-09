@@ -3,10 +3,10 @@ use extui::Style;
 /// Styles applied to the three shapes of visual-mode selection.
 ///
 /// Each field is layered on top of the existing cell style via
-/// [`DoubleBuffer::set_style`] during rendering, so the foreground
+/// [`Buffer::set_style`] during rendering, so the foreground
 /// from any syntax-coloring [`StyleRun`] is preserved.
 ///
-/// [`DoubleBuffer::set_style`]: extui::DoubleBuffer::set_style
+/// [`Buffer::set_style`]: extui::Buffer::set_style
 /// [`StyleRun`]: crate::StyleRun
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SelectionTheme {

@@ -5,7 +5,7 @@
 //! on the target code path.
 
 use extui::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
-use extui::{DoubleBuffer, Rect};
+use extui::{Buffer, Rect};
 use extui_editor::{Editor, Replacement, StyleRun, TextBuffer, TrackedChange};
 use std::time::{Duration, Instant};
 
@@ -86,14 +86,14 @@ fn key_ctrl(c: char) -> KeyEvent {
 }
 
 struct ProfileState {
-    db: DoubleBuffer,
+    db: Buffer,
     ed: Editor,
     hl: Option<tinyhl::Highlighter>,
     runs: Vec<StyleRun>,
 }
 
 fn make_editor(lang: Option<tinyhl::Language>, wrap: bool, text: &str) -> ProfileState {
-    let db = DoubleBuffer::new(WIDTH, HEIGHT);
+    let db = Buffer::new(WIDTH, HEIGHT);
     let mut ed = Editor::new();
     ed.resize(WIDTH);
     ed.set_wrap(wrap);

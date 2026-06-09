@@ -202,7 +202,7 @@ impl SyntaxHighlighter {
         &mut self,
         ed: &mut Editor,
         rect: extui::Rect,
-        buf: &mut extui::DoubleBuffer,
+        buf: &mut extui::Buffer,
         syntax: &SyntaxTheme,
         text_style: Style,
     ) {

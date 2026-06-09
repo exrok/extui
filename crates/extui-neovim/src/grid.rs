@@ -3,7 +3,7 @@
 //! The reader thread decodes each `redraw` notification and calls the
 //! corresponding `apply_*` method on [`GridState`]. The grid owns an
 //! [`extui::Buffer`] directly, so rendering is a raw cell-blit into the
-//! target [`extui::DoubleBuffer`] with no UTF-8 re-segmentation or
+//! target [`extui::Buffer`] with no UTF-8 re-segmentation or
 //! highlight re-resolution per frame.
 //!
 //! Highlight attributes are flattened into pre-resolved [`extui::Style`]
@@ -11,7 +11,7 @@
 //! so the render loop never touches the raw attr map.
 
 use extui::vt::Modifier;
-use extui::{AnsiColor, Buffer, Color, CursorShape, DoubleBuffer, Rect, Rgb, Style};
+use extui::{AnsiColor, Color, CursorShape, Buffer, Grid, Rect, Rgb, Style};
 
 use crate::msgpack::{Error as MsgpackError, Kind, Reader};
 
@@ -151,7 +151,7 @@ impl HlEntry {
 
 /// Mirrors the `ext_linegrid` grid maintained by an embedded Neovim.
 pub struct GridState {
-    grid: Buffer,
+    grid: Grid,
     cursor_row: u16,
     cursor_col: u16,
     default_rgb_style: Style,
@@ -171,7 +171,7 @@ impl GridState {
     /// Creates a new grid of the given dimensions filled with blank cells.
     pub fn new(width: u16, height: u16) -> Self {
         GridState {
-            grid: Buffer::new(width, height),
+            grid: Grid::new(width, height),
             cursor_row: 0,
             cursor_col: 0,
             default_rgb_style: Style::DEFAULT,
@@ -320,7 +320,7 @@ impl GridState {
     /// [`NeovimEmbed::render`](crate::NeovimEmbed::render) calls this
     /// automatically before painting. Hosts that bypass `render` and
     /// drive [`GridState`] directly can call it themselves.
-    pub fn sync_palettes(&mut self, buf: &mut DoubleBuffer) {
+    pub fn sync_palettes(&mut self, buf: &mut Buffer) {
         let Some(range) = self.decoration_range.as_mut() else {
             return;
         };
@@ -428,7 +428,7 @@ impl GridState {
     }
 
     fn resize(&mut self, width: u16, height: u16) {
-        self.grid = Buffer::new(width, height);
+        self.grid = Grid::new(width, height);
         if self.cursor_col >= width {
             self.cursor_col = width.saturating_sub(1);
         }
@@ -442,7 +442,7 @@ impl GridState {
         // Neovim follows `grid_clear` with fresh `grid_line` events that
         // repaint the visible area, so we just drop back to an empty
         // buffer here.
-        self.grid = Buffer::new(self.grid.width(), self.grid.height());
+        self.grid = Grid::new(self.grid.width(), self.grid.height());
         Ok(())
     }
 
@@ -678,7 +678,7 @@ impl GridState {
     /// as raw 16-byte structs with no UTF-8 work. Handle cells are
     /// resolved against the grid's own side arena and re-interned into
     /// the target buffer via `set_stringn`.
-    pub fn render(&self, rect: Rect, buf: &mut DoubleBuffer) {
+    pub fn render(&self, rect: Rect, buf: &mut Buffer) {
         let grid_w = self.grid.width();
         let grid_h = self.grid.height();
         let height = grid_h.min(rect.h);
@@ -792,7 +792,7 @@ fn underline_kind_from_key(key: &str) -> UnderlineStyle {
 /// Modifier bits are collected identically to [`read_attr_map`]; the
 /// caller picks whichever source it prefers based on `termguicolors`.
 /// If the host terminal does not support truecolor, the base
-/// [`DoubleBuffer`] quantizes on emission.
+/// [`Buffer`] quantizes on emission.
 fn read_rgb_attr_map(r: &mut Reader<'_>) -> Result<AttrMap, Error> {
     let n = r.read_map_len()?;
     let mut out = AttrMap::EMPTY;
@@ -879,7 +879,7 @@ fn read_rgb_color(r: &mut Reader<'_>) -> Result<Option<Color>, Error> {
 /// Unpacks a 24-bit RGB value as received on the Neovim RPC wire.
 ///
 /// Any value outside `0..=0xffffff` means "no color"; the base
-/// [`DoubleBuffer`] handles any ANSI fallback when the host terminal
+/// [`Buffer`] handles any ANSI fallback when the host terminal
 /// does not support truecolor.
 fn rgb_color_from_wire(v: i64) -> Option<Color> {
     if !(0..=0xff_ff_ff).contains(&v) {
@@ -1381,7 +1381,7 @@ mod tests {
         assert_eq!(s2.palette_index(), 33);
         assert_eq!(s3.palette_index(), 32);
 
-        let mut buf = extui::DoubleBuffer::new(1, 1);
+        let mut buf = extui::Buffer::new(1, 1);
         g.sync_palettes(&mut buf);
         let p = buf.palette();
         // Slots 0..=31 should be untouched; 32 & 33 hold the escape bytes.

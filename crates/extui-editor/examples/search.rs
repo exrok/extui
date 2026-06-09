@@ -11,7 +11,7 @@
 //!   navigation for jumping to match starts.
 //! - `visible_range_rects` — maps buffer byte ranges to screen rects,
 //!   used here to paint match highlights after `render()` via
-//!   `DoubleBuffer::set_style`.
+//!   `Buffer::set_style`.
 //! - `set_track_replacements` / `take_tracked_change` — drive a
 //!   drop-shift-rescan match list so each edit only rescans the
 //!   window it affected.
@@ -30,7 +30,7 @@ use std::time::Duration;
 
 use extui::event::polling::{GlobalWakerConfig, initialize_global_waker};
 use extui::event::{self, Event, Events, KeyCode, KeyModifiers};
-use extui::{AnsiColor, CursorShape, DoubleBuffer, HAlign, Rect, Style, Terminal, TerminalFlags};
+use extui::{AnsiColor, Buffer, CursorShape, HAlign, Rect, Style, Terminal, TerminalFlags};
 use extui_editor::{Editor, Mode, Replacement, Span, TrackedChange, bindings};
 
 #[path = "common/themes.rs"]
@@ -77,7 +77,7 @@ fn main() -> io::Result<()> {
         TerminalFlags::RAW_MODE | TerminalFlags::ALT_SCREEN | TerminalFlags::HIDE_CURSOR,
     )?;
     let (w, h) = term.size()?;
-    let mut double = DoubleBuffer::new(w, h);
+    let mut double = Buffer::new(w, h);
     double.set_rgb_supported(true);
 
     double.set_palette(MATCH_PALETTE, b"\x1b[30;43m".to_vec());

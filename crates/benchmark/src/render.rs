@@ -1,4 +1,4 @@
-use extui::{AnsiColor, BoxStyle, DoubleBuffer, HAlign, Rect, Style, vt::Modifier};
+use extui::{AnsiColor, BoxStyle, Buffer, HAlign, Rect, Style, vt::Modifier};
 use jsony_bench::{Bencher, Stat};
 use std::cell::RefCell;
 
@@ -40,7 +40,7 @@ const TASK_NAMES: &[&str] = &[
 
 const PALETTE_UNDERLINE: u8 = 0;
 
-pub fn setup(db: &mut DoubleBuffer) {
+pub fn setup(db: &mut Buffer) {
     db.set_palette(PALETTE_UNDERLINE, b"\x1b[4:3m".to_vec());
 }
 
@@ -82,7 +82,7 @@ impl World {
     }
 }
 
-pub fn draw(db: &mut DoubleBuffer, world: &World) {
+pub fn draw(db: &mut Buffer, world: &World) {
     let mut full = db.rect();
     if full.w < 30 || full.h < 5 {
         return;
@@ -100,7 +100,7 @@ pub fn draw(db: &mut DoubleBuffer, world: &World) {
     draw_status_bar(db, status_bar, world);
 }
 
-fn draw_list(db: &mut DoubleBuffer, mut area: Rect, world: &World) {
+fn draw_list(db: &mut Buffer, mut area: Rect, world: &World) {
     area.take_top(1i32)
         .with(
             Style::DEFAULT
@@ -142,7 +142,7 @@ fn draw_list(db: &mut DoubleBuffer, mut area: Rect, world: &World) {
     }
 }
 
-fn draw_panel(db: &mut DoubleBuffer, area: Rect) {
+fn draw_panel(db: &mut Buffer, area: Rect) {
     let mut inner = BoxStyle::LIGHT.render(area, db);
     inner
         .take_top(1i32)
@@ -166,7 +166,7 @@ fn draw_panel(db: &mut DoubleBuffer, area: Rect) {
     }
 }
 
-fn draw_status_bar(db: &mut DoubleBuffer, area: Rect, world: &World) {
+fn draw_status_bar(db: &mut Buffer, area: Rect, world: &World) {
     let style = Style::DEFAULT
         .with_bg(AnsiColor::Grey[6])
         .with_fg(AnsiColor::Cornsilk1);
@@ -186,7 +186,7 @@ fn draw_status_bar(db: &mut DoubleBuffer, area: Rect, world: &World) {
         );
 }
 
-pub fn draw_log(db: &mut DoubleBuffer, world: &World) {
+pub fn draw_log(db: &mut Buffer, world: &World) {
     let mut area = db.rect();
     let visible = area.h as usize;
     let len = world.tasks.len();
@@ -221,7 +221,7 @@ pub fn draw_log(db: &mut DoubleBuffer, world: &World) {
 pub struct Scenario {
     pub name: &'static str,
     pub reset_each_frame: bool,
-    pub run: fn(&mut DoubleBuffer, &mut World, u64),
+    pub run: fn(&mut Buffer, &mut World, u64),
 }
 
 pub const SCENARIOS: &[Scenario] = &[
@@ -262,37 +262,37 @@ pub const SCENARIOS: &[Scenario] = &[
     },
 ];
 
-fn first_paint(db: &mut DoubleBuffer, world: &mut World, _frame: u64) {
+fn first_paint(db: &mut Buffer, world: &mut World, _frame: u64) {
     db.reset();
     draw(db, world);
 }
 
-fn idempotent(db: &mut DoubleBuffer, world: &mut World, _frame: u64) {
+fn idempotent(db: &mut Buffer, world: &mut World, _frame: u64) {
     draw(db, world);
 }
 
-fn cursor_move(db: &mut DoubleBuffer, world: &mut World, frame: u64) {
+fn cursor_move(db: &mut Buffer, world: &mut World, frame: u64) {
     world.cursor = (frame as usize) % world.tasks.len();
     draw(db, world);
 }
 
-fn status_tick(db: &mut DoubleBuffer, world: &mut World, frame: u64) {
+fn status_tick(db: &mut Buffer, world: &mut World, frame: u64) {
     world.tick = frame;
     draw(db, world);
 }
 
-fn log_tail(db: &mut DoubleBuffer, world: &mut World, _frame: u64) {
+fn log_tail(db: &mut Buffer, world: &mut World, _frame: u64) {
     world.scroll = world.scroll.wrapping_add(1);
     db.scroll(1);
     draw_log(db, world);
 }
 
-fn panel_toggle(db: &mut DoubleBuffer, world: &mut World, frame: u64) {
+fn panel_toggle(db: &mut Buffer, world: &mut World, frame: u64) {
     world.panel = frame % 2 == 0;
     draw(db, world);
 }
 
-fn full_repaint(db: &mut DoubleBuffer, world: &mut World, _frame: u64) {
+fn full_repaint(db: &mut Buffer, world: &mut World, _frame: u64) {
     world.tasks.rotate_left(1);
     for t in &mut world.tasks {
         t.status = (t.status + 1) % STATUSES.len() as u8;
@@ -301,13 +301,13 @@ fn full_repaint(db: &mut DoubleBuffer, world: &mut World, _frame: u64) {
 }
 
 struct State {
-    db: DoubleBuffer,
+    db: Buffer,
     world: World,
     frame: u64,
 }
 
 fn measure_bytes(scenario: &Scenario, w: u16, h: u16) -> u64 {
-    let mut db = DoubleBuffer::new(w, h);
+    let mut db = Buffer::new(w, h);
     setup(&mut db);
     let mut world = World::new(256);
     (scenario.run)(&mut db, &mut world, 0);
@@ -319,7 +319,7 @@ fn measure_bytes(scenario: &Scenario, w: u16, h: u16) -> u64 {
 }
 
 fn run_scenario(bencher: &mut Bencher, scenario: &Scenario, w: u16, h: u16) -> Stat {
-    let mut db = DoubleBuffer::new(w, h);
+    let mut db = Buffer::new(w, h);
     setup(&mut db);
     let state = RefCell::new(State {
         db,

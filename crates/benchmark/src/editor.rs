@@ -1,5 +1,5 @@
 use extui::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
-use extui::{DoubleBuffer, Rect};
+use extui::{Buffer, Rect};
 use extui_editor::{Editor, Replacement, StyleRun, TextBuffer, TrackedChange};
 use jsony_bench::{Bencher, Stat};
 use std::cell::RefCell;
@@ -72,7 +72,7 @@ impl<'a> tinyhl::Source for BufferSource<'a> {
 }
 
 pub struct State {
-    pub db: DoubleBuffer,
+    pub db: Buffer,
     pub ed: Editor,
     pub hl: Option<tinyhl::Highlighter>,
     pub runs: Vec<StyleRun>,
@@ -140,7 +140,7 @@ fn paint_and_flush(state: &mut State) {
 }
 
 fn make_state(lang: Option<tinyhl::Language>, wrap: bool, text: &str) -> State {
-    let db = DoubleBuffer::new(WIDTH, HEIGHT);
+    let db = Buffer::new(WIDTH, HEIGHT);
     let mut ed = Editor::new();
     ed.resize(WIDTH);
     ed.set_wrap(wrap);

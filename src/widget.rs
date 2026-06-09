@@ -4,7 +4,7 @@
 //! ready-to-use components and examples of how to build widgets using extui
 //! primitives.
 
-use crate::{Cell, DoubleBuffer, Rect, vt::Modifier};
+use crate::{Buffer, Cell, Rect, vt::Modifier};
 
 /// A vertical scrollbar widget.
 ///
@@ -20,7 +20,7 @@ impl ScrollBar {
     /// Renders a thin scrollbar using box-drawing characters.
     ///
     /// Uses half-block characters for sub-cell positioning.
-    pub fn render(mut self, area: Rect, buf: &mut DoubleBuffer) {
+    pub fn render(mut self, area: Rect, buf: &mut Buffer) {
         const TOP_END: Cell = Cell::new_const("┴", crate::Style::DEFAULT);
         const BOT_END: Cell = Cell::new_const("┬", crate::Style::DEFAULT);
         const THUMB_UPPER: Cell = Cell::new_const("╿", crate::Style::DEFAULT);
@@ -90,7 +90,7 @@ impl ScrollBar {
     /// Renders a thick scrollbar using block characters.
     ///
     /// Uses eighth-block characters for smooth sub-cell positioning.
-    pub fn render_thick(mut self, area: Rect, buf: &mut DoubleBuffer) {
+    pub fn render_thick(mut self, area: Rect, buf: &mut Buffer) {
         // Use block elements for a thicker, more modern look.
         const TOP_END: Cell = Cell::new_const("┴", crate::Style::DEFAULT);
         const BOT_END: Cell = Cell::new_const("┬", crate::Style::DEFAULT);

@@ -27,7 +27,7 @@ use alacritty_terminal::tty::{self, EventedReadWrite, Options, Shell};
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor, Rgb};
 use extui::event::polling::{GlobalWakerConfig, initialize_global_waker};
 use extui::vt::{BufferWrite, HIDE_CURSOR, MoveCursor, SHOW_CURSOR};
-use extui::{DoubleBuffer, Rect, vt};
+use extui::{Buffer, Rect, vt};
 use extui_neovim::{NeovimEmbed, NeovimWaker};
 
 const DEFAULT_COLS: u16 = 80;
@@ -437,7 +437,7 @@ fn run_embed(cli: &Cli) -> io::Result<Capture> {
     }
     let mut terminal = VirtualTerminal::new(cli.cols, cli.rows);
     let mut raw = Vec::new();
-    let mut frame_buf = DoubleBuffer::new(cli.cols, cli.rows);
+    let mut frame_buf = Buffer::new(cli.cols, cli.rows);
     let rect = Rect {
         x: 0,
         y: 0,

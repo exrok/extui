@@ -1,7 +1,7 @@
 //! Embeddable text editor widget for [`extui`].
 //!
 //! [`Editor`] is a self-contained state machine. The host owns the
-//! [`Terminal`] and [`DoubleBuffer`], forwards key events to
+//! [`Terminal`] and [`Buffer`], forwards key events to
 //! [`Editor::send_key`], and paints the editor into a [`Rect`] via
 //! [`Editor::render`]. The widget reports its preferred height through
 //! [`Editor::desired_height`] so hosts can size it inline.
@@ -16,7 +16,7 @@
 //! Compose the editor into an event loop:
 //!
 //! ```no_run
-//! use extui::{DoubleBuffer, Rect};
+//! use extui::{Buffer, Rect};
 //! use extui_editor::Editor;
 //!
 //! let mut editor = Editor::new();
@@ -24,7 +24,7 @@
 //! editor.resize(80);
 //! editor.set_lines("hello\nworld");
 //!
-//! let mut buf = DoubleBuffer::new(80, 24);
+//! let mut buf = Buffer::new(80, 24);
 //! let rect = Rect { x: 0, y: 0, w: 80, h: editor.desired_height() };
 //! editor.render(rect, &mut buf);
 //! ```
@@ -35,7 +35,7 @@
 //!
 //! [`extui`]: https://docs.rs/extui
 //! [`Terminal`]: extui::Terminal
-//! [`DoubleBuffer`]: extui::DoubleBuffer
+//! [`Buffer`]: extui::Buffer
 //! [`Rect`]: extui::Rect
 
 pub mod bindings;

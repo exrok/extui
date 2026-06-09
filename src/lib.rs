@@ -3,13 +3,13 @@
 //! # Rect based rendering and layout
 //!
 //! [Rect] is the core abstraction in extui, use builder style methods to
-//! paint to the screen using an [DoubleBuffer] for rendering to screen
+//! paint to the screen using an [Buffer] for rendering to screen
 //! efficiently.
 //!
 //! ```no_run
-//! use extui::{Rect, DoubleBuffer, Style};
+//! use extui::{Rect, Buffer, Style};
 //!
-//! fn render_list(items: &[&str], mut area: Rect, buf: &mut DoubleBuffer) {
+//! fn render_list(items: &[&str], mut area: Rect, buf: &mut Buffer) {
 //!     for item in items {
 //!         if area.h == 0 {
 //!             break;
@@ -33,7 +33,7 @@
 //! # Getting Started
 //!
 //! ```no_run
-//! use extui::{Terminal, TerminalFlags, DoubleBuffer, Style, AnsiColor};
+//! use extui::{Terminal, TerminalFlags, Buffer, Style, AnsiColor};
 //! use extui::event::{self, Event, KeyCode, Events};
 //!
 //! // Open terminal in raw mode with alternate screen
@@ -42,7 +42,7 @@
 //! )?;
 //!
 //! let (w, h) = term.size()?;
-//! let mut buf = DoubleBuffer::new(w, h);
+//! let mut buf = Buffer::new(w, h);
 //! let mut events = Events::default();
 //!
 //! loop {
@@ -302,14 +302,14 @@ impl BoxStyle {
     /// Renders a complete box border within the given rectangle.
     ///
     /// Returns the inner rectangle after subtracting the border.
-    pub fn render(&self, rect: Rect, buf: &mut DoubleBuffer) -> Rect {
+    pub fn render(&self, rect: Rect, buf: &mut Buffer) -> Rect {
         self.render_partial(rect, buf, RelSet::BOX)
     }
 
     /// Renders only the specified parts of a box border.
     ///
     /// Returns the inner rectangle after subtracting the rendered edges.
-    pub fn render_partial(&self, mut rect: Rect, buf: &mut DoubleBuffer, set: RelSet) -> Rect {
+    pub fn render_partial(&self, mut rect: Rect, buf: &mut Buffer, set: RelSet) -> Rect {
         let Rect { x, y, w, h } = rect;
         if w == 0 || h == 0 {
             return rect;
@@ -807,13 +807,13 @@ impl Style {
     pub(crate) const FG_ALL_MASK: u64 = Self::HAS_FG | Self::FG_IS_RGB | Self::FG_MASK;
     pub(crate) const BG_ALL_MASK: u64 = Self::HAS_BG | Self::BG_IS_RGB | Self::BG_MASK;
 
-    /// Creates a palette style referencing an entry in the [`DoubleBuffer`]'s palette table.
+    /// Creates a palette style referencing an entry in the [`Buffer`]'s palette table.
     ///
     /// Palette entries contain raw VT escape bytes that are emitted verbatim during rendering,
     /// replacing the modifier attributes. Foreground and background colors can still be set
     /// independently via [`with_fg`](Self::with_fg) and [`with_bg`](Self::with_bg).
     ///
-    /// Register entries with [`DoubleBuffer::set_palette`] before rendering.
+    /// Register entries with [`Buffer::set_palette`] before rendering.
     /// Do not combine palette styles with modifier methods.
     pub const fn palette(index: u8) -> Style {
         // In palette-style mode modifier bits are unused; overlay the index at bits 0..8.
@@ -1209,14 +1209,14 @@ impl SideBuffer {
 /// Stores styled text content for rendering to a terminal. Use
 /// [`set_string`](Self::set_string) and [`set_style`](Self::set_style)
 /// to modify the buffer contents.
-pub struct Buffer {
+pub struct Grid {
     pub(crate) cells: Box<[Cell]>,
     pub(crate) side: SideBuffer,
     pub(crate) width: u16,
     pub(crate) height: u16,
     /// When `true`, styles written via [`set_stringn`](Self::set_stringn)
     /// and [`set_style`](Self::set_style) are quantized to the 256-color
-    /// palette before being stored. Owned and toggled by [`DoubleBuffer`].
+    /// palette before being stored. Owned and toggled by [`Buffer`].
     pub(crate) quantize_rgb: bool,
 }
 
@@ -1567,7 +1567,7 @@ pub fn clear_cells(cells: &mut [Cell]) {
     }
 }
 
-impl Buffer {
+impl Grid {
     /// Scrolls the buffer upward by `amount` lines.
     ///
     /// Lines shifted off the top are discarded. New lines exposed at
@@ -1652,9 +1652,9 @@ impl Buffer {
 
     /// Creates a new buffer of `width` columns by `height` rows,
     /// filled with empty cells.
-    pub fn new(width: u16, height: u16) -> Buffer {
+    pub fn new(width: u16, height: u16) -> Grid {
         let cells = vec![Cell::EMPTY; width as usize * height as usize].into_boxed_slice();
-        Buffer {
+        Grid {
             cells,
             side: SideBuffer::default(),
             width,
@@ -1794,7 +1794,7 @@ impl Buffer {
     fn render_diff(
         &mut self,
         buf: &mut Vec<u8>,
-        old: &Buffer,
+        old: &Grid,
         x_offset: u16,
         y_offset: u16,
         blanking: bool,
@@ -1805,7 +1805,7 @@ impl Buffer {
             // Fall back to full render; use bounded=false to preserve old behavior
             // for callers that haven't opted into sub-region rendering. Callers
             // that use x_offset/bounded always ensure old and new have matching
-            // sizes (they're swapped in-place inside DoubleBuffer), so this path
+            // sizes (they're swapped in-place inside Buffer), so this path
             // is only reached on resize, which resets diffable to false anyway.
             self.render(buf, x_offset, y_offset, false, inline, palette);
             return;
@@ -2485,12 +2485,12 @@ impl Drop for Terminal {
 /// sessions that forward the variable.
 ///
 /// This check performs no terminal I/O. Pair it with
-/// [`DoubleBuffer::set_rgb_supported`] during setup:
+/// [`Buffer::set_rgb_supported`] during setup:
 ///
 /// ```no_run
-/// use extui::{DoubleBuffer, rgb_supported_from_env};
+/// use extui::{Buffer, rgb_supported_from_env};
 ///
-/// let mut buf = DoubleBuffer::new(80, 24);
+/// let mut buf = Buffer::new(80, 24);
 /// buf.set_rgb_supported(rgb_supported_from_env());
 /// ```
 pub fn rgb_supported_from_env() -> bool {
@@ -2508,11 +2508,11 @@ pub fn rgb_supported_from_env() -> bool {
 /// # Examples
 ///
 /// ```no_run
-/// use extui::{DoubleBuffer, Terminal, TerminalFlags};
+/// use extui::{Buffer, Terminal, TerminalFlags};
 ///
 /// let mut term = Terminal::open(TerminalFlags::RAW_MODE)?;
 /// let (w, h) = term.size()?;
-/// let mut buf = DoubleBuffer::new(w, h);
+/// let mut buf = Buffer::new(w, h);
 ///
 /// // Draw to buf, then render
 /// buf.render(&mut term);
@@ -2520,7 +2520,7 @@ pub fn rgb_supported_from_env() -> bool {
 /// ```
 /// Selects how the work buffer is prepared at the end of each render.
 ///
-/// A [`DoubleBuffer`] normally swaps its two frames on every render so the
+/// A [`Buffer`] normally swaps its two frames on every render so the
 /// retained frame matches what is on screen. The post-swap step then readies the
 /// work buffer for the next draw according to this mode. [`Swap::Deferred`]
 /// leaves that swap and preparation for the caller to complete explicitly.
@@ -2540,7 +2540,7 @@ pub enum Swap {
     /// Leave the render post-step for the caller to complete later.
     ///
     /// The rendered bytes are produced immediately, but the frame swap and work
-    /// buffer preparation are deferred until [`DoubleBuffer::swap`] is called
+    /// buffer preparation are deferred until [`Buffer::swap`] is called
     /// with either [`Swap::Blank`] or [`Swap::Retained`]. This lets callers pick
     /// the next frame's starting buffer after processing input that arrives
     /// between renders.
@@ -2553,9 +2553,9 @@ pub enum Swap {
 // small arenas from compacting every frame.
 pub(crate) const SIDEBUFFER_GRAPHEME_COMPACTION_BASE_THRESHOLD: u32 = 8192;
 
-pub struct DoubleBuffer {
-    current: Buffer,
-    previous: Buffer,
+pub struct Buffer {
+    current: Grid,
+    previous: Grid,
     /// The output byte buffer containing VT escape sequences.
     pub buf: Vec<u8>,
     diffable: bool,
@@ -2623,7 +2623,7 @@ impl CursorOutput {
     }
 }
 
-impl DoubleBuffer {
+impl Buffer {
     /// Returns the full buffer area as a [`Rect`].
     pub fn rect(&self) -> Rect {
         Rect {
@@ -2659,7 +2659,7 @@ impl DoubleBuffer {
     /// cell produced by one buffer must not be written into another
     /// via this method. To copy a handle cell, resolve it with
     /// [`Buffer::handle_text`] on its source buffer and write the
-    /// resulting text through [`DoubleBuffer::set_stringn`].
+    /// resulting text through [`Buffer::set_stringn`].
     pub fn set_cell(&mut self, x: u16, y: u16, cell: Cell) {
         if let Some(target) = self.current.get_mut(x, y) {
             *target = cell;
@@ -2699,10 +2699,10 @@ impl DoubleBuffer {
 
     /// Creates a new double buffer of `width` columns by `height`
     /// rows.
-    pub fn new(width: u16, height: u16) -> DoubleBuffer {
-        DoubleBuffer {
-            current: Buffer::new(width, height),
-            previous: Buffer::new(width, height),
+    pub fn new(width: u16, height: u16) -> Buffer {
+        Buffer {
+            current: Grid::new(width, height),
+            previous: Grid::new(width, height),
             diffable: false,
             blanking: true,
             rgb_supported: true,
@@ -2793,11 +2793,11 @@ impl DoubleBuffer {
     pub fn swap(&mut self, swap: Swap) {
         assert!(
             self.deferred_swap_pending,
-            "DoubleBuffer::swap called without a pending deferred render"
+            "Buffer::swap called without a pending deferred render"
         );
         assert!(
             swap != Swap::Deferred,
-            "DoubleBuffer::swap requires Blank or Retained"
+            "Buffer::swap requires Blank or Retained"
         );
         self.deferred_swap_pending = false;
         self.finish_render_swap(swap);
@@ -2849,8 +2849,8 @@ impl DoubleBuffer {
     pub fn resize(&mut self, width: u16, height: u16) {
         if self.current.width != width || self.current.height != height {
             let quantize = !self.rgb_supported;
-            self.current = Buffer::new(width, height);
-            self.previous = Buffer::new(width, height);
+            self.current = Grid::new(width, height);
+            self.previous = Grid::new(width, height);
             self.current.quantize_rgb = quantize;
             self.previous.quantize_rgb = quantize;
             self.diffable = false;
@@ -2923,7 +2923,7 @@ impl DoubleBuffer {
     pub fn render_internal(&mut self) {
         assert!(
             !self.deferred_swap_pending,
-            "previous Swap::Deferred render must be completed with DoubleBuffer::swap before rendering again"
+            "previous Swap::Deferred render must be completed with Buffer::swap before rendering again"
         );
         if self.diffable {
             self.apply_scroll_optimization();
@@ -3116,7 +3116,7 @@ impl DoubleBuffer {
     pub fn render_inline(&mut self, term: &mut Terminal, prev_height: u16) -> std::io::Result<u16> {
         assert!(
             !self.deferred_swap_pending,
-            "previous Swap::Deferred render must be completed with DoubleBuffer::swap before rendering inline"
+            "previous Swap::Deferred render must be completed with Buffer::swap before rendering inline"
         );
         if prev_height > 0 {
             MoveCursorUp(prev_height).write_to_buffer(&mut self.buf);
@@ -3171,12 +3171,12 @@ impl DoubleBuffer {
     }
 
     /// Returns a mutable reference to the current buffer.
-    pub fn current(&mut self) -> &mut Buffer {
+    pub fn current(&mut self) -> &mut Grid {
         &mut self.current
     }
 }
 
-fn blank_scrolled_rows(buf: &mut Buffer, top: u16, bottom: u16, amount: i16) {
+fn blank_scrolled_rows(buf: &mut Grid, top: u16, bottom: u16, amount: i16) {
     let width = buf.width as usize;
     buf.scroll_region(top, bottom, 0, buf.width, amount as i32);
 
@@ -3267,7 +3267,7 @@ pub struct Block<'a> {
 
 impl Block<'_> {
     /// Renders the block within the given rectangle.
-    pub fn render(&self, rect: Rect, buf: &mut Buffer) {
+    pub fn render(&self, rect: Rect, buf: &mut Grid) {
         let Rect { x, y, w, h } = rect;
         if w == 0 || h == 0 {
             return;
@@ -3396,7 +3396,7 @@ mod test {
 
     #[test]
     fn cursor_untouched_emits_no_cursor_bytes() {
-        let mut db = DoubleBuffer::new(4, 1);
+        let mut db = Buffer::new(4, 1);
         db.set_string(0, 0, "hi", Style::DEFAULT);
         db.render_internal();
         let out = std::str::from_utf8(&db.buf).unwrap();
@@ -3406,7 +3406,7 @@ mod test {
 
     #[test]
     fn cursor_set_emits_shape_move_show_then_diffs() {
-        let mut db = DoubleBuffer::new(8, 2);
+        let mut db = Buffer::new(8, 2);
         db.set_string(0, 0, "hi", Style::DEFAULT);
         db.set_cursor(3, 1, CursorShape::SteadyBar);
         db.render_internal();
@@ -3442,7 +3442,7 @@ mod test {
 
     #[test]
     fn cursor_shape_change_re_emits_decscusr() {
-        let mut db = DoubleBuffer::new(4, 1);
+        let mut db = Buffer::new(4, 1);
         db.set_cursor(0, 0, CursorShape::SteadyBlock);
         db.render_internal();
         db.buf.clear();
@@ -3455,7 +3455,7 @@ mod test {
 
     #[test]
     fn cursor_hide_after_show_emits_hide_once() {
-        let mut db = DoubleBuffer::new(4, 1);
+        let mut db = Buffer::new(4, 1);
         db.set_cursor(0, 0, CursorShape::SteadyBlock);
         db.render_internal();
         db.buf.clear();
@@ -3477,7 +3477,7 @@ mod test {
 
     #[test]
     fn cursor_reset_re_emits_next_frame() {
-        let mut db = DoubleBuffer::new(4, 1);
+        let mut db = Buffer::new(4, 1);
         db.set_cursor(0, 0, CursorShape::SteadyBlock);
         db.render_internal();
         db.buf.clear();
@@ -3498,7 +3498,7 @@ mod test {
 
     #[test]
     fn inline_render_emits_no_absolute_cursor_positioning() {
-        let mut db = DoubleBuffer::new(8, 3);
+        let mut db = Buffer::new(8, 3);
         db.set_string(0, 0, "row0", Style::DEFAULT);
         db.set_string(2, 1, "row1", Style::DEFAULT);
         db.set_string(0, 2, "row2", Style::DEFAULT);
@@ -3522,7 +3522,7 @@ mod test {
 
     #[test]
     fn inline_render_advances_cursor_past_blank_trailing_rows() {
-        let mut db = DoubleBuffer::new(4, 4);
+        let mut db = Buffer::new(4, 4);
         db.set_string(0, 0, "hi", Style::DEFAULT);
 
         let mut buf = Vec::new();
@@ -3536,7 +3536,7 @@ mod test {
 
     #[test]
     fn inline_render_diff_skips_unchanged_rows() {
-        let mut db = DoubleBuffer::new(8, 3);
+        let mut db = Buffer::new(8, 3);
         db.set_string(0, 0, "row0", Style::DEFAULT);
         db.set_string(0, 1, "row1", Style::DEFAULT);
         db.set_string(0, 2, "row2", Style::DEFAULT);
@@ -3565,7 +3565,7 @@ mod test {
 
     #[test]
     fn inline_render_diff_emits_only_changed_cell() {
-        let mut db = DoubleBuffer::new(8, 3);
+        let mut db = Buffer::new(8, 3);
         db.set_string(0, 0, "row0", Style::DEFAULT);
         db.set_string(0, 1, "row1", Style::DEFAULT);
         db.set_string(0, 2, "row2", Style::DEFAULT);
@@ -3636,7 +3636,7 @@ mod test {
     #[test]
     fn double_buffer_without_rgb_support_emits_palette_escape() {
         // With RGB disabled, an RGB cell should quantize to 256-color SGR.
-        let mut db = DoubleBuffer::new(4, 1);
+        let mut db = Buffer::new(4, 1);
         db.set_rgb_supported(false);
         let style = Style::DEFAULT.with_fg(Color::rgb(0x5f, 0x87, 0xaf));
         db.set_string(0, 0, "x", style);
@@ -3655,7 +3655,7 @@ mod test {
 
     #[test]
     fn double_buffer_with_rgb_support_emits_truecolor_escape() {
-        let mut db = DoubleBuffer::new(4, 1);
+        let mut db = Buffer::new(4, 1);
         assert!(db.rgb_supported());
         let style = Style::DEFAULT.with_fg(Color::rgb(0x5f, 0x87, 0xaf));
         db.set_string(0, 0, "x", style);
@@ -3670,9 +3670,9 @@ mod test {
     #[test]
     fn rgb_quantized_via_buffer_set_style_bypass() {
         // `DisplayRect::fill` writes through `buf.current.set_style(...)`,
-        // bypassing the `DoubleBuffer::set_style` wrapper. The flag lives
+        // bypassing the `Buffer::set_style` wrapper. The flag lives
         // on `Buffer` itself, so this path must still quantize.
-        let mut db = DoubleBuffer::new(4, 1);
+        let mut db = Buffer::new(4, 1);
         db.set_rgb_supported(false);
         let style = Style::DEFAULT.with_bg(Color::rgb(0x5f, 0x87, 0xaf));
         db.set_string(0, 0, "xxxx", Style::DEFAULT);
@@ -3730,7 +3730,7 @@ mod test {
         let flag = "🇨🇦";
         assert_eq!(flag.len(), 8);
 
-        let mut buffer = Buffer::new(4, 1);
+        let mut buffer = Grid::new(4, 1);
         buffer.set_string(0, 0, flag, Style::DEFAULT);
 
         // The flag should land in cell 0 as a handle cell.
@@ -3741,7 +3741,7 @@ mod test {
 
         // A family ZWJ sequence: 18 bytes.
         let family = "👨‍👩‍👧";
-        let mut buffer = Buffer::new(4, 1);
+        let mut buffer = Grid::new(4, 1);
         buffer.set_string(0, 0, family, Style::DEFAULT);
         let cell = buffer.cells[0];
         assert!(cell.is_handle());
@@ -3752,7 +3752,7 @@ mod test {
     fn compact_side_drops_orphaned_bytes() {
         let flag = "🇨🇦"; // 8 bytes → handle cell.
         let family = "👨‍👩‍👧"; // 18 bytes → handle cell.
-        let mut buffer = Buffer::new(4, 1);
+        let mut buffer = Grid::new(4, 1);
 
         // Write flag, then overwrite the same cell with family. The
         // flag's 8 bytes are now dead weight in the side arena.
@@ -3783,7 +3783,7 @@ mod test {
 
     #[test]
     fn compact_side_is_noop_on_empty_arena() {
-        let mut buffer = Buffer::new(4, 1);
+        let mut buffer = Grid::new(4, 1);
         buffer.set_string(0, 0, "abcd", Style::DEFAULT);
         assert_eq!(buffer.side_len(), 0);
         buffer.compact_side();
@@ -3793,7 +3793,7 @@ mod test {
 
     #[test]
     fn ascii_set_stringn_fast_path_respects_width() {
-        let mut buffer = Buffer::new(5, 1);
+        let mut buffer = Grid::new(5, 1);
         let end = buffer.set_stringn(1, 0, "hello", 3, Style::DEFAULT);
 
         assert_eq!(end, (4, 0));
@@ -3807,7 +3807,7 @@ mod test {
 
     #[test]
     fn ascii_set_stringn_skips_control_bytes() {
-        let mut buffer = Buffer::new(5, 1);
+        let mut buffer = Grid::new(5, 1);
         buffer.set_string(0, 0, ".....", Style::DEFAULT);
 
         let end = buffer.set_stringn(1, 0, "A\n\tB\u{7f}C", 2, Style::DEFAULT);
@@ -3842,7 +3842,7 @@ mod test {
         assert_eq!(zalgo.len(), 89);
         assert!(zalgo.len() > 7 && zalgo.len() <= u8::MAX as usize);
 
-        let mut buffer = Buffer::new(4, 1);
+        let mut buffer = Grid::new(4, 1);
         buffer.set_string(0, 0, zalgo, Style::DEFAULT);
         let cell = buffer.cells[0];
         assert!(cell.is_handle());
@@ -3866,7 +3866,7 @@ mod test {
             "combining marks must collapse into one grapheme cluster",
         );
 
-        let mut buffer = Buffer::new(4, 1);
+        let mut buffer = Grid::new(4, 1);
         buffer.set_string(0, 0, &extreme, Style::DEFAULT);
         let cell = buffer.cells[0];
         assert!(cell.is_handle(), "truncated zalgo should still be a handle");
@@ -3888,7 +3888,7 @@ mod test {
     fn long_grapheme_diff_is_idempotent() {
         // Writing the same long grapheme twice should diff to empty output
         // (after the initial paint), exercising the slow-path equality.
-        let mut db = DoubleBuffer::new(4, 1);
+        let mut db = Buffer::new(4, 1);
         db.set_string(0, 0, "🇨🇦hi", Style::DEFAULT);
         db.render_internal();
         db.buf.clear();
@@ -3906,9 +3906,9 @@ mod test {
     }
 
     pub struct BufferDiffCheck {
-        db_a: DoubleBuffer,
+        db_a: Buffer,
         term_1: vt100::Parser,
-        db_b: DoubleBuffer,
+        db_b: Buffer,
         term_2: vt100::Parser,
         step: u32,
     }
@@ -3916,15 +3916,15 @@ mod test {
     impl BufferDiffCheck {
         pub fn new(width: u16, height: u16) -> BufferDiffCheck {
             BufferDiffCheck {
-                db_a: DoubleBuffer::new(width, height),
+                db_a: Buffer::new(width, height),
                 term_1: vt100::Parser::new(height, width, 0),
-                db_b: DoubleBuffer::new(width, height),
+                db_b: Buffer::new(width, height),
 
                 term_2: vt100::Parser::new(height, width, 0),
                 step: 0,
             }
         }
-        pub fn step(&mut self, fnx: impl Fn(Rect, &mut DoubleBuffer)) {
+        pub fn step(&mut self, fnx: impl Fn(Rect, &mut Buffer)) {
             self.step += 1;
             let rect = Rect {
                 x: 0,
@@ -4014,7 +4014,7 @@ mod test {
 
     #[test]
     fn buffer_set_style() {
-        let mut buffer = Buffer::new(8, 1);
+        let mut buffer = Grid::new(8, 1);
         buffer.set_string(1, 0, "hello", Style::DEFAULT);
         buffer.set_style(
             Rect {
@@ -4088,7 +4088,7 @@ mod test {
 
     #[test]
     fn palette_set_style_merges_colors() {
-        let mut buffer = Buffer::new(4, 1);
+        let mut buffer = Grid::new(4, 1);
         buffer.set_string(0, 0, "abcd", AnsiColor(1).as_fg() | AnsiColor(2).as_bg());
         // set_style with palette (no fg/bg) should replace modifiers but keep existing colors
         buffer.set_style(
@@ -4114,7 +4114,7 @@ mod test {
     #[test]
     fn palette_render() {
         // Palette entry for curly underline
-        let mut db = DoubleBuffer::new(20, 2);
+        let mut db = Buffer::new(20, 2);
         db.set_palette(0, b"\x1b[4:3m".to_vec());
         db.set_palette(1, b"\x1b[58;2;255;0;0m".to_vec());
 
@@ -4164,12 +4164,12 @@ mod test {
 
     #[test]
     fn double_buffer_scroll_region_preserves_rows_outside_region() {
-        let mut fast = DoubleBuffer::new(6, 4);
-        let mut slow = DoubleBuffer::new(6, 4);
+        let mut fast = Buffer::new(6, 4);
+        let mut slow = Buffer::new(6, 4);
         let mut term_fast = vt100::Parser::new(4, 6, 0);
         let mut term_slow = vt100::Parser::new(4, 6, 0);
 
-        let render_frame = |buf: &mut DoubleBuffer, rows: [&str; 4]| {
+        let render_frame = |buf: &mut Buffer, rows: [&str; 4]| {
             for (y, row) in rows.into_iter().enumerate() {
                 buf.set_string(0, y as u16, row, Style::DEFAULT);
             }
@@ -4205,12 +4205,12 @@ mod test {
         );
     }
 
-    /// A bounded DoubleBuffer with `x_offset > 0` must emit `MoveCursor`
+    /// A bounded Buffer with `x_offset > 0` must emit `MoveCursor`
     /// sequences targeting `(x_offset + col, y_offset + row)` on the
     /// terminal, not `(col, y_offset + row)`.
     #[test]
     fn bounded_buffer_uses_x_offset() {
-        let mut db = DoubleBuffer::new(6, 3);
+        let mut db = Buffer::new(6, 3);
         db.x_offset = 20;
         db.y_offset = 5;
         db.bounded = true;
@@ -4225,12 +4225,12 @@ mod test {
         );
     }
 
-    /// A bounded DoubleBuffer must not emit `CLEAR_BELOW` during its first
+    /// A bounded Buffer must not emit `CLEAR_BELOW` during its first
     /// render — that would destroy cells under the widget managed by other
     /// code (task trees, status bars, etc.).
     #[test]
     fn bounded_buffer_skips_clear_below() {
-        let mut db = DoubleBuffer::new(4, 2);
+        let mut db = Buffer::new(4, 2);
         db.x_offset = 10;
         db.y_offset = 3;
         db.bounded = true;
@@ -4255,7 +4255,7 @@ mod test {
     /// of the buffer's rightmost column, destroying widgets rendered beside it.
     #[test]
     fn bounded_render_diff_does_not_emit_clear_line_optimization() {
-        let mut db = DoubleBuffer::new(60, 4);
+        let mut db = Buffer::new(60, 4);
         db.x_offset = 10;
         db.y_offset = 5;
         db.bounded = true;
@@ -4285,7 +4285,7 @@ mod test {
         );
     }
 
-    /// A bounded DoubleBuffer must not destroy cells outside its own column
+    /// A bounded Buffer must not destroy cells outside its own column
     /// range even when rendering a full-width styled row.
     #[test]
     fn bounded_buffer_preserves_cells_beside_it() {
@@ -4302,7 +4302,7 @@ mod test {
         setup.extend_from_slice(b"RIGHT_B");
         term.process(&setup);
 
-        let mut db = DoubleBuffer::new(10, 2);
+        let mut db = Buffer::new(10, 2);
         db.x_offset = 8;
         db.y_offset = 2;
         db.bounded = true;
@@ -4337,7 +4337,7 @@ mod test {
         );
     }
 
-    /// A bounded DoubleBuffer with `y_offset > 0` must not destroy cells
+    /// A bounded Buffer with `y_offset > 0` must not destroy cells
     /// BELOW its rendering area (e.g. task tree pane).
     #[test]
     fn bounded_buffer_preserves_cells_below() {
@@ -4352,7 +4352,7 @@ mod test {
         setup.extend_from_slice(b"TASK_TREE_B");
         term.process(&setup);
 
-        let mut db = DoubleBuffer::new(12, 3);
+        let mut db = Buffer::new(12, 3);
         db.x_offset = 4;
         db.y_offset = 3;
         db.bounded = true;
@@ -4382,11 +4382,11 @@ mod test {
         );
     }
 
-    /// A non-bounded DoubleBuffer at x_offset=0 must still behave exactly
+    /// A non-bounded Buffer at x_offset=0 must still behave exactly
     /// like it did before the x_offset/bounded fields were introduced.
     #[test]
     fn non_bounded_buffer_behavior_unchanged() {
-        let mut db = DoubleBuffer::new(4, 2);
+        let mut db = Buffer::new(4, 2);
         db.set_string(0, 0, "test", Style::DEFAULT);
         db.render_internal();
         let out = std::str::from_utf8(&db.buf).unwrap();
@@ -4404,7 +4404,7 @@ mod test {
     /// post-swap seed runs after that render.
     #[test]
     fn retained_preserves_untouched_cells() {
-        let mut db = DoubleBuffer::new(20, 3);
+        let mut db = Buffer::new(20, 3);
         let mut term = vt100::Parser::new(3, 20, 0);
 
         // Arm retained, then a full frame whose post-step seeds the work buffer.
@@ -4449,7 +4449,7 @@ mod test {
     /// seeded from the on-screen frame, so every cell compares equal.
     #[test]
     fn retained_idle_frame_emits_no_content() {
-        let mut db = DoubleBuffer::new(10, 2);
+        let mut db = Buffer::new(10, 2);
         db.set_swap(Swap::Retained);
         db.set_string(0, 0, "abc", Style::DEFAULT);
         db.set_string(0, 1, "xyz", Style::DEFAULT);
@@ -4475,7 +4475,7 @@ mod test {
     /// draw erases cells it no longer paints rather than keeping stale ones.
     #[test]
     fn leaving_retained_restores_blank_clearing() {
-        let mut db = DoubleBuffer::new(10, 1);
+        let mut db = Buffer::new(10, 1);
         let mut term = vt100::Parser::new(1, 10, 0);
 
         db.set_swap(Swap::Retained);
@@ -4511,7 +4511,7 @@ mod test {
     /// must erase cells immediately rather than one frame later.
     #[test]
     fn deferred_swap_can_blank_next_frame_after_render() {
-        let mut db = DoubleBuffer::new(10, 1);
+        let mut db = Buffer::new(10, 1);
         let mut term = vt100::Parser::new(1, 10, 0);
 
         db.set_swap(Swap::Deferred);
@@ -4534,7 +4534,7 @@ mod test {
     /// from the on-screen frame, so a partial overdraw can keep untouched cells.
     #[test]
     fn deferred_swap_can_retain_next_frame_after_render() {
-        let mut db = DoubleBuffer::new(10, 2);
+        let mut db = Buffer::new(10, 2);
         let mut term = vt100::Parser::new(2, 10, 0);
 
         db.set_swap(Swap::Deferred);
@@ -4558,7 +4558,7 @@ mod test {
     #[test]
     #[should_panic(expected = "previous Swap::Deferred render must be completed")]
     fn deferred_swap_must_be_completed_before_next_render() {
-        let mut db = DoubleBuffer::new(4, 1);
+        let mut db = Buffer::new(4, 1);
         db.set_swap(Swap::Deferred);
         db.set_string(0, 0, "abcd", Style::DEFAULT);
         db.render_internal();
@@ -4572,7 +4572,7 @@ mod test {
         let flag = "🇨🇦"; // 8 bytes, stored as a handle cell
         assert!(flag.len() > 7);
 
-        let mut db = DoubleBuffer::new(8, 1);
+        let mut db = Buffer::new(8, 1);
         let mut term = vt100::Parser::new(1, 8, 0);
         db.set_swap(Swap::Retained);
         db.set_string(0, 0, flag, Style::DEFAULT);

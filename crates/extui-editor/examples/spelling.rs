@@ -26,7 +26,7 @@
 //!   allocated; everything else is a borrowed slice.
 //! - `visible_range_rects` — map misspelled byte ranges to screen
 //!   rects, then overlay a red undercurl style via
-//!   `DoubleBuffer::set_style`.
+//!   `Buffer::set_style`.
 
 use std::io;
 use std::path::PathBuf;
@@ -34,7 +34,7 @@ use std::time::Duration;
 
 use extui::event::polling::{GlobalWakerConfig, initialize_global_waker};
 use extui::event::{self, Event, Events, KeyCode, KeyModifiers};
-use extui::{AnsiColor, DoubleBuffer, HAlign, Rect, Style, Terminal, TerminalFlags};
+use extui::{AnsiColor, Buffer, HAlign, Rect, Style, Terminal, TerminalFlags};
 use extui_editor::{Editor, Mode, Replacement, Span, TrackedChange, bindings};
 
 #[path = "common/themes.rs"]
@@ -88,7 +88,7 @@ fn main() -> io::Result<()> {
         TerminalFlags::RAW_MODE | TerminalFlags::ALT_SCREEN | TerminalFlags::HIDE_CURSOR,
     )?;
     let (w, h) = term.size()?;
-    let mut double = DoubleBuffer::new(w, h);
+    let mut double = Buffer::new(w, h);
     double.set_rgb_supported(true);
 
     // Red undercurl. `\x1b[4:3m` = curly underline; `\x1b[58;5;196m` = red

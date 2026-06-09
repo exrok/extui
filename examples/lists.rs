@@ -1,5 +1,5 @@
 use extui::{
-    AnsiColor, BoxStyle, DoubleBuffer, HAlign, Rect, Style, TerminalFlags,
+    AnsiColor, BoxStyle, Buffer, HAlign, Rect, Style, TerminalFlags,
     event::{Event, KeyCode, KeyEvent, KeyModifiers},
     widget::ScrollBar,
 };
@@ -42,11 +42,11 @@ impl ListCursor {
 
 fn list<'a, T>(
     mut rect: Rect,
-    buf: &mut DoubleBuffer,
+    buf: &mut Buffer,
     item_height: u16,
     cursor: &mut ListCursor,
     items: &'a [T],
-    mut render: impl FnMut(Rect, &mut DoubleBuffer, &'a T, bool),
+    mut render: impl FnMut(Rect, &mut Buffer, &'a T, bool),
 ) {
     cursor.selected_into_view((rect.h / item_height) as usize);
     for (i, item) in items.iter().enumerate().skip(cursor.offset) {
@@ -67,7 +67,7 @@ enum Action {
     Terminate,
 }
 
-fn render(app: &mut App, dst: &mut DoubleBuffer) {
+fn render(app: &mut App, dst: &mut Buffer) {
     let mut rect = dst.rect();
     let mut list_rect = rect.take_top(10);
     list(
@@ -132,7 +132,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut terminal = extui::Terminal::open(mode).expect("Valid TTY");
     let mut events = extui::event::Events::default();
     let (w, h) = terminal.size()?;
-    let mut buffer = DoubleBuffer::new(w, h);
+    let mut buffer = Buffer::new(w, h);
     let stdin = std::io::stdin();
     // setup app state
     let mut app = App {

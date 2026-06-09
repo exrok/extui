@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use extui::event::polling::{GlobalWakerConfig, initialize_global_waker};
 use extui::event::{self, Event, Events, KeyCode, KeyModifiers};
-use extui::{Color, DoubleBuffer, HAlign, Rect, Style, Terminal, TerminalFlags};
+use extui::{Buffer, Color, HAlign, Rect, Style, Terminal, TerminalFlags};
 
 use extui_editor::{Editor, Mode, bindings};
 
@@ -57,7 +57,7 @@ fn main() -> io::Result<()> {
     )?;
 
     let (w, h) = term.size()?;
-    let mut double = DoubleBuffer::new(w, h);
+    let mut double = Buffer::new(w, h);
     double.set_rgb_supported(true);
 
     let stdin = std::io::stdin();

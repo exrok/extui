@@ -2,7 +2,7 @@
 name = "extui-neovim"
 version = "0.1.0"
 edition = "2024"
-description = "Embed a headless Neovim instance inside an extui DoubleBuffer region."
+description = "Embed a headless Neovim instance inside an extui Buffer region."
 license = "MIT"
 
 [dependencies]

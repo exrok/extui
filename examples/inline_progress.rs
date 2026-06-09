@@ -1,4 +1,4 @@
-//! Demonstrates [`DoubleBuffer::render_inline`] by painting a progress
+//! Demonstrates [`Buffer::render_inline`] by painting a progress
 //! region below the shell prompt that grows, holds, and shrinks across
 //! frames. The shell history above the cursor stays visible throughout.
 //! After the run, the final frame remains in scrollback.
@@ -10,12 +10,12 @@ use std::io::Write;
 use std::thread::sleep;
 use std::time::Duration;
 
-use extui::{AnsiColor, DoubleBuffer, Style, Terminal, TerminalFlags};
+use extui::{AnsiColor, Buffer, Style, Terminal, TerminalFlags};
 
 fn main() -> std::io::Result<()> {
     let mut term = Terminal::open(TerminalFlags::RAW_MODE | TerminalFlags::HIDE_CURSOR)?;
     let (width, _) = term.size()?;
-    let mut buf = DoubleBuffer::new(width, 1);
+    let mut buf = Buffer::new(width, 1);
 
     let frames: &[(u16, &[(&str, AnsiColor)])] = &[
         (1, &[("step 1: bootstrapping…", AnsiColor::Cyan1)]),

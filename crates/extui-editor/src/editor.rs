@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 
-use extui::{DoubleBuffer, Rect, event::KeyEvent};
+use extui::{Buffer, Rect, event::KeyEvent};
 use extui_bindings::{InputKey, LayerId, Payload};
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -141,7 +141,7 @@ impl TabSettings {
 /// # Examples
 ///
 /// ```no_run
-/// use extui::{DoubleBuffer, Rect};
+/// use extui::{Buffer, Rect};
 /// use extui_editor::Editor;
 ///
 /// let mut editor = Editor::new();
@@ -149,7 +149,7 @@ impl TabSettings {
 /// editor.resize(80);
 /// editor.set_lines("fn main() {\n    println!(\"hi\");\n}");
 ///
-/// let mut buf = DoubleBuffer::new(80, 24);
+/// let mut buf = Buffer::new(80, 24);
 /// editor.render(Rect { x: 0, y: 0, w: 80, h: editor.desired_height() }, &mut buf);
 /// ```
 ///
@@ -628,10 +628,10 @@ impl Editor {
     /// yield nothing.
     ///
     /// Use for post-render overlays such as search highlights or
-    /// spellcheck underlines, applied via [`DoubleBuffer::set_style`]
+    /// spellcheck underlines, applied via [`Buffer::set_style`]
     /// so the existing text and syntax colors are preserved.
     ///
-    /// [`DoubleBuffer::set_style`]: extui::DoubleBuffer::set_style
+    /// [`Buffer::set_style`]: extui::Buffer::set_style
     pub fn visible_range_rects(
         &self,
         rect: Rect,
@@ -654,9 +654,9 @@ impl Editor {
     /// when the cursor is outside the visible viewport.
     ///
     /// The returned coordinates are absolute screen cells, ready to
-    /// hand to [`DoubleBuffer::set_cursor`].
+    /// hand to [`Buffer::set_cursor`].
     ///
-    /// [`DoubleBuffer::set_cursor`]: extui::DoubleBuffer::set_cursor
+    /// [`Buffer::set_cursor`]: extui::Buffer::set_cursor
     pub fn cursor_position(&self, rect: Rect) -> Option<(u16, u16)> {
         render::cursor_position(
             rect,
@@ -817,7 +817,7 @@ impl Editor {
     ///
     /// Shorthand for [`Self::render_with_styles`] with an empty run
     /// slice.
-    pub fn render(&mut self, rect: Rect, buf: &mut DoubleBuffer) {
+    pub fn render(&mut self, rect: Rect, buf: &mut Buffer) {
         self.render_with_styles(rect, buf, &[]);
     }
 
@@ -829,7 +829,7 @@ impl Editor {
     /// and uses a binary search to skip runs outside the visible
     /// viewport, so passing a full-file run list is cheap on large
     /// buffers.
-    pub fn render_with_styles(&mut self, rect: Rect, buf: &mut DoubleBuffer, runs: &[StyleRun]) {
+    pub fn render_with_styles(&mut self, rect: Rect, buf: &mut Buffer, runs: &[StyleRun]) {
         let wrap = self.effective_wrap();
         self.last_viewport_h = rect.h;
         self.ensure_cursor_visible(rect);
@@ -3171,7 +3171,7 @@ fn pair_delimiters(kind: PairKind) -> (char, char) {
 mod tests {
     use super::*;
     use extui::{
-        Buffer, Cell, DoubleBuffer, Rect,
+        Cell, Buffer, Grid, Rect,
         event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers},
     };
 
@@ -3219,7 +3219,7 @@ mod tests {
         s.chars().map(key_char).collect()
     }
 
-    fn cell_text(buf: &Buffer, cell: Cell) -> String {
+    fn cell_text(buf: &Grid, cell: Cell) -> String {
         cell.text_inline()
             .or_else(|| {
                 buf.handle_text(cell)
@@ -3230,7 +3230,7 @@ mod tests {
     }
 
     fn render_rows(ed: &mut Editor, rect: Rect) -> Vec<String> {
-        let mut db = DoubleBuffer::new(rect.w.max(1), rect.h.max(1));
+        let mut db = Buffer::new(rect.w.max(1), rect.h.max(1));
         ed.render(rect, &mut db);
         let buf = db.current();
         (0..rect.h as usize)
@@ -3607,7 +3607,7 @@ mod tests {
         let mut ed = Editor::new();
         ed.set_height_bounds(1, 3);
         ed.set_lines("l0\nl1\nl2\nl3\nl4\nl5");
-        let mut db = DoubleBuffer::new(10, 10);
+        let mut db = Buffer::new(10, 10);
         let rect = Rect {
             x: 0,
             y: 0,
@@ -3695,7 +3695,7 @@ mod tests {
         ed.set_single_line(true);
         ed.set_lines("hello\nworld");
 
-        let mut db = DoubleBuffer::new(10, 10);
+        let mut db = Buffer::new(10, 10);
         let rect = Rect {
             x: 0,
             y: 0,

@@ -5,7 +5,7 @@ use std::thread::sleep;
 use std::time::Duration;
 
 use extui::event::polling::{GlobalWakerConfig, initialize_global_waker};
-use extui::{DoubleBuffer, Rect};
+use extui::{Buffer, Rect};
 use extui_neovim::NeovimEmbed;
 
 fn main() -> std::io::Result<()> {
@@ -14,7 +14,7 @@ fn main() -> std::io::Result<()> {
     let nvim = NeovimEmbed::spawn(60, 10)?;
     sleep(Duration::from_millis(1000));
 
-    let mut buf = DoubleBuffer::new(60, 10);
+    let mut buf = Buffer::new(60, 10);
     let rect = Rect {
         x: 0,
         y: 0,
