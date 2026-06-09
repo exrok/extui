@@ -1,4 +1,28 @@
 
+[action.bench]
+pwd = "crates/benchmark"
+sh = '''
+set -e
+echo "> cargo build --release -p benchmark"
+BENCH=$(cargo --config "target.'cfg(unix)'.runner = 'echo'" run -q --release)
+perf stat -r3 -e instructions,branches,cpu-cycles $BENCH bench "$@"
+'''
+cli.forward_arguments = true
+allow_multiple = true
+
+[action.profile]
+pwd = "crates/benchmark"
+sh = '''
+set -e
+echo "> cargo build --release -p benchmark"
+BENCH=$(cargo --config "target.'cfg(unix)'.runner = 'echo'" run -q --release)
+samply record -r 5000 --save-only --output /tmp/profile.json.gz $BENCH profile "$@"
+echo "Profile output to /tmp/profile.json.gz for: benchmark profile" "$@"
+samply inspect /tmp/profile.json.gz top-leaf --limit 10
+'''
+cli.forward_arguments = true
+allow_multiple = true
+
 [action.bench-tinyhl]
 pwd = "crates/tinyhl"
 sh = '''

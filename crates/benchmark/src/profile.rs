@@ -33,6 +33,7 @@ impl<'a> tinyhl::Source for BufferSource<'a> {
 
 pub struct ProfilePath {
     pub name: &'static str,
+    pub default_iters: u64,
     pub run: fn(Budget),
 }
 
@@ -204,26 +205,26 @@ fn wrap_recompute_14k(budget: Budget) {
 pub const PATHS: &[ProfilePath] = &[
     ProfilePath {
         name: "render_highlighted_14k",
+        default_iters: 100_000,
         run: render_highlighted_14k,
     },
     ProfilePath {
         name: "insert_burst",
+        default_iters: 2_000,
         run: insert_burst,
     },
     ProfilePath {
         name: "word_walk",
+        default_iters: 80_000,
         run: word_walk,
     },
     ProfilePath {
         name: "wrap_recompute_14k",
+        default_iters: 500,
         run: wrap_recompute_14k,
     },
 ];
 
 pub fn find(name: &str) -> Option<&'static ProfilePath> {
     PATHS.iter().find(|p| p.name == name)
-}
-
-pub fn list() -> Vec<&'static str> {
-    PATHS.iter().map(|p| p.name).collect()
 }

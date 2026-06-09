@@ -44,7 +44,8 @@ fn print_help() {
          list      print every `group/name` and profile path\n\
          \n\
          profile   run a named workload in a tight loop (no measurement),\n            \
-         suitable for attaching perf/samply. Default iters: 1000."
+         suitable for attaching perf/samply. Defaults are tuned per\n            \
+         workload for roughly 3-5 seconds."
     );
 }
 
@@ -120,7 +121,11 @@ fn parse_profile(
     let budget = match (iters, duration) {
         (_, Some(d)) => profile::Budget::Duration(d),
         (Some(n), _) => profile::Budget::Iters(n),
-        (None, None) => profile::Budget::Iters(1_000),
+        (None, None) => profile::Budget::Iters(
+            profile::find(&name)
+                .map(|p| p.default_iters)
+                .unwrap_or(1_000),
+        ),
     };
     Ok(Cmd::Profile { name, budget })
 }
@@ -168,8 +173,8 @@ fn run_list() {
     for (g, n) in bindings::list() {
         println!("bench    {g}/{n}");
     }
-    for name in profile::list() {
-        println!("profile  {name}");
+    for path in profile::PATHS {
+        println!("profile  {} --iters {}", path.name, path.default_iters);
     }
 }
 
@@ -204,8 +209,8 @@ fn run_profile(name: String, budget: profile::Budget) {
     let Some(path) = profile::find(&name) else {
         eprintln!("unknown profile path: {name}");
         eprintln!("available:");
-        for n in profile::list() {
-            eprintln!("  {n}");
+        for path in profile::PATHS {
+            eprintln!("  {} --iters {}", path.name, path.default_iters);
         }
         std::process::exit(1);
     };
