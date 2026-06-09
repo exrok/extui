@@ -94,6 +94,20 @@ impl DisplayRect {
         }
     }
 
+    /// Insets the rectangle by `amount` cells on the left and right edges.
+    pub fn pad_x(mut self, amount: u16) -> DisplayRect {
+        self.rect.x = self.rect.x.saturating_add(amount);
+        self.rect.w = self.rect.w.saturating_sub(amount.saturating_mul(2));
+        self
+    }
+
+    /// Insets the rectangle by `amount` cells on the top and bottom edges.
+    pub fn pad_y(mut self, amount: u16) -> DisplayRect {
+        self.rect.y = self.rect.y.saturating_add(amount);
+        self.rect.h = self.rect.h.saturating_sub(amount.saturating_mul(2));
+        self
+    }
+
     /// Fills the rectangle with the current style.
     pub fn fill<'a>(self, buf: &mut DoubleBuffer) -> DisplayRect {
         if self.rect.is_empty() {

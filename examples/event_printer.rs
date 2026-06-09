@@ -12,7 +12,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut terminal = extui::Terminal::open(mode).expect("Valid TTY");
     let mut events = extui::event::Events::default();
     let stdin = std::io::stdin();
-    write!(terminal, "Press Ctrl+C to exit. Raw bytes are printed per read.\n\r")?;
+    write!(
+        terminal,
+        "Press Ctrl+C to exit. Raw bytes are printed per read.\n\r"
+    )?;
     loop {
         match extui::event::poll(&stdin, Some(Duration::from_secs(1)))? {
             extui::event::Polled::ReadReady => {

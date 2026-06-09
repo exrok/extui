@@ -820,6 +820,17 @@ impl Style {
         Style((index as u64) | Self::IS_PALETTE)
     }
 
+    /// Returns a new style with the attributes of `overlay` layered on top of this style.
+    pub fn patch(mut self, overlay: Style) -> Style {
+        if let Some(fg) = overlay.fg() {
+            self = self.with_fg(fg);
+        }
+        if let Some(bg) = overlay.bg() {
+            self = self.with_bg(bg);
+        }
+        self.with_modifier(overlay.modifiers())
+    }
+
     /// Returns `true` if this is a palette style.
     pub const fn is_palette(&self) -> bool {
         self.0 & Self::IS_PALETTE != 0
@@ -1232,6 +1243,28 @@ impl Rect {
         w: 0,
         h: 0,
     };
+
+    pub const fn inset(self, horizontal: u16, vertical: u16) -> Rect {
+        Rect {
+            x: self.x.saturating_add(horizontal),
+            y: self.y.saturating_add(vertical),
+            w: self.w.saturating_sub(horizontal.saturating_mul(2)),
+            h: self.h.saturating_sub(vertical.saturating_mul(2)),
+        }
+    }
+
+    pub fn intersect(self, other: Rect) -> Rect {
+        let x = self.x.max(other.x);
+        let y = self.y.max(other.y);
+        let right = self.right().min(other.right());
+        let bottom = self.bottom().min(other.bottom());
+        Rect {
+            x,
+            y,
+            w: right.saturating_sub(x),
+            h: bottom.saturating_sub(y),
+        }
+    }
 }
 
 /// Defines how to split a dimension into two parts.

@@ -584,7 +584,10 @@ impl NeovimEmbed {
                 // Drop the pending slot so a late reply is discarded rather than
                 // matched against a future request id.
                 self.remove_pending(msgid);
-                Err(io::Error::new(io::ErrorKind::TimedOut, "neovim request timed out"))
+                Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "neovim request timed out",
+                ))
             }
             // The reader thread cleared the table on stdout EOF: neovim is gone.
             Err(mpsc::RecvTimeoutError::Disconnected) => {

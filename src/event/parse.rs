@@ -1416,9 +1416,7 @@ mod tests {
             multi,
             ParseResult::Event {
                 consumed: 6,
-                event: InternalEvent::KeyboardEnhancementFlags(
-                    KeyboardEnhancementFlags::all()
-                ),
+                event: InternalEvent::KeyboardEnhancementFlags(KeyboardEnhancementFlags::all()),
             },
         );
 
@@ -1427,9 +1425,7 @@ mod tests {
             zero,
             ParseResult::Event {
                 consumed: 5,
-                event: InternalEvent::KeyboardEnhancementFlags(
-                    KeyboardEnhancementFlags::empty()
-                ),
+                event: InternalEvent::KeyboardEnhancementFlags(KeyboardEnhancementFlags::empty()),
             },
         );
     }
