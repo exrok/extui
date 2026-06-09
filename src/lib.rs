@@ -315,6 +315,25 @@ impl BoxStyle {
             return rect;
         }
 
+        if buf.current.has_empty {
+            if !(set & RelSet::TOP).is_empty() {
+                buf.current.repair_wide_overlap(x, y, w as usize);
+            }
+            if !(set & RelSet::BOTTOM).is_empty() {
+                buf.current.repair_wide_overlap(x, y + h - 1, w as usize);
+            }
+            for y in y + ((!(set & RelSet::TOP).is_empty()) as u16)
+                ..y + h - ((!(set & RelSet::BOTTOM).is_empty()) as u16)
+            {
+                if set.contains(Rel::CenterLeft) {
+                    buf.current.repair_wide_overlap(x, y, 1);
+                }
+                if set.contains(Rel::CenterRight) {
+                    buf.current.repair_wide_overlap(x + w - 1, y, 1);
+                }
+            }
+        }
+
         if let Some(row) = buf.current.row_remaining_mut(x, y) {
             if w >= 1 && set.contains(Rel::TopLeft) {
                 row[0] = self.top_left;
@@ -355,15 +374,15 @@ impl BoxStyle {
         for y in y + ((!(set & RelSet::TOP).is_empty()) as u16)
             ..y + h - ((!(set & RelSet::BOTTOM).is_empty()) as u16)
         {
-            if set.contains(Rel::CenterLeft)
-                && let Some(row) = buf.current.row_remaining_mut(x, y)
-            {
-                row[0] = self.vertical;
+            if set.contains(Rel::CenterLeft) {
+                if let Some(row) = buf.current.row_remaining_mut(x, y) {
+                    row[0] = self.vertical;
+                }
             }
-            if set.contains(Rel::CenterRight)
-                && let Some(row) = buf.current.row_remaining_mut(x + w - 1, y)
-            {
-                row[0] = self.vertical;
+            if set.contains(Rel::CenterRight) {
+                if let Some(row) = buf.current.row_remaining_mut(x + w - 1, y) {
+                    row[0] = self.vertical;
+                }
             }
         }
         // Subjects sides that have any to provide the inner vec
@@ -989,15 +1008,27 @@ impl Style {
 impl Cell {
     const EMPTY: Cell = Cell {
         style: 0,
+        text: [1, 0, 0, 0, 0, 0, 0, 0],
+    };
+
+    const SPACE: Cell = Cell {
+        style: 0,
         text: [0; 8],
     };
 
-    /// Returns `true` if this cell holds no grapheme.
+    /// Returns `true` if this cell is a zero-width continuation.
     ///
-    /// An empty cell renders as a transparent gap. Freshly created
-    /// buffers are filled with empty cells.
+    /// Empty cells are installed after wide graphemes and do not occupy
+    /// their own terminal column. Fresh buffers are filled with
+    /// [`Cell::SPACE`], not empty cells.
+    #[inline]
     pub fn is_empty(self) -> bool {
-        self.text == [0; 8]
+        self.text == Cell::EMPTY.text
+    }
+
+    #[inline]
+    fn is_space(&self) -> bool {
+        self.text == Cell::SPACE.text
     }
 
     /// Returns `true` if this cell refers to a grapheme held by its
@@ -1057,14 +1088,21 @@ impl Cell {
         if self.is_handle() {
             return None;
         }
+        if self.is_empty() {
+            return None;
+        }
+        if self.is_space() {
+            return Some(" ");
+        }
         let len = self.text[7] as usize;
         // SAFETY: inline path always holds valid UTF-8 in `text[..len]`.
         Some(unsafe { std::str::from_utf8_unchecked(self.text.get_unchecked(..len)) })
     }
 
     /// Returns the raw grapheme bytes of this cell, resolving handles
-    /// through the given [`SideBuffer`]. Returns an empty slice for empty
-    /// cells or for handles that fail bounds checking.
+    /// through the given [`SideBuffer`]. Returns an empty slice for
+    /// SPACE cells, EMPTY continuations, or handles that fail bounds
+    /// checking.
     #[inline]
     fn text<'a>(&'a self, side: &'a SideBuffer) -> &'a [u8] {
         if self.is_handle() {
@@ -1149,12 +1187,10 @@ impl Cell {
         }
     }
 
-    /// Returns true if this cell is one of the blank constants
-    /// ([`Cell::EMPTY`] or [`Cell::BLANK`]). Handle cells are never blank.
+    /// Returns true if this cell is the default visible space.
     #[inline]
-    fn is_blank_or_empty(&self) -> bool {
-        // Both constants have style == 0 and are non-handles.
-        self.style == 0 && (self.text == [0; 8] || self.text == [b' ', 0, 0, 0, 0, 0, 0, 1])
+    fn is_default_space(&self) -> bool {
+        self.style == 0 && self.is_space()
     }
 }
 
@@ -1214,6 +1250,7 @@ pub struct Grid {
     pub(crate) side: SideBuffer,
     pub(crate) width: u16,
     pub(crate) height: u16,
+    pub(crate) has_empty: bool,
     /// When `true`, styles written via [`set_stringn`](Self::set_stringn)
     /// and [`set_style`](Self::set_style) are quantized to the 256-color
     /// palette before being stored. Owned and toggled by [`Buffer`].
@@ -1557,21 +1594,49 @@ fn cells_eq_slow(a: Cell, b: Cell, a_side: &SideBuffer, b_side: &SideBuffer) -> 
     }
 }
 
-pub fn clear_cells(cells: &mut [Cell]) {
-    // cells.fill(Cell::EMPTY), but optimizes better
-    let ptr = unsafe {
-        std::slice::from_raw_parts_mut(cells.as_mut_ptr() as *mut _ as *mut u64, cells.len() * 2)
-    };
-    for cell in ptr {
-        *cell = 0;
+#[inline(always)]
+fn cell_display_width(cell: Cell, side: &SideBuffer) -> u16 {
+    if cell.is_empty() {
+        return 0;
     }
+    if cell.is_space() || cell.text[7] == 1 {
+        return 1;
+    }
+    cell_display_width_slow(cell, side)
+}
+
+#[cold]
+fn cell_display_width_slow(cell: Cell, side: &SideBuffer) -> u16 {
+    let bytes = cell.text(side);
+    if bytes.is_empty() {
+        // The renderer falls back to a visible space for stale handles.
+        return 1;
+    }
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return 1;
+    };
+    text.width() as u16
+}
+
+fn wide_footprint_end(row: &[Cell], side: &SideBuffer, lead: usize) -> usize {
+    let width = cell_display_width(row[lead], side).max(1) as usize;
+    let mut end = lead.saturating_add(width).min(row.len());
+    while end < row.len() && row[end].is_empty() {
+        end += 1;
+    }
+    end
+}
+
+pub fn clear_cells(cells: &mut [Cell]) {
+    // Cell::SPACE is the all-zero value.
+    unsafe { std::ptr::write_bytes(cells.as_mut_ptr(), 0, cells.len()) };
 }
 
 impl Grid {
     /// Scrolls the buffer upward by `amount` lines.
     ///
     /// Lines shifted off the top are discarded. New lines exposed at
-    /// the bottom are filled with empty cells.
+    /// the bottom are filled with spaces.
     pub fn scroll_up(&mut self, amount: u16) {
         if amount == 0 || self.height == 0 {
             return;
@@ -1580,12 +1645,12 @@ impl Grid {
         let total = self.cells.len();
         let shifted = (self.width as usize) * (amount as usize);
         self.cells.copy_within(shifted.., 0);
-        self.cells[total - shifted..].fill(Cell::EMPTY);
+        self.cells[total - shifted..].fill(Cell::SPACE);
     }
     /// Scrolls the buffer downward by `amount` lines.
     ///
     /// Lines shifted off the bottom are discarded. New lines exposed
-    /// at the top are filled with empty cells.
+    /// at the top are filled with spaces.
     pub fn scroll_down(&mut self, amount: u16) {
         if amount == 0 || self.height == 0 {
             return;
@@ -1594,7 +1659,7 @@ impl Grid {
         let total = self.cells.len();
         let shifted = (self.width as usize) * (amount as usize);
         self.cells.copy_within(0..total - shifted, shifted);
-        self.cells[0..shifted].fill(Cell::EMPTY);
+        self.cells[0..shifted].fill(Cell::SPACE);
     }
 
     /// Scrolls a rectangular sub-region by `rows` lines.
@@ -1651,14 +1716,15 @@ impl Grid {
     }
 
     /// Creates a new buffer of `width` columns by `height` rows,
-    /// filled with empty cells.
+    /// filled with visible space cells.
     pub fn new(width: u16, height: u16) -> Grid {
-        let cells = vec![Cell::EMPTY; width as usize * height as usize].into_boxed_slice();
+        let cells = vec![Cell::SPACE; width as usize * height as usize].into_boxed_slice();
         Grid {
             cells,
             side: SideBuffer::default(),
             width,
             height,
+            has_empty: false,
             quantize_rgb: false,
         }
     }
@@ -1740,7 +1806,7 @@ impl Grid {
     /// so that only the bytes reachable from the current cell grid
     /// remain. Handle cells are updated in place and continue to
     /// resolve through [`Buffer::handle_text`] afterwards. Cells whose
-    /// recorded position is already out of range are reset to empty.
+    /// recorded position is already out of range are reset to spaces.
     pub fn compact_side(&mut self) {
         if self.side.data.is_empty() {
             return;
@@ -1754,7 +1820,7 @@ impl Grid {
             let len = cell.handle_len();
             let offset = cell.handle_offset();
             let Some(bytes) = old_side.get(offset, len) else {
-                *cell = Cell::EMPTY;
+                *cell = Cell::SPACE;
                 continue;
             };
             let new_offset = new_side.data.len() as u32;
@@ -1780,8 +1846,8 @@ impl Grid {
     ///
     /// Every cell written into the returned slice must come from this
     /// same buffer or be an inline cell. Wide graphemes must be
-    /// followed by an empty cell so the render path preserves their
-    /// display width.
+    /// followed by an empty continuation cell so the render path
+    /// preserves their display width.
     #[doc(hidden)]
     pub fn row_remaining_mut(&mut self, x: u16, y: u16) -> Option<&mut [Cell]> {
         let base = (y as u32) * (self.width as u32);
@@ -1789,6 +1855,61 @@ impl Grid {
         // todo can opt this
         let end = base + self.width as u32;
         self.cells.get_mut(start as usize..end as usize)
+    }
+
+    #[inline(always)]
+    fn repair_wide_overlap(&mut self, x: u16, y: u16, width: usize) {
+        if !self.has_empty || width == 0 || y >= self.height || x >= self.width {
+            return;
+        }
+        let row_width = self.width as usize;
+        let x = x as usize;
+        let end = x.saturating_add(width).min(row_width);
+        let row_start = y as usize * row_width;
+        let row = &self.cells[row_start..row_start + row_width];
+        let mut i = x;
+        while i < end {
+            let cell = row[i];
+            if cell.is_empty() || (i + 1 < row_width && row[i + 1].is_empty()) {
+                self.repair_wide_overlap_slow(row_start, row_width, x, end);
+                return;
+            }
+            i += 1;
+        }
+    }
+
+    #[cold]
+    fn repair_wide_overlap_slow(
+        &mut self,
+        row_start: usize,
+        row_width: usize,
+        start: usize,
+        end: usize,
+    ) {
+        let row = &self.cells[row_start..row_start + row_width];
+        let mut repair_start = row_width;
+        let mut repair_end = 0usize;
+
+        for i in start..end {
+            if row[i].is_empty() {
+                let mut lead = i;
+                while lead > 0 && row[lead].is_empty() {
+                    lead -= 1;
+                }
+                let footprint_end = wide_footprint_end(row, &self.side, lead);
+                repair_start = repair_start.min(lead);
+                repair_end = repair_end.max(footprint_end);
+            }
+            if i + 1 < row_width && row[i + 1].is_empty() {
+                let footprint_end = wide_footprint_end(row, &self.side, i);
+                repair_start = repair_start.min(i);
+                repair_end = repair_end.max(footprint_end);
+            }
+        }
+
+        if repair_start < repair_end {
+            self.cells[row_start + repair_start..row_start + repair_end].fill(Cell::SPACE);
+        }
     }
 
     fn render_diff(
@@ -1815,9 +1936,9 @@ impl Grid {
         }
         let new_side = &self.side;
         let old_side = &old.side;
+        let has_empty = self.has_empty;
         vt::CLEAR_STYLE.write_to_buffer(buf);
         let mut current_style = Style::DEFAULT;
-        let mut old_cells = old.cells.iter();
         let mut cur_y: u16 = 0;
         macro_rules! position_to {
             ($col:expr, $y:expr) => {{
@@ -1847,6 +1968,7 @@ impl Grid {
                 }
             }};
         }
+        let mut old_cells = old.cells.iter();
         for (y, row) in self.cells.chunks_exact(self.width as usize).enumerate() {
             let y = y as u16;
             let mut moved = false;
@@ -1862,18 +1984,16 @@ impl Grid {
                     matching_count += 1;
                     continue;
                 }
-                if new.is_empty() {
-                    let mut blank_overwrite = 1;
-                    let mut blank_kind = new;
+                if new.is_space() {
+                    let mut space_overwrite = 1;
+                    let space_cell = new;
                     'continue_new: {
                         loop {
                             let Some(&new_k) = new_cells.next() else {
-                                // end of row
                                 break;
                             };
                             let Some(old_k) = erased_cell.or_else(|| old_cells.next().copied())
                             else {
-                                // end of file
                                 break;
                             };
                             if cells_eq(new_k, old_k, new_side, old_side) {
@@ -1884,17 +2004,16 @@ impl Grid {
                                 }
                                 if matching_count > 0 {
                                     MoveCursorRight(matching_count).write_to_buffer(buf);
-                                    // matching_count = 0;
                                 }
                                 current_style = write_palette_or_diff(
                                     current_style,
-                                    blank_kind.style(),
+                                    space_cell.style(),
                                     palette,
                                     buf,
                                     true,
                                 );
-                                if !blanking || blank_overwrite < 50 {
-                                    buf.extend(std::iter::repeat_n(b' ', blank_overwrite as usize));
+                                if !blanking || space_overwrite < 50 {
+                                    buf.extend(std::iter::repeat_n(b' ', space_overwrite as usize));
                                     matching_count = 1;
                                 } else {
                                     buf.extend_from_slice(b"\x1b[K");
@@ -1902,9 +2021,9 @@ impl Grid {
                                     if rem_old > 0 && erased_cell.is_none() {
                                         old_cells.nth(rem_old - 1);
                                     }
-                                    erased_cell = Some(blank_kind);
-                                    matching_count = blank_overwrite;
-                                    if cells_eq(new_k, blank_kind, new_side, new_side) {
+                                    erased_cell = Some(space_cell);
+                                    matching_count = space_overwrite;
+                                    if cells_eq(new_k, space_cell, new_side, new_side) {
                                         matching_count += 1;
                                         continue 'next_cell;
                                     } else {
@@ -1914,8 +2033,8 @@ impl Grid {
                                 }
                                 continue 'next_cell;
                             }
-                            if cells_eq(new_k, blank_kind, new_side, new_side) {
-                                blank_overwrite += 1;
+                            if cells_eq(new_k, space_cell, new_side, new_side) {
+                                space_overwrite += 1;
                                 continue;
                             }
 
@@ -1931,26 +2050,25 @@ impl Grid {
 
                             current_style = write_palette_or_diff(
                                 current_style,
-                                blank_kind.style(),
+                                space_cell.style(),
                                 palette,
                                 buf,
                                 true,
                             );
-                            if !blanking || blank_overwrite < 50 {
-                                buf.extend(std::iter::repeat_n(b' ', blank_overwrite as usize));
+                            if !blanking || space_overwrite < 50 {
+                                buf.extend(std::iter::repeat_n(b' ', space_overwrite as usize));
                             } else {
                                 buf.extend_from_slice(b"\x1b[K");
                                 let rem_old = new_cells.len();
                                 if rem_old > 0 && erased_cell.is_none() {
                                     old_cells.nth(rem_old - 1);
                                 }
-                                erased_cell = Some(blank_kind);
-                                matching_count = blank_overwrite;
+                                erased_cell = Some(space_cell);
+                                matching_count = space_overwrite;
                             }
 
-                            if new_k.is_empty() {
-                                blank_kind = new_k;
-                                blank_overwrite = 1;
+                            if new_k.is_space() {
+                                space_overwrite = 1;
                                 continue;
                             } else {
                                 new = new_k;
@@ -1959,24 +2077,22 @@ impl Grid {
                         }
 
                         if !moved {
-                            // moved = true;
                             position_to!(x_offset + matching_count, y);
                             matching_count = 0;
                         }
                         if matching_count > 0 {
                             MoveCursorRight(matching_count).write_to_buffer(buf);
-                            // matching_count = 0;
                         }
                         current_style = write_palette_or_diff(
                             current_style,
-                            blank_kind.style(),
+                            space_cell.style(),
                             palette,
                             buf,
                             true,
                         );
 
-                        if !blanking || blank_overwrite < 8 {
-                            for _ in 0..blank_overwrite {
+                        if !blanking || space_overwrite < 8 {
+                            for _ in 0..space_overwrite {
                                 buf.push(b' ');
                             }
                         } else {
@@ -1985,6 +2101,10 @@ impl Grid {
 
                         break 'next_cell;
                     }
+                }
+
+                if has_empty && new.is_empty() {
+                    continue;
                 }
 
                 if !moved {
@@ -2031,6 +2151,7 @@ impl Grid {
         if self.width == 0 || self.height == 0 {
             return;
         }
+        let has_empty = self.has_empty;
         if !bounded && !inline {
             if x_offset == 0 && y_offset == 0 {
                 vt::MOVE_CURSOR_TO_ORIGIN.write_to_buffer(buf);
@@ -2049,10 +2170,13 @@ impl Grid {
         for (y, row) in self.cells.chunks_exact(self.width as usize).enumerate() {
             let y = y as u16;
             let mut moved = false;
-            let mut blank_extension = 0;
+            let mut space_extension = 0;
             for &cell in row.iter() {
-                if cell.is_blank_or_empty() {
-                    blank_extension += 1;
+                if cell.is_default_space() {
+                    space_extension += 1;
+                    continue;
+                }
+                if has_empty && cell.is_empty() {
                     continue;
                 }
                 if !moved {
@@ -2073,24 +2197,24 @@ impl Grid {
                             cur_y = y;
                         }
                         buf.push(b'\r');
-                        let col = x_offset + blank_extension;
+                        let col = x_offset + space_extension;
                         if col > 0 {
                             MoveCursorRight(col).write_to_buffer(buf);
                         }
                     } else {
-                        MoveCursor(x_offset + blank_extension, y + y_offset).write_to_buffer(buf);
+                        MoveCursor(x_offset + space_extension, y + y_offset).write_to_buffer(buf);
                     }
-                    blank_extension = 0;
+                    space_extension = 0;
                 }
-                if blank_extension > 0 {
-                    if blank_extension < 5 && current_style == Style::DEFAULT {
-                        for _ in 0..blank_extension {
+                if space_extension > 0 {
+                    if space_extension < 5 && current_style == Style::DEFAULT {
+                        for _ in 0..space_extension {
                             buf.push(b' ');
                         }
                     } else {
-                        MoveCursorRight(blank_extension).write_to_buffer(buf);
+                        MoveCursorRight(space_extension).write_to_buffer(buf);
                     }
-                    blank_extension = 0;
+                    space_extension = 0;
                 }
                 current_style =
                     write_palette_or_diff(current_style, cell.style(), palette, buf, false);
@@ -2158,12 +2282,15 @@ impl Grid {
             style
         };
         // SAFETY: ASCII space is valid one-byte UTF-8 and has width one.
-        let blank = unsafe { Cell::new_ascii(b' ', style) };
+        let space = unsafe { Cell::new_ascii(b' ', style) };
         for y in area.y..area.bottom() {
+            if self.has_empty {
+                self.repair_wide_overlap(area.x, y, area.w as usize);
+            }
             if let Some(row) = self.row_remaining_mut(area.x, y) {
                 row.iter_mut()
                     .take(area.w as usize)
-                    .for_each(|cell| *cell = blank);
+                    .for_each(|cell| *cell = space);
             }
         }
     }
@@ -2200,18 +2327,50 @@ impl Grid {
         let mut remaining_width = (self.width.saturating_sub(x) as usize).min(max_width) as u16;
         let initial_remaining_width = remaining_width;
 
-        // Split borrow on `self`: grab `cells` and `side` independently so
-        // long graphemes can be interned while we're writing to cells.
-        let row_width = self.width as u32;
-        let base = (y as u32) * row_width;
-        let start = (base + x as u32) as usize;
-        let end = (base + row_width) as usize;
-        let Some(target) = self.cells.get_mut(start..end) else {
+        if y >= self.height || x >= self.width {
             return (x, y);
-        };
-        let mut target_cells = target.iter_mut();
+        }
+
         if string.is_ascii() {
-            for &byte in string.as_bytes() {
+            let bytes = string.as_bytes();
+            if !self.has_empty {
+                let row_width = self.width as u32;
+                let base = (y as u32) * row_width;
+                let start = (base + x as u32) as usize;
+                let end = (base + row_width) as usize;
+                let Some(target) = self.cells.get_mut(start..end) else {
+                    return (x, y);
+                };
+                let mut target_cells = target.iter_mut();
+                for &byte in bytes {
+                    if byte.is_ascii_control() {
+                        continue;
+                    }
+                    let Some(new_rem) = remaining_width.checked_sub(1) else {
+                        break;
+                    };
+                    remaining_width = new_rem;
+                    let Some(slot) = target_cells.next() else {
+                        return (x + initial_remaining_width, y);
+                    };
+                    // SAFETY: `string.is_ascii()` guarantees every retained byte is
+                    // valid one-byte UTF-8, and control bytes are skipped above.
+                    *slot = unsafe { Cell::new_ascii(byte, style) };
+                }
+                return (x + (initial_remaining_width - remaining_width), y);
+            } else {
+                let write_width = bytes
+                    .iter()
+                    .filter(|byte| !byte.is_ascii_control())
+                    .take(remaining_width as usize)
+                    .count();
+                self.repair_wide_overlap(x, y, write_width);
+            }
+
+            let row_width = self.width as usize;
+            let base = y as usize * row_width;
+            let mut col = x as usize;
+            for &byte in bytes {
                 if byte.is_ascii_control() {
                     continue;
                 }
@@ -2219,17 +2378,20 @@ impl Grid {
                     break;
                 };
                 remaining_width = new_rem;
-                let Some(slot) = target_cells.next() else {
+                if col >= row_width {
                     return (x + initial_remaining_width, y);
-                };
+                }
                 // SAFETY: `string.is_ascii()` guarantees every retained byte is
                 // valid one-byte UTF-8, and control bytes are skipped above.
-                *slot = unsafe { Cell::new_ascii(byte, style) };
+                self.cells[base + col] = unsafe { Cell::new_ascii(byte, style) };
+                col += 1;
             }
             return (x + (initial_remaining_width - remaining_width), y);
         }
 
-        let side = &mut self.side;
+        let row_width = self.width as usize;
+        let base = y as usize * row_width;
+        let mut col = x as usize;
         for symbol in UnicodeSegmentation::graphemes(string, true) {
             if symbol.contains(char::is_control) {
                 continue;
@@ -2257,25 +2419,28 @@ impl Grid {
                 if truncated.len() <= 7 {
                     Cell::new(truncated, style)
                 } else {
-                    let offset = side.intern(truncated);
+                    let offset = self.side.intern(truncated);
                     Cell::new_handle(offset, truncated.len() as u8, style)
                 }
             };
 
-            if let Some(slot) = target_cells.next() {
-                *slot = cell;
-            } else {
+            let width = width as usize;
+            if col + width > row_width {
                 return (x + initial_remaining_width, y);
             }
-            // Pad wider-than-one graphemes with empty cells so they occupy
-            // their full display width.
-            for _ in 1..width {
-                if let Some(slot) = target_cells.next() {
-                    *slot = Cell::EMPTY;
-                } else {
-                    return (x + initial_remaining_width, y);
-                }
+            if self.has_empty {
+                self.repair_wide_overlap(col as u16, y, width);
             }
+            self.cells[base + col] = cell;
+            // Pad wider-than-one graphemes with EMPTY continuation cells so
+            // they occupy their full display width.
+            for pad in 1..width {
+                self.cells[base + col + pad] = Cell::EMPTY;
+            }
+            if width > 1 {
+                self.has_empty = true;
+            }
+            col += width;
         }
         (x + (initial_remaining_width - remaining_width), y)
     }
@@ -2661,8 +2826,14 @@ impl Buffer {
     /// [`Buffer::handle_text`] on its source buffer and write the
     /// resulting text through [`Buffer::set_stringn`].
     pub fn set_cell(&mut self, x: u16, y: u16, cell: Cell) {
+        if self.current.has_empty {
+            self.current.repair_wide_overlap(x, y, 1);
+        }
         if let Some(target) = self.current.get_mut(x, y) {
             *target = cell;
+            if cell.is_empty() {
+                self.current.has_empty = true;
+            }
         }
     }
     /// Applies a style to all cells within the given area.
@@ -2834,9 +3005,10 @@ impl Buffer {
     /// Clears both buffers and increments the epoch.
     pub fn reset(&mut self) {
         clear_cells(&mut self.current.cells);
+        self.current.has_empty = false;
         self.current.side.clear();
         clear_cells(&mut self.previous.cells);
-        // self.previous.cells.fill(Cell::EMPTY);
+        self.previous.has_empty = false;
         self.previous.side.clear();
         self.diffable = false;
         self.scroll = 0;
@@ -2961,6 +3133,7 @@ impl Buffer {
         match swap {
             Swap::Blank => {
                 clear_cells(&mut self.current.cells);
+                self.current.has_empty = false;
                 self.current.side.clear();
             }
             Swap::Retained => self.retain_from_previous(),
@@ -2975,6 +3148,7 @@ impl Buffer {
     /// common path and compacted once it grows past the threshold.
     fn retain_from_previous(&mut self) {
         self.current.cells.copy_from_slice(&self.previous.cells);
+        self.current.has_empty = self.previous.has_empty;
         if self.previous.side.data.len() as u32 > self.grapheme_compaction_threshold {
             self.compact_side_into_current();
             let live = self.current.side.data.len() as u32;
@@ -3001,6 +3175,7 @@ impl Buffer {
             }
             let len = cell.handle_len();
             let Some(bytes) = self.previous.side.get(cell.handle_offset(), len) else {
+                self.current.cells[i] = Cell::SPACE;
                 continue;
             };
             // SAFETY: handle graphemes are always valid UTF-8 interned by `set_stringn`.
@@ -3145,6 +3320,7 @@ impl Buffer {
 
         std::mem::swap(&mut self.current, &mut self.previous);
         clear_cells(&mut self.current.cells);
+        self.current.has_empty = false;
         self.current.side.clear();
         self.cursor.invalidate();
 
@@ -3194,7 +3370,7 @@ fn blank_scrolled_rows(buf: &mut Grid, top: u16, bottom: u16, amount: i16) {
     for y in blank_top as usize..blank_bottom as usize {
         let start = y * width;
         let end = start + width;
-        buf.cells[start..end].fill(Cell::EMPTY);
+        buf.cells[start..end].fill(Cell::SPACE);
     }
 }
 
@@ -3276,54 +3452,74 @@ impl Block<'_> {
             BorderType::Ascii => &BoxStyle::ASCII,
             BorderType::Thin => &BoxStyle::LIGHT,
         };
-        if self.borders & Self::TOP != 0
-            && let Some(row) = buf.row_remaining_mut(x, y)
-        {
-            if w >= 1 {
-                row[0] = box_style.top_left;
+        let has_top = self.borders & Self::TOP != 0;
+        let has_bottom = self.borders & Self::BOTTOM != 0;
+        let has_left = self.borders & Self::LEFT != 0;
+        let has_right = self.borders & Self::RIGHT != 0;
+
+        if buf.has_empty {
+            if has_top {
+                buf.repair_wide_overlap(x, y, w as usize);
             }
-            for cell in row
-                .iter_mut()
-                .take(w as usize)
-                .skip(1)
-                .take(w.saturating_sub(2) as usize)
-            {
-                *cell = box_style.horizontal;
+            if has_bottom {
+                buf.repair_wide_overlap(x, y + h - 1, w as usize);
             }
-            if w >= 2 {
-                row[w as usize - 1] = box_style.top_right;
-            }
-        }
-        if self.borders & Self::BOTTOM != 0
-            && let Some(row) = buf.row_remaining_mut(x, y + h - 1)
-        {
-            if w >= 1 {
-                row[0] = box_style.bottom_left;
-            }
-            for cell in row
-                .iter_mut()
-                .take(w as usize)
-                .skip(1)
-                .take(w.saturating_sub(2) as usize)
-            {
-                *cell = box_style.horizontal;
-            }
-            if w >= 2 {
-                row[w as usize - 1] = box_style.bottom_right;
+            for y in y + has_top as u16..y + h - has_bottom as u16 {
+                if has_left {
+                    buf.repair_wide_overlap(x, y, 1);
+                }
+                if has_right {
+                    buf.repair_wide_overlap(x + w - 1, y, 1);
+                }
             }
         }
-        for y in y + (self.borders & Self::TOP != 0) as u16
-            ..y + h - (self.borders & Self::BOTTOM != 0) as u16
-        {
-            if self.borders & Self::LEFT != 0
-                && let Some(row) = buf.row_remaining_mut(x, y)
-            {
-                row[0] = box_style.vertical;
+
+        if has_top {
+            if let Some(row) = buf.row_remaining_mut(x, y) {
+                if w >= 1 {
+                    row[0] = box_style.top_left;
+                }
+                for cell in row
+                    .iter_mut()
+                    .take(w as usize)
+                    .skip(1)
+                    .take(w.saturating_sub(2) as usize)
+                {
+                    *cell = box_style.horizontal;
+                }
+                if w >= 2 {
+                    row[w as usize - 1] = box_style.top_right;
+                }
             }
-            if self.borders & Self::RIGHT != 0
-                && let Some(row) = buf.row_remaining_mut(x + w - 1, y)
-            {
-                row[0] = box_style.vertical;
+        }
+        if has_bottom {
+            if let Some(row) = buf.row_remaining_mut(x, y + h - 1) {
+                if w >= 1 {
+                    row[0] = box_style.bottom_left;
+                }
+                for cell in row
+                    .iter_mut()
+                    .take(w as usize)
+                    .skip(1)
+                    .take(w.saturating_sub(2) as usize)
+                {
+                    *cell = box_style.horizontal;
+                }
+                if w >= 2 {
+                    row[w as usize - 1] = box_style.bottom_right;
+                }
+            }
+        }
+        for y in y + has_top as u16..y + h - has_bottom as u16 {
+            if has_left {
+                if let Some(row) = buf.row_remaining_mut(x, y) {
+                    row[0] = box_style.vertical;
+                }
+            }
+            if has_right {
+                if let Some(row) = buf.row_remaining_mut(x + w - 1, y) {
+                    row[0] = box_style.vertical;
+                }
             }
         }
 
@@ -3758,10 +3954,11 @@ mod test {
         // flag's 8 bytes are now dead weight in the side arena.
         buffer.set_string(0, 0, flag, Style::DEFAULT);
         buffer.set_string(0, 0, family, Style::DEFAULT);
-        // Write another throwaway into cell 1 and then overwrite it
-        // with a plain inline char so *nothing* references it.
-        buffer.set_string(1, 0, flag, Style::DEFAULT);
-        buffer.set_string(1, 0, "x", Style::DEFAULT);
+        // Write another throwaway into cell 2 and then overwrite it
+        // with a plain inline char so *nothing* references it. Cell 1
+        // is the family's wide continuation, so it must stay untouched.
+        buffer.set_string(2, 0, flag, Style::DEFAULT);
+        buffer.set_string(2, 0, "x", Style::DEFAULT);
 
         let before = buffer.side_len();
         assert_eq!(before, flag.len() * 2 + family.len());
@@ -3777,8 +3974,8 @@ mod test {
         assert!(cell.is_handle());
         assert_eq!(buffer.handle_text(cell).unwrap(), family.as_bytes());
 
-        // Cell 1 is untouched (still the inline 'x').
-        assert_eq!(buffer.cells[1].text_inline(), Some("x"));
+        // Cell 2 is untouched (still the inline 'x').
+        assert_eq!(buffer.cells[2].text_inline(), Some("x"));
     }
 
     #[test]
@@ -3792,17 +3989,25 @@ mod test {
     }
 
     #[test]
+    fn new_grid_uses_visible_space_cells() {
+        let buffer = Grid::new(3, 1);
+
+        assert!(buffer.cells.iter().all(|cell| cell.is_default_space()));
+        assert!(buffer.cells.iter().all(|cell| !cell.is_empty()));
+    }
+
+    #[test]
     fn ascii_set_stringn_fast_path_respects_width() {
         let mut buffer = Grid::new(5, 1);
         let end = buffer.set_stringn(1, 0, "hello", 3, Style::DEFAULT);
 
         assert_eq!(end, (4, 0));
         assert_eq!(buffer.side_len(), 0);
-        assert_eq!(buffer.cells[0].text_inline(), Some(""));
+        assert_eq!(buffer.cells[0].text_inline(), Some(" "));
         assert_eq!(buffer.cells[1].text_inline(), Some("h"));
         assert_eq!(buffer.cells[2].text_inline(), Some("e"));
         assert_eq!(buffer.cells[3].text_inline(), Some("l"));
-        assert_eq!(buffer.cells[4].text_inline(), Some(""));
+        assert_eq!(buffer.cells[4].text_inline(), Some(" "));
     }
 
     #[test]
@@ -3885,6 +4090,18 @@ mod test {
     }
 
     #[test]
+    fn wide_grapheme_pad_stays_empty() {
+        let mut buffer = Grid::new(4, 1);
+        buffer.set_string(0, 0, "🟢x", Style::DEFAULT);
+
+        assert_eq!(buffer.cells[0].text_inline(), Some("🟢"));
+        assert!(buffer.cells[1].is_empty());
+        assert_eq!(buffer.cells[1].text_inline(), None);
+        assert_eq!(buffer.cells[2].text_inline(), Some("x"));
+        assert_eq!(buffer.cells[3].text_inline(), Some(" "));
+    }
+
+    #[test]
     fn long_grapheme_diff_is_idempotent() {
         // Writing the same long grapheme twice should diff to empty output
         // (after the initial paint), exercising the slow-path equality.
@@ -3903,6 +4120,79 @@ mod test {
             "diff re-emitted the flag grapheme: {:?}",
             out
         );
+    }
+
+    #[test]
+    fn full_render_skips_wide_continuation() {
+        let mut db = Buffer::new(6, 1);
+        let mut term = vt100::Parser::new(1, 6, 0);
+
+        db.set_string(0, 0, "🟢ab", Style::DEFAULT);
+        db.render_internal();
+        term.process(&db.buf);
+
+        let row = term.screen().rows(0, 6).next().unwrap();
+        assert_eq!(row.trim_end(), "🟢ab");
+    }
+
+    #[test]
+    fn render_diff_wide_over_ascii_skips_continuation() {
+        let mut db = Buffer::new(6, 1);
+        let mut term = vt100::Parser::new(1, 6, 0);
+
+        db.set_string(0, 0, "abcd", Style::DEFAULT);
+        db.render_internal();
+        term.process(&db.buf);
+        db.buf.clear();
+
+        db.set_string(0, 0, "🟢cd", Style::DEFAULT);
+        db.render_internal();
+        term.process(&db.buf);
+
+        let row = term.screen().rows(0, 6).next().unwrap();
+        assert_eq!(row.trim_end(), "🟢cd");
+    }
+
+    #[test]
+    fn render_diff_narrow_over_wide_clears_old_continuation() {
+        let mut db = Buffer::new(6, 1);
+        let mut term = vt100::Parser::new(1, 6, 0);
+
+        db.set_string(0, 0, "🟢cd", Style::DEFAULT);
+        db.render_internal();
+        term.process(&db.buf);
+        db.buf.clear();
+
+        db.set_string(0, 0, "abcd", Style::DEFAULT);
+        db.render_internal();
+        term.process(&db.buf);
+
+        let row = term.screen().rows(0, 6).next().unwrap();
+        assert_eq!(row.trim_end(), "abcd");
+    }
+
+    #[test]
+    fn writing_on_wide_continuation_repairs_old_footprint() {
+        let mut buffer = Grid::new(3, 1);
+        buffer.set_string(0, 0, "🟢", Style::DEFAULT);
+
+        buffer.set_string(1, 0, "a", Style::DEFAULT);
+
+        assert_eq!(buffer.cells[0].text_inline(), Some(" "));
+        assert_eq!(buffer.cells[1].text_inline(), Some("a"));
+        assert_eq!(buffer.cells[2].text_inline(), Some(" "));
+    }
+
+    #[test]
+    fn replacing_wide_lead_repairs_old_continuation() {
+        let mut buffer = Grid::new(4, 1);
+        buffer.set_string(0, 0, "🟢x", Style::DEFAULT);
+
+        buffer.set_string(0, 0, "a", Style::DEFAULT);
+
+        assert_eq!(buffer.cells[0].text_inline(), Some("a"));
+        assert_eq!(buffer.cells[1].text_inline(), Some(" "));
+        assert_eq!(buffer.cells[2].text_inline(), Some("x"));
     }
 
     pub struct BufferDiffCheck {
@@ -4251,7 +4541,7 @@ mod test {
     }
 
     /// Bounded render_diff must not use the `\x1b[K` (EL/erase-to-end-of-line)
-    /// optimization for runs of blank cells — that clears cells to the right
+    /// optimization for runs of SPACE cells — that clears cells to the right
     /// of the buffer's rightmost column, destroying widgets rendered beside it.
     #[test]
     fn bounded_render_diff_does_not_emit_clear_line_optimization() {
