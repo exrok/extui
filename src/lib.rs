@@ -1986,7 +1986,7 @@ impl Grid {
                 }
                 if new.is_space() {
                     let mut space_overwrite = 1;
-                    let space_cell = new;
+                    let mut space_cell = new;
                     'continue_new: {
                         loop {
                             let Some(&new_k) = new_cells.next() else {
@@ -2068,6 +2068,11 @@ impl Grid {
                             }
 
                             if new_k.is_space() {
+                                // A differently-styled space starts a fresh run;
+                                // keeping the old space_cell would flush the new
+                                // run with the previous run's style (e.g. smear a
+                                // selection-highlight bg into adjacent regions).
+                                space_cell = new_k;
                                 space_overwrite = 1;
                                 continue;
                             } else {
@@ -4193,6 +4198,47 @@ mod test {
         assert_eq!(buffer.cells[0].text_inline(), Some("a"));
         assert_eq!(buffer.cells[1].text_inline(), Some(" "));
         assert_eq!(buffer.cells[2].text_inline(), Some("x"));
+    }
+
+    /// A space run followed by spaces with a different style must not
+    /// inherit the first run's style. Regression test for a selection
+    /// highlight bg bleeding past its region into adjacent default-bg
+    /// spaces during diff rendering.
+    #[test]
+    fn render_diff_adjacent_space_runs_keep_own_style() {
+        let mut db = Buffer::new(20, 1);
+        let mut term = vt100::Parser::new(1, 20, 0);
+
+        db.set_string(0, 0, "abcdefghijklmnopqrst", Style::DEFAULT);
+        db.render_internal();
+        term.process(&db.buf);
+        db.buf.clear();
+
+        // Style SPACE cells the way DisplayRect::fill does: the work
+        // buffer is blank after the swap, so the left half becomes
+        // highlighted spaces and the right half stays default spaces.
+        let highlight = AnsiColor(4).as_bg();
+        db.set_style(
+            Rect {
+                x: 0,
+                y: 0,
+                w: 10,
+                h: 1,
+            },
+            highlight,
+        );
+        db.render_internal();
+        term.process(&db.buf);
+
+        for x in 0..20 {
+            let cell = term.screen().cell(0, x).unwrap();
+            let expected = if x < 10 {
+                vt100::Color::Idx(4)
+            } else {
+                vt100::Color::Default
+            };
+            assert_eq!(cell.bgcolor(), expected, "wrong bg at column {x}");
+        }
     }
 
     pub struct BufferDiffCheck {
