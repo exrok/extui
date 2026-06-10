@@ -1508,6 +1508,15 @@ fn write_palette_or_diff(
     write_style_diff(current, new, buf)
 }
 
+/// Whether erasing with `\x1b[K` paints identically to writing styled
+/// spaces. BCE terminals fill erased cells with the background color
+/// only, so a run styled with a blank-visible modifier must be written
+/// as real spaces.
+#[inline]
+fn el_equivalent(style: Style) -> bool {
+    style.0 & Modifier::BLANK_VISIBLE.0 as u64 == 0
+}
+
 pub(crate) fn write_style_diff(current: Style, new: Style, buf: &mut Vec<u8>) -> Style {
     if current == new {
         return current;
@@ -2012,7 +2021,10 @@ impl Grid {
                                     buf,
                                     true,
                                 );
-                                if !blanking || space_overwrite < 50 {
+                                if !blanking
+                                    || space_overwrite < 50
+                                    || !el_equivalent(space_cell.style())
+                                {
                                     buf.extend(std::iter::repeat_n(b' ', space_overwrite as usize));
                                     matching_count = 1;
                                 } else {
@@ -2055,7 +2067,10 @@ impl Grid {
                                 buf,
                                 true,
                             );
-                            if !blanking || space_overwrite < 50 {
+                            if !blanking
+                                || space_overwrite < 50
+                                || !el_equivalent(space_cell.style())
+                            {
                                 buf.extend(std::iter::repeat_n(b' ', space_overwrite as usize));
                             } else {
                                 buf.extend_from_slice(b"\x1b[K");
@@ -2096,7 +2111,7 @@ impl Grid {
                             true,
                         );
 
-                        if !blanking || space_overwrite < 8 {
+                        if !blanking || space_overwrite < 8 || !el_equivalent(space_cell.style()) {
                             for _ in 0..space_overwrite {
                                 buf.push(b' ');
                             }
@@ -2109,6 +2124,13 @@ impl Grid {
                 }
 
                 if has_empty && new.is_empty() {
+                    // A continuation reaching this point has a lead that was
+                    // not rewritten (rewrites consume their continuations
+                    // below), so it still occupies a terminal column the
+                    // cursor must skip. A style change on a continuation
+                    // alone is not representable — the full render ignores
+                    // it as well.
+                    matching_count += 1;
                     continue;
                 }
 
@@ -2133,6 +2155,21 @@ impl Grid {
                     buf.push(b' ');
                 } else {
                     buf.extend_from_slice(text);
+                    // A wide glyph advances the cursor over its continuation
+                    // cells; consume them here without touching
+                    // matching_count, otherwise the cursor tracking drifts
+                    // one column right per continuation.
+                    if has_empty {
+                        while let [next, ..] = new_cells.as_slice() {
+                            if !next.is_empty() {
+                                break;
+                            }
+                            new_cells.next();
+                            if erased_cell.is_none() {
+                                old_cells.next();
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -4239,6 +4276,248 @@ mod test {
             };
             assert_eq!(cell.bgcolor(), expected, "wrong bg at column {x}");
         }
+    }
+
+    /// A space run styled with a blank-visible modifier must be written
+    /// as real spaces: BCE terminals fill `\x1b[K` with the background
+    /// color only, dropping underline/reverse/strikethrough.
+    #[test]
+    fn render_diff_no_el_for_blank_visible_modifier_runs() {
+        let mut db = Buffer::new(120, 1);
+        db.set_string(0, 0, &"x".repeat(120), Style::DEFAULT);
+        db.render_internal();
+        db.buf.clear();
+
+        db.set_style(
+            Rect {
+                x: 0,
+                y: 0,
+                w: 120,
+                h: 1,
+            },
+            AnsiColor(4).as_bg().with_modifier(Modifier::UNDERLINED),
+        );
+        db.render_internal();
+
+        let out = std::str::from_utf8(&db.buf).unwrap();
+        assert!(
+            !out.contains("\x1b[K") && !out.contains("\x1b[0K"),
+            "underlined space run must not use EL: {out:?}"
+        );
+        assert!(
+            out.contains(&" ".repeat(120)),
+            "underlined run must be written as real spaces: {out:?}"
+        );
+    }
+
+    /// Glyph-only modifiers (bold, dim, italic, hidden) render blanks
+    /// identically to plain blanks, so they keep the EL shortcut.
+    #[test]
+    fn render_diff_keeps_el_for_glyph_only_modifier_runs() {
+        let mut db = Buffer::new(120, 1);
+        db.set_string(0, 0, &"x".repeat(120), Style::DEFAULT);
+        db.render_internal();
+        db.buf.clear();
+
+        db.set_style(
+            Rect {
+                x: 0,
+                y: 0,
+                w: 120,
+                h: 1,
+            },
+            AnsiColor(4).as_bg().with_modifier(Modifier::BOLD),
+        );
+        db.render_internal();
+
+        let out = std::str::from_utf8(&db.buf).unwrap();
+        assert!(
+            out.contains("\x1b[K"),
+            "plain bg space run must keep the EL shortcut: {out:?}"
+        );
+    }
+
+    fn fuzz_diff_vs_full(seed: u64, wide: bool) {
+        let width: u16 = 120;
+        let height: u16 = 4;
+        let mut state = seed;
+        let mut rng = move |n: u32| -> u32 {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((state >> 33) as u32) % n
+        };
+
+        let narrow = ["abc", "hello world", "x", "   ", " a ", "zzzzzz"];
+        let wides = ["🟢", "🔴ab", "日本語", "a🟡b"];
+
+        let mut db = Buffer::new(width, height);
+        let mut term = vt100::Parser::new(height, width, 0);
+
+        for step in 0..300 {
+            let mut ops: Vec<(u8, u16, u16, u16, u32, u32)> = Vec::new();
+            for _ in 0..12 {
+                ops.push((
+                    rng(3) as u8,
+                    rng(width as u32) as u16,
+                    rng(height as u32) as u16,
+                    (1 + rng(70)) as u16,
+                    rng(if wide { 10 } else { 6 }),
+                    rng(64),
+                ));
+            }
+            let style_of = |s: u32| {
+                let mut style = Style::DEFAULT;
+                if s & 3 == 1 {
+                    style = style.with_bg_ansi(AnsiColor(4));
+                } else if s & 3 == 2 {
+                    style = style.with_bg_ansi(AnsiColor(1));
+                }
+                if s & 4 != 0 {
+                    style = style.with_fg_ansi(AnsiColor(2));
+                }
+                if s & 24 == 8 {
+                    style = style.with_modifier(Modifier::BOLD);
+                }
+                if s & 32 != 0 {
+                    style = style.with_modifier(Modifier::UNDERLINED);
+                }
+                style
+            };
+            let draw = |out: &mut Buffer| {
+                for &(op, x, y, w, txt, s) in &ops {
+                    let style = style_of(s);
+                    match op {
+                        0 | 1 => {
+                            let s = if txt < 6 {
+                                narrow[txt as usize]
+                            } else {
+                                wides[(txt - 6) as usize]
+                            };
+                            out.set_string(x, y, s, style);
+                        }
+                        _ => {
+                            out.set_style(
+                                Rect {
+                                    x,
+                                    y,
+                                    w,
+                                    h: 1 + (s as u16 & 1),
+                                },
+                                style,
+                            );
+                        }
+                    }
+                }
+            };
+
+            draw(&mut db);
+            db.buf.clear();
+            db.render_internal();
+            term.process(&db.buf);
+
+            let mut reference = Buffer::new(width, height);
+            let mut ref_term = vt100::Parser::new(height, width, 0);
+            draw(&mut reference);
+            reference.render_internal();
+            ref_term.process(&reference.buf);
+
+            for y in 0..height {
+                for x in 0..width {
+                    let a = term.screen().cell(y, x).unwrap();
+                    let b = ref_term.screen().cell(y, x).unwrap();
+                    let norm = |c: &str| {
+                        if c == " " {
+                            String::new()
+                        } else {
+                            c.to_owned()
+                        }
+                    };
+                    let visual = |c: &vt100::Cell| {
+                        let text = norm(&c.contents());
+                        let (fg, bold) = if text.is_empty() {
+                            (vt100::Color::Default, false)
+                        } else {
+                            (c.fgcolor(), c.bold())
+                        };
+                        (text, fg, c.bgcolor(), bold)
+                    };
+                    assert_eq!(
+                        visual(a),
+                        visual(b),
+                        "mismatch at step {step} ({x},{y}) seed {seed} wide {wide}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn render_diff_matches_full_render_fuzz_narrow() {
+        fuzz_diff_vs_full(0xfeed_beef, false);
+        fuzz_diff_vs_full(1, false);
+        fuzz_diff_vs_full(42, false);
+        fuzz_diff_vs_full(0xdead_cafe, false);
+    }
+
+    #[test]
+    fn render_diff_matches_full_render_fuzz_wide() {
+        fuzz_diff_vs_full(0xfeed_beef, true);
+        fuzz_diff_vs_full(1, true);
+        fuzz_diff_vs_full(42, true);
+        fuzz_diff_vs_full(0xdead_cafe, true);
+    }
+
+    #[test]
+    fn render_diff_wide_rewrite_keeps_column_alignment() {
+        let mut db = Buffer::new(6, 1);
+        let mut term = vt100::Parser::new(1, 6, 0);
+
+        db.set_string(0, 0, "🟢xa", Style::DEFAULT);
+        db.render_internal();
+        term.process(&db.buf);
+        db.buf.clear();
+
+        db.set_string(0, 0, "🔴xb", Style::DEFAULT);
+        db.render_internal();
+        term.process(&db.buf);
+
+        let row = term.screen().rows(0, 6).next().unwrap();
+        assert_eq!(row.trim_end(), "🔴xb");
+    }
+
+    /// A `set_style` rect edge can restyle a wide glyph's continuation
+    /// without its lead. The restyle is not representable on its own, but
+    /// the continuation still occupies a column the diff cursor must skip.
+    #[test]
+    fn render_diff_restyled_continuation_keeps_column_alignment() {
+        let mut db = Buffer::new(6, 1);
+        let mut term = vt100::Parser::new(1, 6, 0);
+
+        db.set_string(0, 0, "🟢a", Style::DEFAULT);
+        db.render_internal();
+        term.process(&db.buf);
+        db.buf.clear();
+
+        db.set_string(0, 0, "🟢a", Style::DEFAULT);
+        db.set_style(
+            Rect {
+                x: 1,
+                y: 0,
+                w: 2,
+                h: 1,
+            },
+            AnsiColor(4).as_bg(),
+        );
+        db.render_internal();
+        term.process(&db.buf);
+
+        let row = term.screen().rows(0, 6).next().unwrap();
+        assert_eq!(row.trim_end(), "🟢a");
+        assert_eq!(
+            term.screen().cell(0, 2).unwrap().bgcolor(),
+            vt100::Color::Idx(4)
+        );
     }
 
     pub struct BufferDiffCheck {

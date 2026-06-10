@@ -3171,7 +3171,7 @@ fn pair_delimiters(kind: PairKind) -> (char, char) {
 mod tests {
     use super::*;
     use extui::{
-        Cell, Buffer, Grid, Rect,
+        Buffer, Cell, Grid, Rect,
         event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers},
     };
 

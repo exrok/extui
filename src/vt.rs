@@ -676,6 +676,21 @@ impl Modifier {
     /// All modifiers combined.
     pub const ALL: Modifier = Modifier(0x01FF);
 
+    /// Modifiers that change how a terminal paints blank cells.
+    ///
+    /// ECMA-48 erase operations fill erased cells with the background
+    /// color only (BCE), so erasing is not visually equivalent to
+    /// writing spaces under any of these. Bold, dim, italic, and hidden
+    /// only affect glyphs and are absent: a blank cell renders the same
+    /// with or without them.
+    pub(crate) const BLANK_VISIBLE: Modifier = Modifier(
+        Self::UNDERLINED.0
+            | Self::SLOW_BLINK.0
+            | Self::RAPID_BLINK.0
+            | Self::REVERSED.0
+            | Self::CROSSED_OUT.0,
+    );
+
     /// Returns `true` if no modifiers are set.
     pub fn is_empty(self) -> bool {
         self.0 == 0

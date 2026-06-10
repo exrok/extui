@@ -11,7 +11,7 @@
 //! so the render loop never touches the raw attr map.
 
 use extui::vt::Modifier;
-use extui::{AnsiColor, Color, CursorShape, Buffer, Grid, Rect, Rgb, Style};
+use extui::{AnsiColor, Buffer, Color, CursorShape, Grid, Rect, Rgb, Style};
 
 use crate::msgpack::{Error as MsgpackError, Kind, Reader};
 
