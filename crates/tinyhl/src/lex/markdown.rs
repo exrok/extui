@@ -36,6 +36,7 @@ use crate::{Language, LexState, SourceView};
 mod state {
     pub const CLOSER_PENDING: u16 = 1 << 0;
     pub const MID_LINE: u16 = 1 << 1;
+    pub const LINE_INDENT: u16 = 1 << 2;
 }
 
 #[inline]
@@ -90,7 +91,24 @@ impl Lexer for Markdown {
                 return (cursor, state);
             };
 
-            let bol = (state.bits() & state::MID_LINE) == 0;
+            let bol = (state.bits() & (state::MID_LINE | state::LINE_INDENT)) == 0;
+            let at_indent = (state.bits() & state::LINE_INDENT) != 0;
+
+            if bol && (b == b' ' || b == b'\t') {
+                let end = scan_indent(view, cursor);
+                if !matches!(view.byte_at(end), None | Some(b'\n') | Some(b'\r')) {
+                    let state_out = LexState(state::LINE_INDENT);
+                    out.push(LexStep::Token {
+                        len: end - cursor,
+                        local_kind: kinds::WHITESPACE,
+                        state_out,
+                        flags: flags::STATE_BREAKPOINT,
+                    });
+                    cursor = end;
+                    state = state_out;
+                    continue;
+                }
+            }
 
             if bol {
                 if b == b'`' || b == b'~' {
@@ -113,6 +131,9 @@ impl Lexer for Markdown {
                         continue;
                     }
                 }
+            }
+
+            if bol || at_indent {
                 if b == b'>' {
                     let end = scan_blockquote_prefix(view, cursor);
                     let state_out = state_after(view, end);
@@ -182,6 +203,14 @@ fn scan_to_eol_inclusive(view: &mut SourceView<'_>, cursor: u32) -> u32 {
             Some(_) => p += 1,
         }
     }
+}
+
+fn scan_indent(view: &mut SourceView<'_>, cursor: u32) -> u32 {
+    let mut p = cursor;
+    while matches!(view.byte_at(p), Some(b' ') | Some(b'\t')) {
+        p += 1;
+    }
+    p
 }
 
 fn scan_md_whitespace(view: &mut SourceView<'_>, cursor: u32) -> u32 {

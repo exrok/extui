@@ -65,7 +65,6 @@
 //! }
 //! # Ok::<(), std::io::Error>(())
 //! ```
-
 mod base64;
 mod display_rect;
 mod features;

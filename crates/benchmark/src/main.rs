@@ -2,6 +2,7 @@ mod bindings;
 mod common;
 mod editor;
 mod profile;
+mod ratatui_render;
 mod render;
 
 use jsony_bench::Bencher;
@@ -167,6 +168,9 @@ fn run_list() {
     for (g, n) in render::list() {
         println!("bench    {g}/{n}");
     }
+    for (g, n) in ratatui_render::list() {
+        println!("bench    {g}/{n}");
+    }
     for (g, n) in editor::list() {
         println!("bench    {g}/{n}");
     }
@@ -189,6 +193,7 @@ fn run_bench(patterns: Vec<String>, save: Option<PathBuf>, base: Option<PathBuf>
     let mut records: Vec<BenchRecord> = Vec::new();
 
     render::run_matching(&mut bencher, &matches, &mut records, baseline.as_deref());
+    ratatui_render::run_matching(&mut bencher, &matches, &mut records, baseline.as_deref());
     editor::run_matching(&mut bencher, &matches, &mut records, baseline.as_deref());
     bindings::run_matching(&mut bencher, &matches, &mut records, baseline.as_deref());
 

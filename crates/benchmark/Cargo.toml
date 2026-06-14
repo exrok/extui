@@ -12,6 +12,8 @@ extui-editor.path = "../extui-editor"
 tinyhl.path = "../tinyhl"
 oorandom = "11.1.5"
 jsony = "0.1.9"
+ratatui = "0.30.1"
+ratatui-crossterm = { version = "0.1.1", features = ["unstable-backend-writer"] }
 
 #[profile.release]
 #debug = 1

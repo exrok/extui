@@ -21,6 +21,11 @@ Stray (parens) and a > arrow stay punctuation.
 2. second
 3. third
 
+- outer
+  - inner
+    1. deep
+  > indented quote
+
 ```rust
 fn main() {
     let x: i32 = 42;

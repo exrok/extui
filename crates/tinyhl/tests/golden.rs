@@ -577,6 +577,36 @@ fn markdown_fixtures_exercise_expected_kinds() {
 }
 
 #[test]
+fn markdown_indented_markers_are_recognized() {
+    use tinyhl::kind as kinds;
+
+    let input = load_markdown("simple.md.in");
+    let tokens = tokens_of(Language::Markdown, &input);
+
+    let kind_at = |needle: &str| {
+        let offset = input.find(needle).unwrap_or_else(|| panic!("{needle:?} not in fixture")) as u32;
+        let index = tokens
+            .iter()
+            .position(|t| t.span.offset == offset)
+            .unwrap_or_else(|| panic!("no token starts at {needle:?}"));
+        (index, tokens[index].local_kind())
+    };
+
+    let (inner, inner_kind) = kind_at("- inner");
+    assert_eq!(inner_kind, kinds::LIST_MARKER);
+    let (deep, deep_kind) = kind_at("1. deep");
+    assert_eq!(deep_kind, kinds::LIST_MARKER);
+    let (quote, quote_kind) = kind_at("> indented quote");
+    assert_eq!(quote_kind, kinds::BLOCKQUOTE);
+
+    for index in [inner, deep, quote] {
+        let indent = &tokens[index - 1];
+        assert_eq!(indent.local_kind(), kinds::WHITESPACE);
+        assert!(input.as_bytes()[indent.span.offset as usize - 1] == b'\n');
+    }
+}
+
+#[test]
 fn markdown_embed_dispatches_to_inner_languages() {
     let input = load_markdown("simple.md.in");
     let tokens = tokens_of(Language::Markdown, &input);
