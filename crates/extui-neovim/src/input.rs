@@ -15,31 +15,34 @@ pub fn write_key(out: &mut String, key: &KeyEvent) -> bool {
     let mods = key.modifiers;
     let has_ctrl = mods.contains(KeyModifiers::CONTROL);
     let has_alt = mods.contains(KeyModifiers::ALT) || mods.contains(KeyModifiers::META);
+    let has_super = mods.contains(KeyModifiers::SUPER);
     let has_shift = mods.contains(KeyModifiers::SHIFT);
 
     match key.code {
-        KeyCode::Char(c) => write_char(out, c, has_ctrl, has_alt, has_shift),
-        KeyCode::Enter => write_named(out, "CR", has_ctrl, has_alt, false),
-        KeyCode::Esc => write_named(out, "Esc", has_ctrl, has_alt, false),
-        KeyCode::Backspace => write_named(out, "BS", has_ctrl, has_alt, false),
-        KeyCode::Tab => write_named(out, "Tab", has_ctrl, has_alt, has_shift),
-        KeyCode::BackTab => write_named(out, "Tab", has_ctrl, has_alt, true),
-        KeyCode::Delete => write_named(out, "Del", has_ctrl, has_alt, has_shift),
-        KeyCode::Insert => write_named(out, "Insert", has_ctrl, has_alt, has_shift),
-        KeyCode::Home => write_named(out, "Home", has_ctrl, has_alt, has_shift),
-        KeyCode::End => write_named(out, "End", has_ctrl, has_alt, has_shift),
-        KeyCode::PageUp => write_named(out, "PageUp", has_ctrl, has_alt, has_shift),
-        KeyCode::PageDown => write_named(out, "PageDown", has_ctrl, has_alt, has_shift),
-        KeyCode::Up => write_named(out, "Up", has_ctrl, has_alt, has_shift),
-        KeyCode::Down => write_named(out, "Down", has_ctrl, has_alt, has_shift),
-        KeyCode::Left => write_named(out, "Left", has_ctrl, has_alt, has_shift),
-        KeyCode::Right => write_named(out, "Right", has_ctrl, has_alt, has_shift),
+        KeyCode::Char(c) => write_char(out, c, has_ctrl, has_alt, has_super, has_shift),
+        KeyCode::Enter => write_named(out, "CR", has_ctrl, has_alt, has_super, false),
+        KeyCode::Esc => write_named(out, "Esc", has_ctrl, has_alt, has_super, false),
+        KeyCode::Backspace => write_named(out, "BS", has_ctrl, has_alt, has_super, false),
+        KeyCode::Tab => write_named(out, "Tab", has_ctrl, has_alt, has_super, has_shift),
+        KeyCode::BackTab => write_named(out, "Tab", has_ctrl, has_alt, has_super, true),
+        KeyCode::Delete => write_named(out, "Del", has_ctrl, has_alt, has_super, has_shift),
+        KeyCode::Insert => write_named(out, "Insert", has_ctrl, has_alt, has_super, has_shift),
+        KeyCode::Home => write_named(out, "Home", has_ctrl, has_alt, has_super, has_shift),
+        KeyCode::End => write_named(out, "End", has_ctrl, has_alt, has_super, has_shift),
+        KeyCode::PageUp => write_named(out, "PageUp", has_ctrl, has_alt, has_super, has_shift),
+        KeyCode::PageDown => write_named(out, "PageDown", has_ctrl, has_alt, has_super, has_shift),
+        KeyCode::Up => write_named(out, "Up", has_ctrl, has_alt, has_super, has_shift),
+        KeyCode::Down => write_named(out, "Down", has_ctrl, has_alt, has_super, has_shift),
+        KeyCode::Left => write_named(out, "Left", has_ctrl, has_alt, has_super, has_shift),
+        KeyCode::Right => write_named(out, "Right", has_ctrl, has_alt, has_super, has_shift),
         KeyCode::Null => false,
-        code if matches!(code, KeyCode::F1) => write_fn(out, 1, has_ctrl, has_alt, has_shift),
+        code if matches!(code, KeyCode::F1) => {
+            write_fn(out, 1, has_ctrl, has_alt, has_super, has_shift)
+        }
         code => {
             let n = function_key_number(code);
             if n > 0 {
-                return write_fn(out, n, has_ctrl, has_alt, has_shift);
+                return write_fn(out, n, has_ctrl, has_alt, has_super, has_shift);
             }
             false
         }
@@ -72,29 +75,32 @@ fn function_key_number(code: KeyCode) -> u8 {
     }
 }
 
-fn write_modifier_prefix(out: &mut String, ctrl: bool, alt: bool, shift: bool) {
+fn write_modifier_prefix(out: &mut String, ctrl: bool, alt: bool, sup: bool, shift: bool) {
     if ctrl {
         out.push_str("C-");
     }
     if alt {
         out.push_str("M-");
     }
+    if sup {
+        out.push_str("D-");
+    }
     if shift {
         out.push_str("S-");
     }
 }
 
-fn write_named(out: &mut String, name: &str, ctrl: bool, alt: bool, shift: bool) -> bool {
+fn write_named(out: &mut String, name: &str, ctrl: bool, alt: bool, sup: bool, shift: bool) -> bool {
     out.push('<');
-    write_modifier_prefix(out, ctrl, alt, shift);
+    write_modifier_prefix(out, ctrl, alt, sup, shift);
     out.push_str(name);
     out.push('>');
     true
 }
 
-fn write_fn(out: &mut String, n: u8, ctrl: bool, alt: bool, shift: bool) -> bool {
+fn write_fn(out: &mut String, n: u8, ctrl: bool, alt: bool, sup: bool, shift: bool) -> bool {
     out.push('<');
-    write_modifier_prefix(out, ctrl, alt, shift);
+    write_modifier_prefix(out, ctrl, alt, sup, shift);
     out.push('F');
     // Function keys are F1..=F20 per `function_key_number`, so we only
     // ever need one or two ASCII digits — bypass `core::fmt` entirely.
@@ -106,26 +112,26 @@ fn write_fn(out: &mut String, n: u8, ctrl: bool, alt: bool, shift: bool) -> bool
     true
 }
 
-fn write_char(out: &mut String, c: char, ctrl: bool, alt: bool, shift: bool) -> bool {
+fn write_char(out: &mut String, c: char, ctrl: bool, alt: bool, sup: bool, shift: bool) -> bool {
     if c == '<' {
-        if ctrl || alt {
+        if ctrl || alt || sup {
             out.push('<');
-            write_modifier_prefix(out, ctrl, alt, false);
+            write_modifier_prefix(out, ctrl, alt, sup, false);
             out.push_str("lt>");
         } else {
             out.push_str("<lt>");
         }
         return true;
     }
-    if c == ' ' && (ctrl || alt) {
+    if c == ' ' && (ctrl || alt || sup) {
         out.push('<');
-        write_modifier_prefix(out, ctrl, alt, false);
+        write_modifier_prefix(out, ctrl, alt, sup, false);
         out.push_str("Space>");
         return true;
     }
-    if ctrl || alt {
+    if ctrl || alt || sup {
         out.push('<');
-        write_modifier_prefix(out, ctrl, alt, false);
+        write_modifier_prefix(out, ctrl, alt, sup, false);
         if shift && c.is_ascii_lowercase() {
             out.push((c as u8 - b'a' + b'A') as char);
         } else {
@@ -192,6 +198,9 @@ pub fn translate_mouse(
     }
     if mouse.modifiers.contains(KeyModifiers::ALT) || mouse.modifiers.contains(KeyModifiers::META) {
         modifier.push_str("M-");
+    }
+    if mouse.modifiers.contains(KeyModifiers::SUPER) {
+        modifier.push_str("D-");
     }
     Some(NvimMouse {
         button,
@@ -268,6 +277,52 @@ mod tests {
         assert_eq!(render(key(KeyCode::Tab, KeyModifiers::NONE)), "<Tab>");
         assert_eq!(render(key(KeyCode::BackTab, KeyModifiers::NONE)), "<S-Tab>");
         assert_eq!(render(key(KeyCode::Delete, KeyModifiers::NONE)), "<Del>");
+    }
+
+    #[test]
+    fn super_char() {
+        assert_eq!(render(key(KeyCode::Char('v'), KeyModifiers::SUPER)), "<D-v>");
+    }
+
+    #[test]
+    fn super_shift_char() {
+        assert_eq!(
+            render(key(KeyCode::Char('v'), KeyModifiers::SUPER | KeyModifiers::SHIFT)),
+            "<D-V>"
+        );
+    }
+
+    #[test]
+    fn ctrl_super_char() {
+        assert_eq!(
+            render(key(KeyCode::Char('v'), KeyModifiers::CONTROL | KeyModifiers::SUPER)),
+            "<C-D-v>"
+        );
+    }
+
+    #[test]
+    fn super_space() {
+        assert_eq!(
+            render(key(KeyCode::Char(' '), KeyModifiers::SUPER)),
+            "<D-Space>"
+        );
+    }
+
+    #[test]
+    fn super_named() {
+        assert_eq!(render(key(KeyCode::Enter, KeyModifiers::SUPER)), "<D-CR>");
+    }
+
+    #[test]
+    fn mouse_super_modifier() {
+        let m = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 10,
+            row: 5,
+            modifiers: KeyModifiers::SUPER,
+        };
+        let t = translate_mouse(&m, 10, 5, 10, 10).unwrap();
+        assert_eq!(t.modifier, "D-");
     }
 
     #[test]
