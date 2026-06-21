@@ -2,7 +2,8 @@
 
 mod common;
 
-use common::assert_matches_nvim;
+use common::{assert_matches_nvim, parse_keys};
+use extui_editor::Editor;
 
 const LINES3: &str = "hello world\nfoo bar\nquick fox";
 const WORD_PUNCT: &str = "foo,  bar baz";
@@ -93,6 +94,17 @@ fn type_and_backspace() {
 #[test]
 fn insert_newline() {
     assert_matches_nvim("foo", "iX<CR>Y<Esc>");
+}
+
+#[test]
+fn shift_enter_insert_newline() {
+    let mut ed = Editor::new();
+    ed.resize(80);
+    ed.set_lines("foo");
+    for key in parse_keys("iX<S-Enter>Y<Esc>") {
+        ed.send_key(&key);
+    }
+    assert_eq!(ed.text(), "X\nYfoo");
 }
 
 // -------- Tab handling (must match configured tab expansion) --------

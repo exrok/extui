@@ -584,7 +584,9 @@ fn markdown_indented_markers_are_recognized() {
     let tokens = tokens_of(Language::Markdown, &input);
 
     let kind_at = |needle: &str| {
-        let offset = input.find(needle).unwrap_or_else(|| panic!("{needle:?} not in fixture")) as u32;
+        let offset = input
+            .find(needle)
+            .unwrap_or_else(|| panic!("{needle:?} not in fixture")) as u32;
         let index = tokens
             .iter()
             .position(|t| t.span.offset == offset)

@@ -90,7 +90,14 @@ fn write_modifier_prefix(out: &mut String, ctrl: bool, alt: bool, sup: bool, shi
     }
 }
 
-fn write_named(out: &mut String, name: &str, ctrl: bool, alt: bool, sup: bool, shift: bool) -> bool {
+fn write_named(
+    out: &mut String,
+    name: &str,
+    ctrl: bool,
+    alt: bool,
+    sup: bool,
+    shift: bool,
+) -> bool {
     out.push('<');
     write_modifier_prefix(out, ctrl, alt, sup, shift);
     out.push_str(name);
@@ -281,13 +288,19 @@ mod tests {
 
     #[test]
     fn super_char() {
-        assert_eq!(render(key(KeyCode::Char('v'), KeyModifiers::SUPER)), "<D-v>");
+        assert_eq!(
+            render(key(KeyCode::Char('v'), KeyModifiers::SUPER)),
+            "<D-v>"
+        );
     }
 
     #[test]
     fn super_shift_char() {
         assert_eq!(
-            render(key(KeyCode::Char('v'), KeyModifiers::SUPER | KeyModifiers::SHIFT)),
+            render(key(
+                KeyCode::Char('v'),
+                KeyModifiers::SUPER | KeyModifiers::SHIFT
+            )),
             "<D-V>"
         );
     }
@@ -295,7 +308,10 @@ mod tests {
     #[test]
     fn ctrl_super_char() {
         assert_eq!(
-            render(key(KeyCode::Char('v'), KeyModifiers::CONTROL | KeyModifiers::SUPER)),
+            render(key(
+                KeyCode::Char('v'),
+                KeyModifiers::CONTROL | KeyModifiers::SUPER
+            )),
             "<C-D-v>"
         );
     }

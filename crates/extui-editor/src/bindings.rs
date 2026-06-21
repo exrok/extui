@@ -1802,6 +1802,7 @@ fn bind_vim_insert(builder: &mut EditorRouterBuilder) {
     let mut b = Binder::new(builder, LayerId::BASE, Filter::new(MODE_INSERT));
     b.key("Esc", EditorAction::ExitInsert)
         .key("Enter", EditorAction::InsertNewline)
+        .key("S-Enter", EditorAction::InsertNewline)
         .key("Tab", EditorAction::InsertTab)
         .key("Backspace", EditorAction::BackspaceDelete);
 }
