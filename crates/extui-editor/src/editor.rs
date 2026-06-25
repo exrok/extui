@@ -2903,6 +2903,9 @@ fn find_number_from(line: &str, col: usize) -> Option<(usize, usize, i64)> {
         end += 1;
     }
     let mut start = i;
+    while start > 0 && bytes[start - 1].is_ascii_digit() {
+        start -= 1;
+    }
     if start > 0 && bytes[start - 1] == b'-' {
         start -= 1;
     }
@@ -3251,6 +3254,21 @@ mod tests {
         assert_eq!(ed.text(), "hello");
         assert_eq!(ed.cursor(), (0, 4));
         assert_eq!(ed.mode(), Mode::Normal);
+    }
+
+    #[test]
+    fn vim_insert_mode_arrow_keys_move_cursor() {
+        let mut ed = Editor::new();
+        feed(&mut ed, &[key_char('i')]);
+        feed(&mut ed, &chars("ac"));
+        feed(&mut ed, &[mk(KeyCode::Left, KeyModifiers::NONE)]);
+        feed(&mut ed, &chars("b"));
+        feed(&mut ed, &[mk(KeyCode::Right, KeyModifiers::NONE)]);
+        feed(&mut ed, &chars("d"));
+
+        assert_eq!(ed.text(), "abcd");
+        assert_eq!(ed.cursor(), (0, 4));
+        assert_eq!(ed.mode(), Mode::Insert);
     }
 
     #[test]
@@ -3995,6 +4013,15 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_k_aliases_big_d() {
+        let mut ed = Editor::new();
+        ed.set_lines("hello world\nnext");
+        feed(&mut ed, &[key_char('l'), key_char('l'), key_ctrl('k')]);
+        assert_eq!(ed.text(), "he\nnext");
+        assert_eq!(ed.cursor(), (0, 1));
+    }
+
+    #[test]
     fn big_c_changes_to_eol() {
         let mut ed = Editor::new();
         ed.set_lines("hello world");
@@ -4319,6 +4346,16 @@ mod tests {
         ed.set_lines("n = -3");
         feed(&mut ed, &[key_char('$'), key_ctrl('a')]);
         assert_eq!(ed.text(), "n = -2");
+    }
+
+    #[test]
+    fn increment_mid_number_uses_whole_run() {
+        let mut ed = Editor::new();
+        ed.set_lines("x = 99");
+        // `$` parks the cursor on the last digit, mid-run. <C-a> must operate on
+        // the whole `99`, yielding `100` rather than `910`.
+        feed(&mut ed, &[key_char('$'), key_ctrl('a')]);
+        assert_eq!(ed.text(), "x = 100");
     }
 
     #[test]

@@ -1787,6 +1787,7 @@ fn bind_vim_normal_no_op(builder: &mut EditorRouterBuilder) {
         .key("u", EditorAction::Undo)
         .key("C-r", EditorAction::Redo)
         .key("D", EditorAction::DeleteMotion(Motion::LineEnd))
+        .key("C-k", EditorAction::DeleteMotion(Motion::LineEnd))
         .key("C", EditorAction::ChangeMotion(Motion::LineEnd))
         .key("Y", EditorAction::YankMotion(Motion::LineEnd))
         .key("~", EditorAction::ToggleCaseChar)
@@ -1800,6 +1801,7 @@ fn bind_vim_normal_no_op(builder: &mut EditorRouterBuilder) {
 
 fn bind_vim_insert(builder: &mut EditorRouterBuilder) {
     let mut b = Binder::new(builder, LayerId::BASE, Filter::new(MODE_INSERT));
+    bind_cursor_navigation(&mut b);
     b.key("Esc", EditorAction::ExitInsert)
         .key("Enter", EditorAction::InsertNewline)
         .key("S-Enter", EditorAction::InsertNewline)
