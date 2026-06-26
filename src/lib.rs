@@ -92,6 +92,7 @@ pub mod event;
 mod sys;
 pub mod vt;
 pub mod widget;
+pub use sys::size::terminal_size_fd as terminal_size;
 pub use display_rect::{Ellipsis, HAlign, RenderProperties, VAlign};
 pub use features::{DEFAULT_TERMINAL_FEATURE_QUERY_TIMEOUT, TerminalFeatures};
 
