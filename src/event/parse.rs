@@ -7,7 +7,7 @@ use crate::{
         KeyModifiers, KeyboardEnhancementFlags, MouseButton, MouseEvent, MouseEventKind,
         PrimaryDeviceAttributes, TerminfoResponse, polling::resize_count,
     },
-    vt::ClipboardSelection,
+    vt::{ClipboardSelection, CursorShape},
 };
 
 /// Buffered terminal event reader and parser.
@@ -316,7 +316,11 @@ pub fn parse_event(buffer: &[u8], is_raw: bool) -> ParseResult {
                 }
                 b'[' => parse_csi(buffer, is_raw),
                 b']' => parse_osc(buffer),
-                b'P' if is_xtgettcap_response_prefix(buffer) => parse_dcs(buffer),
+                b'P' if is_xtgettcap_response_prefix(buffer)
+                    || is_decrqss_cursor_style_response_prefix(buffer) =>
+                {
+                    parse_dcs(buffer)
+                }
                 b'\x1B' => ParseResult::Event {
                     consumed: 2,
                     event: pressed(KeyCode::Esc),
@@ -501,6 +505,10 @@ fn is_xtgettcap_response_prefix(buffer: &[u8]) -> bool {
     buffer.starts_with(b"\x1bP1+r") || buffer.starts_with(b"\x1bP0+r")
 }
 
+fn is_decrqss_cursor_style_response_prefix(buffer: &[u8]) -> bool {
+    buffer.starts_with(b"\x1bP1$r") || buffer.starts_with(b"\x1bP0$r")
+}
+
 pub(crate) fn parse_osc(buffer: &[u8]) -> ParseResult {
     assert!(buffer.starts_with(b"\x1B]")); // ESC ]
 
@@ -536,9 +544,52 @@ pub(crate) fn parse_dcs(buffer: &[u8]) -> ParseResult {
         return parse_xtgettcap_response(event_buffer, consumed);
     }
 
+    if event_buffer.starts_with(b"1$r") || event_buffer.starts_with(b"0$r") {
+        return parse_decrqss_cursor_style(event_buffer, consumed);
+    }
+
     ParseResult::Error {
         consumed,
         error: ParseError::CouldNotParse,
+    }
+}
+
+/// Parses a DECRPSS reply to a DECRQSS cursor-style query.
+///
+/// A valid reply is `1$r<Ps> q`, where `<Ps>` is the DECSCUSR argument. A `0$r`
+/// reply means the terminal rejected the request, which is consumed and dropped.
+fn parse_decrqss_cursor_style(event_buffer: &[u8], consumed: u32) -> ParseResult {
+    let error = ParseResult::Error {
+        consumed,
+        error: ParseError::CouldNotParse,
+    };
+
+    if !event_buffer.starts_with(b"1$r") {
+        return error;
+    }
+
+    let body = &event_buffer[3..];
+    let mut value = 0u8;
+    let mut index = 0;
+    while let Some(&byte) = body.get(index) {
+        if !byte.is_ascii_digit() {
+            break;
+        }
+        value = value.saturating_mul(10).saturating_add(byte - b'0');
+        index += 1;
+    }
+
+    if body.get(index) != Some(&b' ') || body.get(index + 1) != Some(&b'q') {
+        return error;
+    }
+
+    let Some(shape) = CursorShape::from_decscusr(value) else {
+        return error;
+    };
+
+    ParseResult::Event {
+        consumed,
+        event: InternalEvent::Event(Event::CursorStyleReport(shape)),
     }
 }
 
@@ -1727,6 +1778,93 @@ mod tests {
                     value: None,
                 })
             }
+        );
+    }
+
+    #[test]
+    fn test_parse_decrqss_cursor_style_response() {
+        let input = b"\x1BP1$r2 q\x1B\\";
+        assert_eq!(
+            parse_dcs(input),
+            ParseResult::Event {
+                consumed: input.len() as u32,
+                event: InternalEvent::Event(Event::CursorStyleReport(CursorShape::SteadyBlock)),
+            }
+        );
+
+        let input = b"\x1BP1$r q\x1B\\";
+        assert_eq!(
+            parse_dcs(input),
+            ParseResult::Event {
+                consumed: input.len() as u32,
+                event: InternalEvent::Event(Event::CursorStyleReport(CursorShape::Default)),
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_decrqss_cursor_style_unsupported_is_consumed() {
+        let input = b"\x1BP0$r q\x1B\\";
+        assert_eq!(
+            parse_dcs(input),
+            ParseResult::Error {
+                consumed: input.len() as u32,
+                error: ParseError::CouldNotParse,
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_decrqss_cursor_style_incomplete() {
+        assert_eq!(parse_dcs(b"\x1BP1$r2 q"), ParseResult::Incomplete);
+        assert_eq!(parse_event(b"\x1BP1$r2 q", true), ParseResult::Incomplete);
+    }
+
+    #[test]
+    fn cursor_style_report_surfaces_through_next_and_preserves_input() {
+        let mut events = Events::default();
+        events.buffer = b"a\x1BP1$r5 q\x1B\\b".to_vec();
+
+        assert_eq!(
+            events.next(true),
+            Some(Event::Key(KeyEvent {
+                code: KeyCode::Char('a'),
+                modifiers: KeyModifiers::empty(),
+                kind: KeyEventKind::Press,
+                state: KeyEventState::empty(),
+            }))
+        );
+        assert_eq!(
+            events.next(true),
+            Some(Event::CursorStyleReport(CursorShape::BlinkingBar))
+        );
+        assert_eq!(
+            events.next(true),
+            Some(Event::Key(KeyEvent {
+                code: KeyCode::Char('b'),
+                modifiers: KeyModifiers::empty(),
+                kind: KeyEventKind::Press,
+                state: KeyEventState::empty(),
+            }))
+        );
+    }
+
+    #[test]
+    fn terminfo_scan_skips_cursor_style_dcs() {
+        let mut events = Events::default();
+        events.buffer = b"\x1BP1$r2 q\x1B\\\x1BP1+r4d73=1b5d35323b3b1b5c\x1B\\".to_vec();
+
+        assert_eq!(
+            events.take_terminfo_response("Ms"),
+            Some(TerminfoResponse {
+                capability: "Ms".to_string(),
+                found: true,
+                value: Some("\x1b]52;;\x1b\\".to_string()),
+            })
+        );
+        assert_eq!(
+            events.next(true),
+            Some(Event::CursorStyleReport(CursorShape::SteadyBlock))
         );
     }
 

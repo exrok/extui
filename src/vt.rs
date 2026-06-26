@@ -416,7 +416,7 @@ pub const CLEAR_LINE_TO_LEFT: &[u8] = b"\x1b[1K";
 /// [`Buffer::set_cursor`] to have it managed alongside the cell diff.
 ///
 /// [`Buffer::set_cursor`]: crate::Buffer::set_cursor
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialOrd, Ord, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum CursorShape {
     /// Terminal default. `ESC[0 q`.
@@ -434,6 +434,25 @@ pub enum CursorShape {
     BlinkingBar = 5,
     /// Steady bar. `ESC[6 q`.
     SteadyBar = 6,
+}
+
+impl CursorShape {
+    /// Maps a DECSCUSR numeric argument to a shape.
+    ///
+    /// Returns `None` for arguments outside the `0..=6` range.
+    pub fn from_decscusr(value: u8) -> Option<Self> {
+        let shape = match value {
+            0 => CursorShape::Default,
+            1 => CursorShape::BlinkingBlock,
+            2 => CursorShape::SteadyBlock,
+            3 => CursorShape::BlinkingUnderline,
+            4 => CursorShape::SteadyUnderline,
+            5 => CursorShape::BlinkingBar,
+            6 => CursorShape::SteadyBar,
+            _ => return None,
+        };
+        Some(shape)
+    }
 }
 
 /// Sets the terminal cursor shape (DECSCUSR). VT sequence `ESC[<n> q`.
@@ -467,6 +486,17 @@ pub const BELL: &[u8] = b"\x07";
 
 /// Queries primary device attributes (DA1). VT sequence `ESC[c`.
 pub const QUERY_PRIMARY_DEVICE_ATTRIBUTES: &[u8] = b"\x1b[c";
+
+/// Queries the current cursor style (DECRQSS for DECSCUSR).
+///
+/// VT sequence `ESC P $ q SP q ESC \`. The terminal replies with a DECRPSS
+/// response that the input parser surfaces as
+/// [`Event::CursorStyleReport`](crate::event::Event::CursorStyleReport).
+///
+/// As a `&[u8]` this implements [`BufferWrite`], so batch it with other startup
+/// queries into one buffer and dispatch them with a single write instead of one
+/// write per query.
+pub const QUERY_CURSOR_STYLE: &[u8] = b"\x1bP$q q\x1b\\";
 
 /// Enables bracketed paste mode. VT sequence `ESC[?2004h`.
 pub const ENABLE_BRACKETED_PASTE: &[u8] = b"\x1b[?2004h";

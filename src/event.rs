@@ -214,6 +214,12 @@ pub enum Event {
     /// A resize event with new dimensions after resize (columns, rows).
     /// **Note** that resize events can occur in batches.
     Resized,
+    /// The terminal reported its current cursor style.
+    ///
+    /// This is the DECRPSS reply to a [`QUERY_CURSOR_STYLE`](crate::vt::QUERY_CURSOR_STYLE)
+    /// query. Use it to capture the cursor shape at startup and restore it on
+    /// exit with [`Terminal::set_restore_cursor_style`](crate::Terminal::set_restore_cursor_style).
+    CursorStyleReport(crate::vt::CursorShape),
 }
 
 impl Event {

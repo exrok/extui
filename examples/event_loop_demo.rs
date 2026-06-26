@@ -57,6 +57,7 @@ fn main() -> std::io::Result<()> {
                     let (new_w, new_h) = term.size()?;
                     buf.resize(new_w, new_h);
                 }
+                Event::CursorStyleReport(_) => {}
             }
         }
     }

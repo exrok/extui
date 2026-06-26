@@ -2534,6 +2534,7 @@ pub struct Terminal {
     fd: std::mem::ManuallyDrop<std::fs::File>,
     termios: sys::Termios,
     flags: TerminalFlags,
+    restore_cursor_style: Option<CursorShape>,
 }
 
 fn write_enable_terminal_flags(
@@ -2643,6 +2644,7 @@ impl Terminal {
             fd: stdout,
             flags,
             termios,
+            restore_cursor_style: None,
         })
     }
     /// Opens the terminal using stdout.
@@ -2666,7 +2668,19 @@ impl Terminal {
             fd: stdout,
             flags,
             termios,
+            restore_cursor_style: None,
         })
+    }
+    /// Sets the cursor shape to restore when the terminal is dropped.
+    ///
+    /// Pass `None` (the default) to leave the cursor untouched on teardown. The
+    /// intended use is to capture the terminal's cursor style at startup with a
+    /// [`QUERY_CURSOR_STYLE`](crate::vt::QUERY_CURSOR_STYLE) query, store the
+    /// reported [`Event::CursorStyleReport`](crate::event::Event::CursorStyleReport)
+    /// shape here, and have it written back on exit. Restoring an explicit shape
+    /// only when one was reported avoids clobbering a cursor the shell manages.
+    pub fn set_restore_cursor_style(&mut self, shape: Option<CursorShape>) {
+        self.restore_cursor_style = shape;
     }
     /// Returns the terminal size as (columns, rows).
     pub fn size(&self) -> std::io::Result<(u16, u16)> {
@@ -2677,6 +2691,11 @@ impl Terminal {
 impl Drop for Terminal {
     fn drop(&mut self) {
         let _ = write_disable_terminal_flags(&mut self.fd, self.flags);
+        if let Some(shape) = self.restore_cursor_style {
+            let mut buffer = Vec::new();
+            SetCursorStyle(shape).write_to_buffer(&mut buffer);
+            let _ = self.fd.write_all(&buffer);
+        }
         let _ = sys::attr::set_terminal_attr(self.fd.as_fd(), &self.termios);
     }
 }
