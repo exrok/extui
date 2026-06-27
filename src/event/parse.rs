@@ -40,6 +40,10 @@ impl Events {
     /// # Errors
     ///
     /// Returns an error if the read operation fails.
+    ///
+    /// Returns [`std::io::ErrorKind::BrokenPipe`] at end of file. A closed
+    /// terminal stays readable through `poll`, so callers that loop on
+    /// poll-then-read propagate this with `?` and exit instead of spinning.
     pub fn read_from(&mut self, fd: &impl AsRawFd) -> std::io::Result<()> {
         fn read_from_inner(events: &mut Events, fd: i32) -> std::io::Result<()> {
             if events.read >= events.buffer.len() {
@@ -56,6 +60,14 @@ impl Events {
                 let ret = libc::read(fd, target.as_mut_ptr() as *mut _, target.len());
                 if ret < 0 {
                     return Err(std::io::Error::last_os_error());
+                }
+                // A closed terminal leaves its fd readable at EOF, so `poll`
+                // keeps reporting POLLIN and `read` keeps returning 0. Surface
+                // that as a hangup so a poll-then-read loop exits instead of
+                // spinning at 100% CPU. `target` always has room (>= 16 bytes),
+                // so a 0 return is genuine EOF, never a zero-length request.
+                if ret == 0 {
+                    return Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe));
                 }
                 let len = events.buffer.len();
                 events.buffer.set_len(len + ret as usize);
@@ -1392,6 +1404,28 @@ fn parse_utf8_char(buffer: &[u8]) -> Result<Option<(char, usize)>, ParseError> {
 mod tests {
     use super::*;
     use crate::event::{KeyEventState, KeyModifiers, MouseButton, MouseEvent};
+
+    /// A closed terminal leaves its fd readable at EOF: `poll` reports
+    /// `POLLIN` so it keeps returning `ReadReady`, and each `read` returns
+    /// `0`. If `read_from` swallows that as `Ok`, a poll-then-read loop
+    /// spins at 100% CPU forever. The read must surface EOF as a hangup so
+    /// callers propagate it and exit.
+    #[test]
+    fn read_from_surfaces_eof_as_hangup() {
+        let (reader, writer) = std::io::pipe().unwrap();
+        drop(writer);
+        let mut events = Events::default();
+        let result = events.read_from(&reader);
+        assert!(
+            result.is_err(),
+            "read_from on a hung-up fd must error, not return Ok and spin"
+        );
+        assert_eq!(
+            result.unwrap_err().kind(),
+            std::io::ErrorKind::BrokenPipe,
+            "EOF must surface as BrokenPipe"
+        );
+    }
 
     #[test]
     fn test_esc_key() {
