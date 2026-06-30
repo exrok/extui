@@ -559,6 +559,10 @@ impl TextBuffer {
         self.text.slice(0..self.len()).into_owned()
     }
 
+    pub(crate) fn slice(&self, range: Range<usize>) -> Cow<'_, str> {
+        self.text.slice(range)
+    }
+
     /// Replaces the entire contents with `s`.
     ///
     /// A trailing `\n` in `s` introduces a trailing empty line,

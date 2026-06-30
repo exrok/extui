@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 
-use extui::{Buffer, Rect, event::KeyEvent};
+use extui::{Buffer, Rect, Style, event::KeyEvent};
 use extui_bindings::{InputKey, LayerId, Payload};
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -124,6 +124,32 @@ impl TabSettings {
     }
 }
 
+/// Inline virtual text for a completion candidate.
+///
+/// The replacement is not inserted until [`Editor::accept_inline_completion`]
+/// is called. During render, the editor compares `replace` with the current
+/// buffer contents and paints only the suffix that is not already typed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InlineCompletion {
+    /// Buffer span to replace when the completion is accepted.
+    pub replace: Span,
+    /// Full replacement text for `replace`.
+    pub replacement: String,
+    /// Style for the virtual suffix. It is patched over the editor's text style.
+    pub style: Style,
+}
+
+impl InlineCompletion {
+    /// Creates an inline completion candidate.
+    pub fn new(replace: Span, replacement: impl Into<String>, style: Style) -> Self {
+        Self {
+            replace,
+            replacement: replacement.into(),
+            style,
+        }
+    }
+}
+
 /// Embeddable text editor widget.
 ///
 /// Owns the buffer, cursor, mode state, undo history, and a
@@ -191,6 +217,7 @@ pub struct Editor {
     /// the buffer while tracking was on.
     replacements_reset_pending: bool,
     marks: Marks,
+    inline_completion: Option<InlineCompletion>,
     pending_block_change: Option<PendingBlockChange>,
     router: EditorRouter,
     ctx: EditorContext,
@@ -255,6 +282,7 @@ impl Editor {
             track_replacements: false,
             replacements_reset_pending: false,
             marks: Marks::new(),
+            inline_completion: None,
             pending_block_change: None,
             router,
             ctx,
@@ -619,6 +647,65 @@ impl Editor {
         self.dirty = true;
     }
 
+    /// Installs or clears an inline completion candidate.
+    ///
+    /// Rendering shows the untyped suffix only when the cursor is at the end of
+    /// `completion.replace` and the current text in that span is a prefix of the
+    /// replacement. Stale candidates therefore fail closed if the host forgets to
+    /// refresh them after an edit or cursor move.
+    pub fn set_inline_completion(&mut self, completion: Option<InlineCompletion>) {
+        if self.inline_completion == completion {
+            return;
+        }
+        self.inline_completion = completion;
+        self.dirty = true;
+    }
+
+    /// Returns the active inline completion candidate, if any.
+    pub fn inline_completion(&self) -> Option<&InlineCompletion> {
+        self.inline_completion.as_ref()
+    }
+
+    /// Clears the active inline completion candidate.
+    pub fn clear_inline_completion(&mut self) {
+        self.set_inline_completion(None);
+    }
+
+    /// Accepts the active inline completion, replacing its span with the full
+    /// candidate text.
+    ///
+    /// Returns `false` when there is no candidate or it no longer applies to
+    /// the current cursor/text state.
+    pub fn accept_inline_completion(&mut self) -> bool {
+        let Some(completion) = self.inline_completion.take() else {
+            return false;
+        };
+        if self.inline_completion_suffix(&completion).is_none() {
+            self.inline_completion = Some(completion);
+            return false;
+        }
+        self.replace_range(completion.replace, &completion.replacement);
+        true
+    }
+
+    fn inline_completion_suffix<'a>(&'a self, completion: &'a InlineCompletion) -> Option<&'a str> {
+        if completion.replace.end() != self.cursor_offset() {
+            return None;
+        }
+        let end = completion.replace.end();
+        if end > self.text_len() {
+            return None;
+        }
+        let typed = self
+            .buf
+            .slice(completion.replace.offset as usize..end as usize);
+        if !completion.replacement.starts_with(typed.as_ref()) {
+            return None;
+        }
+        let suffix = &completion.replacement[typed.len()..];
+        (!suffix.is_empty()).then_some(suffix)
+    }
+
     /// Maps a buffer byte range to screen rectangles inside `rect`.
     ///
     /// The produced rectangles match the layout used by
@@ -833,6 +920,10 @@ impl Editor {
         let wrap = self.effective_wrap();
         self.last_viewport_h = rect.h;
         self.ensure_cursor_visible(rect);
+        let inline_completion = self.inline_completion.as_ref().and_then(|completion| {
+            self.inline_completion_suffix(completion)
+                .map(|suffix| (suffix, completion.style))
+        });
         render::render(
             buf,
             rect,
@@ -846,6 +937,7 @@ impl Editor {
             self.horizontal_scroll,
             wrap,
             runs,
+            inline_completion,
         );
         self.dirty = false;
     }
@@ -3174,7 +3266,7 @@ fn pair_delimiters(kind: PairKind) -> (char, char) {
 mod tests {
     use super::*;
     use extui::{
-        Buffer, Cell, Grid, Rect,
+        Buffer, Cell, Grid, Rect, Style,
         event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers},
     };
 
@@ -3398,6 +3490,69 @@ mod tests {
         ed.set_theme(alt);
         assert!(ed.poll_updates());
         assert_eq!(ed.theme().name, "Alt");
+    }
+
+    #[test]
+    fn inline_completion_renders_untyped_suffix_without_changing_text() {
+        let mut ed = Editor::new();
+        ed.set_lines("/rep");
+        ed.enter_insert_mode();
+        ed.set_cursor_offset(4);
+        ed.set_inline_completion(Some(InlineCompletion::new(
+            Span::new(0, 4),
+            "/report-bug",
+            Style::DEFAULT,
+        )));
+
+        let rows = render_rows(
+            &mut ed,
+            Rect {
+                x: 0,
+                y: 0,
+                w: 16,
+                h: 1,
+            },
+        );
+
+        assert!(rows[0].starts_with("/report-bug"));
+        assert_eq!(ed.text(), "/rep");
+    }
+
+    #[test]
+    fn accept_inline_completion_replaces_span() {
+        let mut ed = Editor::new();
+        ed.set_lines("/rep");
+        ed.enter_insert_mode();
+        ed.set_cursor_offset(4);
+        ed.set_inline_completion(Some(InlineCompletion::new(
+            Span::new(0, 4),
+            "/report-bug",
+            Style::DEFAULT,
+        )));
+
+        assert!(ed.accept_inline_completion());
+
+        assert_eq!(ed.text(), "/report-bug");
+        assert_eq!(ed.cursor_offset(), "/report-bug".len() as u32);
+        assert!(ed.inline_completion().is_none());
+    }
+
+    #[test]
+    fn stale_inline_completion_is_not_accepted() {
+        let mut ed = Editor::new();
+        ed.set_lines("/rep x");
+        ed.enter_insert_mode();
+        ed.set_cursor_offset(6);
+        ed.set_inline_completion(Some(InlineCompletion::new(
+            Span::new(0, 4),
+            "/report-bug",
+            Style::DEFAULT,
+        )));
+
+        assert!(!ed.accept_inline_completion());
+
+        assert_eq!(ed.text(), "/rep x");
+        assert!(ed.inline_completion().is_some());
     }
 
     #[test]

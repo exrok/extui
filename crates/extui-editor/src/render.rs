@@ -169,6 +169,7 @@ pub fn render(
     horizontal_scroll: u16,
     wrap: bool,
     runs: &[StyleRun],
+    inline_completion: Option<(&str, Style)>,
 ) {
     if rect.is_empty() {
         return;
@@ -220,6 +221,24 @@ pub fn render(
             tabstop,
             wrap,
             layout.as_ref(),
+        );
+    }
+
+    if let Some((suffix, style)) = inline_completion {
+        paint_inline_completion(
+            buf,
+            rect,
+            text,
+            theme,
+            tabstop,
+            cursor,
+            mode,
+            scroll_offset,
+            horizontal_scroll,
+            wrap,
+            layout.as_ref(),
+            suffix,
+            style,
         );
     }
 
@@ -926,6 +945,176 @@ pub(crate) fn visible_range_rects(
     rects.into_iter()
 }
 
+fn paint_inline_completion(
+    buf: &mut Buffer,
+    rect: Rect,
+    text: &TextBuffer,
+    theme: &EditorTheme,
+    tabstop: u16,
+    cursor: Cursor,
+    mode: Mode,
+    scroll_offset: u16,
+    horizontal_scroll: u16,
+    wrap: bool,
+    layout: Option<&WrapLayout>,
+    suffix: &str,
+    style: Style,
+) {
+    if rect.is_empty() || suffix.is_empty() {
+        return;
+    }
+    let line = text.line(cursor.row);
+    let start_col = cursor_display_col(line.as_ref(), cursor.col, mode, tabstop) as u32;
+    let style = theme.text.patch(style);
+    if wrap {
+        let Some(layout) = layout else {
+            return;
+        };
+        paint_inline_completion_wrapped(
+            buf,
+            rect,
+            layout,
+            cursor.row,
+            scroll_offset,
+            start_col,
+            suffix,
+            style,
+            tabstop,
+        );
+    } else {
+        let Some(y) = screen_row(cursor.row, scroll_offset, rect) else {
+            return;
+        };
+        paint_inline_completion_nowrap(
+            buf,
+            rect,
+            y,
+            horizontal_scroll as u32,
+            start_col,
+            suffix,
+            style,
+            tabstop,
+        );
+    }
+}
+
+fn paint_inline_completion_wrapped(
+    buf: &mut Buffer,
+    rect: Rect,
+    layout: &WrapLayout,
+    cursor_row: usize,
+    scroll_offset: u16,
+    start_col: u32,
+    suffix: &str,
+    style: Style,
+    tabstop: u16,
+) {
+    let width = rect.w.max(1) as u32;
+    let line_visual_base = layout.rows_before(cursor_row);
+    let mut col = start_col;
+    for g in suffix.graphemes(true) {
+        if g == "\n" {
+            break;
+        }
+        if g == "\t" {
+            let next = next_tab_stop(col.min(u16::MAX as u32) as u16, tabstop) as u32;
+            paint_inline_spaces_wrapped(
+                buf,
+                rect,
+                line_visual_base,
+                scroll_offset,
+                col,
+                next.max(col),
+                style,
+                width,
+            );
+            col = next.max(col);
+            continue;
+        }
+        let w = grapheme_width(g) as u32;
+        if w == 0 {
+            continue;
+        }
+        let next = col.saturating_add(w);
+        if next <= ((col / width) + 1) * width {
+            let visual_row = line_visual_base + col / width;
+            if visual_row >= scroll_offset as u32
+                && visual_row < scroll_offset as u32 + rect.h as u32
+            {
+                buf.set_string(
+                    rect.x + (col % width) as u16,
+                    rect.y + (visual_row - scroll_offset as u32) as u16,
+                    g,
+                    style,
+                );
+            }
+        }
+        col = next;
+    }
+}
+
+fn paint_inline_spaces_wrapped(
+    buf: &mut Buffer,
+    rect: Rect,
+    line_visual_base: u32,
+    scroll_offset: u16,
+    mut start: u32,
+    end: u32,
+    style: Style,
+    width: u32,
+) {
+    while start < end {
+        let seg = start / width;
+        let seg_end = end.min((seg + 1) * width);
+        let visual_row = line_visual_base + seg;
+        if visual_row >= scroll_offset as u32 && visual_row < scroll_offset as u32 + rect.h as u32 {
+            let y = rect.y + (visual_row - scroll_offset as u32) as u16;
+            for col in start..seg_end {
+                buf.set_string(rect.x + (col % width) as u16, y, " ", style);
+            }
+        }
+        start = seg_end;
+    }
+}
+
+fn paint_inline_completion_nowrap(
+    buf: &mut Buffer,
+    rect: Rect,
+    y: u16,
+    horizontal_scroll: u32,
+    start_col: u32,
+    suffix: &str,
+    style: Style,
+    tabstop: u16,
+) {
+    let right = horizontal_scroll + rect.w as u32;
+    let mut col = start_col;
+    for g in suffix.graphemes(true) {
+        if g == "\n" {
+            break;
+        }
+        if g == "\t" {
+            let next = next_tab_stop(col.min(u16::MAX as u32) as u16, tabstop) as u32;
+            for c in col..next.max(col) {
+                if c >= horizontal_scroll && c < right {
+                    buf.set_string(rect.x + (c - horizontal_scroll) as u16, y, " ", style);
+                }
+            }
+            col = next.max(col);
+            continue;
+        }
+        let w = grapheme_width(g) as u32;
+        if w == 0 {
+            continue;
+        }
+        let next = col.saturating_add(w);
+        if col >= horizontal_scroll && next <= right {
+            buf.set_string(rect.x + (col - horizontal_scroll) as u16, y, g, style);
+        }
+        col = next;
+    }
+}
+
 fn screen_row(row: usize, scroll_offset: u16, rect: Rect) -> Option<u16> {
     let scroll = scroll_offset as usize;
     if row < scroll {
@@ -1232,6 +1421,7 @@ mod tests {
             0,
             false,
             &[],
+            None,
         );
         let cells = db.current().cells().to_vec();
         let style = cells[0].style();
@@ -1271,6 +1461,7 @@ mod tests {
             0,
             false,
             &runs,
+            None,
         );
         let cells = db.current().cells().to_vec();
         let style = cells[0].style();
@@ -1303,6 +1494,7 @@ mod tests {
             0,
             false,
             &[],
+            None,
         );
         let cells = db.current().cells().to_vec();
         assert_eq!(cells[0].style().bg(), Some(Color::rgb(1, 2, 3)));
@@ -1335,6 +1527,7 @@ mod tests {
             0,
             true,
             &[],
+            None,
         );
     }
 
@@ -1415,6 +1608,7 @@ mod tests {
             0,
             true,
             &[],
+            None,
         );
         let cells = db.current().cells();
         for y in 0..3 {
@@ -1472,6 +1666,7 @@ mod tests {
             0,
             true,
             &runs,
+            None,
         );
         // `let` keyword is on row 0 cols 0..=2.
         let cells = db.current().cells();

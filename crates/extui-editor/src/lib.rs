@@ -49,7 +49,7 @@ mod theme;
 mod visual;
 
 pub use buffer::{Replacement, Span, TextBuffer, TrackedChange};
-pub use editor::{Editor, TabSettings};
+pub use editor::{Editor, InlineCompletion, TabSettings};
 pub use mode::Mode;
 pub use render::StyleRun;
 pub use theme::{EditorTheme, SelectionTheme};
