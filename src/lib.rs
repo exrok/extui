@@ -92,9 +92,9 @@ pub mod event;
 mod sys;
 pub mod vt;
 pub mod widget;
-pub use sys::size::terminal_size_fd as terminal_size;
 pub use display_rect::{Ellipsis, HAlign, RenderProperties, VAlign};
 pub use features::{DEFAULT_TERMINAL_FEATURE_QUERY_TIMEOUT, TerminalFeatures};
+pub use sys::size::terminal_size_fd as terminal_size;
 
 /// Writes multiple VT escape sequences to a byte buffer.
 ///
@@ -1461,6 +1461,25 @@ impl SplitRule for f64 {
     }
 }
 
+/// Whether emitting `new` over `current` issues a full `\x1b[0m` reset.
+///
+/// A reset lands the foreground on default as a side effect, so it lets the
+/// caller pick the cheapest foreground for a glyph that hides it. The
+/// foreground is excluded from the decision — it is the value being chosen,
+/// so its removal must not be what tips the emission into a reset.
+fn emits_full_reset(current: Style, new: Style) -> bool {
+    let removed = ((new.0 | current.0) ^ new.0) & !Style::FG_ALL_MASK;
+    if new.is_palette() {
+        !(current.is_palette()
+            && current.palette_index() == new.palette_index()
+            && removed & Style::HAS_BG == 0)
+    } else if current.is_palette() {
+        true
+    } else {
+        removed & (Style::HAS_BG | Modifier::ALL.0 as u64) != 0
+    }
+}
+
 fn write_palette_or_diff(
     current: Style,
     new: Style,
@@ -1469,8 +1488,23 @@ fn write_palette_or_diff(
     ignore_fg: bool,
 ) -> Style {
     let mut new = new;
-    if ignore_fg {
-        new.0 = (new.0 & !Style::FG_ALL_MASK) | (current.0 & Style::FG_ALL_MASK);
+    // A space paints no glyph, so its foreground is a free variable we pick to
+    // minimize output — but only when the cell truly hides it. A blank-visible
+    // modifier (reverse, underline, blink, strikethrough) makes the foreground
+    // show, and those bits are only meaningful on non-palette styles (a palette
+    // style stores its index in the same bits), so substitute there as before.
+    if ignore_fg && (new.is_palette() || el_equivalent(new)) {
+        // When a full reset fires anyway, the foreground lands on default for
+        // free; matching it (default) avoids re-sending the prior color after
+        // the reset. Otherwise an incremental update keeps the current
+        // foreground and emits nothing for it. Either way the returned style
+        // matches the terminal, so later diffs stay accurate.
+        let substitute_fg = if emits_full_reset(current, new) {
+            0
+        } else {
+            current.0 & Style::FG_ALL_MASK
+        };
+        new.0 = (new.0 & !Style::FG_ALL_MASK) | substitute_fg;
     }
     if new.is_palette() {
         if current == new {
@@ -4297,6 +4331,111 @@ mod test {
         }
     }
 
+    /// Regression for devsm's group selector prompt. It writes a short
+    /// `group> ` label, then a single styled blank cursor cell, then leaves
+    /// the rest of the input row as default blanks over previous content. The
+    /// diff clear-line shortcut must not leave cursor or label styling across
+    /// the erased old content.
+    #[test]
+    fn render_diff_prompt_cursor_el_clears_to_default_bg() {
+        let mut db = Buffer::new(120, 2);
+        let mut term = vt100::Parser::new(2, 120, 0);
+        let cursor = AnsiColor::Grey[28].with_fg(AnsiColor::Grey[2]);
+
+        db.set_style(
+            Rect {
+                x: 0,
+                y: 0,
+                w: 40,
+                h: 1,
+            },
+            AnsiColor(153).with_fg(AnsiColor::Black),
+        );
+        db.set_string(
+            0,
+            0,
+            &"x".repeat(40),
+            AnsiColor(153).with_fg(AnsiColor::Black),
+        );
+        db.render_internal();
+        term.process(&db.buf);
+        db.buf.clear();
+
+        db.set_string(0, 0, "group> ", AnsiColor::Grey[16].as_fg());
+        db.set_style(
+            Rect {
+                x: 7,
+                y: 0,
+                w: 1,
+                h: 1,
+            },
+            cursor,
+        );
+        db.render_internal();
+        term.process(&db.buf);
+
+        assert_eq!(
+            term.screen().cell(0, 7).unwrap().bgcolor(),
+            vt100::Color::Idx(254)
+        );
+        for x in 8..40 {
+            let cell = term.screen().cell(0, x).unwrap();
+            assert_eq!(
+                cell.bgcolor(),
+                vt100::Color::Default,
+                "cursor background leaked into column {x}"
+            );
+            assert_eq!(
+                cell.fgcolor(),
+                vt100::Color::Default,
+                "cursor foreground leaked into column {x}"
+            );
+        }
+
+        db.buf.clear();
+        db.set_string(0, 0, "group> ", AnsiColor::Grey[16].as_fg());
+        db.set_string(7, 0, &"a".repeat(50), Style::DEFAULT);
+        db.set_style(
+            Rect {
+                x: 57,
+                y: 0,
+                w: 1,
+                h: 1,
+            },
+            cursor,
+        );
+        db.render_internal();
+        term.process(&db.buf);
+
+        db.buf.clear();
+        db.set_string(0, 0, "group> ", AnsiColor::Grey[16].as_fg());
+        db.set_style(
+            Rect {
+                x: 7,
+                y: 0,
+                w: 1,
+                h: 1,
+            },
+            cursor,
+        );
+        db.render_internal();
+        term.process(&db.buf);
+
+        for x in 8..58 {
+            let cell = term.screen().cell(0, x).unwrap();
+            assert_eq!(
+                cell.bgcolor(),
+                vt100::Color::Default,
+                "cursor background remained after delete at column {x}"
+            );
+            assert_eq!(
+                cell.fgcolor(),
+                vt100::Color::Default,
+                "cursor foreground remained after delete at column {x}"
+            );
+        }
+    }
+
     /// A space run styled with a blank-visible modifier must be written
     /// as real spaces: BCE terminals fill `\x1b[K` with the background
     /// color only, dropping underline/reverse/strikethrough.
@@ -4354,6 +4493,103 @@ mod test {
             out.contains("\x1b[K"),
             "plain bg space run must keep the EL shortcut: {out:?}"
         );
+    }
+
+    /// A blank run that shares its background with the preceding glyph but
+    /// differs in foreground must not emit a foreground change: the space
+    /// hides the foreground, so the diff keeps the current one and saves the
+    /// bytes. Regression for the `ignore_fg` space optimization — with it
+    /// disabled the redundant `38;5;120` is emitted.
+    #[test]
+    fn render_diff_blank_run_omits_hidden_fg_change() {
+        let mut db = Buffer::new(120, 1);
+        let mut term = vt100::Parser::new(1, 120, 0);
+        db.render_internal();
+        term.process(&db.buf);
+        db.buf.clear();
+
+        // Ten glyphs on a blue bg with a red fg, then a 50-wide blue-bg run
+        // whose fg is green. The green never shows (spaces), so it must be
+        // omitted, while the blue bg must still paint the run.
+        db.set_string(
+            0,
+            0,
+            &"x".repeat(10),
+            AnsiColor(21).as_bg().with_fg(AnsiColor(196)),
+        );
+        db.set_style(
+            Rect {
+                x: 10,
+                y: 0,
+                w: 50,
+                h: 1,
+            },
+            AnsiColor(21).as_bg().with_fg(AnsiColor(120)),
+        );
+        db.render_internal();
+
+        let out = std::str::from_utf8(&db.buf).unwrap();
+        assert!(
+            !out.contains("38;5;120"),
+            "hidden fg of a blank run must not be emitted: {out:?}"
+        );
+
+        term.process(&db.buf);
+        for x in 10..60 {
+            assert_eq!(
+                term.screen().cell(0, x).unwrap().bgcolor(),
+                vt100::Color::Idx(21),
+                "blank run bg wrong at column {x}"
+            );
+        }
+    }
+
+    /// Under a blank-visible modifier the foreground shows through the blank
+    /// (reverse paints it as the visible color), so the `ignore_fg`
+    /// optimization must keep the real foreground rather than substituting the
+    /// preceding one. Regression for the reverse-video latent bug — naively
+    /// ignoring the fg here leaks the prior color into the run.
+    #[test]
+    fn render_diff_reversed_blank_run_keeps_fg() {
+        let mut db = Buffer::new(120, 1);
+        let mut term = vt100::Parser::new(1, 120, 0);
+        db.render_internal();
+        term.process(&db.buf);
+        db.buf.clear();
+
+        db.set_string(
+            0,
+            0,
+            &"x".repeat(10),
+            AnsiColor(21).as_bg().with_fg(AnsiColor(196)),
+        );
+        db.set_style(
+            Rect {
+                x: 10,
+                y: 0,
+                w: 50,
+                h: 1,
+            },
+            AnsiColor(21)
+                .as_bg()
+                .with_fg(AnsiColor(120))
+                .with_modifier(Modifier::REVERSED),
+        );
+        db.render_internal();
+        term.process(&db.buf);
+
+        for x in 10..60 {
+            let cell = term.screen().cell(0, x).unwrap();
+            assert!(
+                cell.inverse(),
+                "reversed blank lost its modifier at column {x}"
+            );
+            assert_eq!(
+                cell.fgcolor(),
+                vt100::Color::Idx(120),
+                "reversed blank must keep its own fg at column {x}"
+            );
+        }
     }
 
     fn fuzz_diff_vs_full(seed: u64, wide: bool) {
